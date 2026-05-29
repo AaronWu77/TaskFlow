@@ -6,8 +6,8 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "ios": "pnpm run build && npx cap sync ios && npx cap open ios",
-    "cap:sync": "pnpm run build && npx cap sync ios",
+    "ios": "npm run build && npx cap sync ios && npx cap open ios",
+    "cap:sync": "npm run build && npx cap sync ios",
     "cap:open": "npx cap open ios"
   },
   "dependencies": {
@@ -57,6 +57,7 @@
     "lucide-react": "0.487.0",
     "motion": "12.23.24",
     "next-themes": "0.4.6",
+    "pnpm": "^11.4.0",
     "react-day-picker": "8.10.1",
     "react-dnd": "16.0.1",
     "react-dnd-html5-backend": "16.0.1",
@@ -76,7 +77,8 @@
     "@tailwindcss/vite": "4.1.12",
     "@vitejs/plugin-react": "4.7.0",
     "tailwindcss": "4.1.12",
-    "vite": "6.3.5"
+    "typescript": "^6.0.3",
+    "vite": "^6.4.2"
   },
   "peerDependencies": {
     "react": "18.3.1",
