@@ -1,0 +1,41 @@
+
+  <!DOCTYPE html>
+  <html lang="en">
+    <head>
+      
+      <meta charset="UTF-8" />
+      <!-- viewport-fit=cover exposes safe area insets on iPhone notch/Dynamic Island -->
+      <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+      <title>TaskFlow</title>
+      <meta name="description" content="A personal task management app centered on flow — always showing you the one thing to focus on next." />
+      <meta name="robots" content="noindex, nofollow" />
+
+      <!-- PWA / Add to Home Screen -->
+      <link rel="manifest" href="/manifest.json" />
+      <meta name="theme-color" content="#4f46e5" />
+
+      <!-- iOS-specific PWA meta tags -->
+      <meta name="apple-mobile-web-app-capable" content="yes" />
+      <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+      <meta name="apple-mobile-web-app-title" content="TaskFlow" />
+      <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+
+      <style>
+        html, body { height: 100%; margin: 0; }
+        #root { height: 100%; }
+        /* Prevent content from being obscured by the status bar when status-bar-style
+           is black-translucent (the bar is transparent and overlays the content). */
+        body { background-color: #f4f5f7; }
+        body.dark { background-color: #0f1115; }
+      </style>
+      
+    </head>
+
+    <body>
+      
+      <div id="root"></div>
+      <script type="module" src="/src/main.tsx"></script>
+      
+    </body>
+  </html>
+  
