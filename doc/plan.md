@@ -1,5 +1,173 @@
 # TaskFlow 开发计划
 
+> 最后更新：2026-06-01（Round 3）
+
+---
+
+## 1. 功能目的
+
+### 问题
+1. **页面滚动 Bug**：iPhone 17 Pro Max 上无任务时页面仍可上下滑动。根因：滑动容器（Flow + Calendar 双面板并排）对整体内容设置了 `overflow-y-auto`，Calendar 面板超高时导致两个面板的父容器均可滚动。
+2. **无用户系统**：当前所有数据存 `localStorage`，无法跨设备同步，无法多用户使用。
+
+### 目标
+1. **P0 – 滚动修复**：Flow 面板（含空状态）完全不可滚动；Calendar 面板内部独立滚动。
+2. **P1 – 后端 + 登录**：开发 Node.js + Express + PostgreSQL 后端，实现注册/登录（邮箱 + 密码）与任务数据云端 CRUD；前端新增登录/注册页；Docker Compose 一键部署到自托管服务器。
+
+### 范围边界（不在此次计划内）
+- Google OAuth / 第三方登录
+- 推送通知
+- 多人协作 / 共享任务
+
+---
+
+## 2. TodoList
+
+### Phase 0 – 滚动修复（前端）
+| ID | 任务 |
+|---|---|
+| s-t1 | 外层滑动容器改 `overflow-hidden`，motion.div 加 `h-full items-stretch` |
+| s-t2 | Flow 面板加 `h-full`，确保空状态垂直居中充满 |
+| s-t3 | Calendar 面板内部加 `overflow-y-auto h-full` 独立滚动 |
+| s-t4 | 构建验证 + 真机同步 |
+
+### Phase 1 – 后端搭建
+| ID | 任务 |
+|---|---|
+| b-t1 | 初始化 `backend/` 项目（Node.js + TypeScript + Express + Prisma） |
+| b-t2 | 设计 Prisma schema（User、Task 表） |
+| b-t3 | 实现 Auth 路由：`POST /auth/register`、`POST /auth/login`、`POST /auth/refresh` |
+| b-t4 | 实现 Task CRUD 路由（带 JWT 鉴权中间件） |
+| b-t5 | 编写 Docker Compose（app + PostgreSQL + Nginx） |
+| b-t6 | 本地 Docker 联调通过 |
+
+### Phase 2 – 前端登录页 + API 接入
+| ID | 任务 |
+|---|---|
+| f-t1 | 新建 `LoginPage` / `RegisterPage` 组件（邮箱 + 密码表单） |
+| f-t2 | Auth 状态管理（JWT 存 `localStorage`，自动续期） |
+| f-t3 | API client 封装（`src/app/api.ts`，带 Bearer Token） |
+| f-t4 | 将 task 增删改查替换为 API 调用（保留 localStorage 作本地缓存） |
+| f-t5 | 登录态路由守卫（未登录跳转 LoginPage） |
+| f-t6 | 端到端联调（真机 + 后端） |
+
+---
+
+## 3. 具体执行方案
+
+### Phase 0：滚动修复
+
+**根因**：`src/app/App.tsx` L749 的滑动容器：
+```
+<div className="... flex-1 overflow-y-auto ...">
+  <motion.div style={{ width: '200%' }} className="flex items-start">
+    {/* Flow 面板 */}   {/* Calendar 面板 */}
+  </motion.div>
+</div>
+```
+`overflow-y-auto` 作用于整个双面板容器，Calendar 面板的高度撑起了滚动区域。
+
+**修复方案**：
+```
+外层 div: overflow-x-hidden overflow-hidden flex-1（去掉 overflow-y-auto）
+motion.div: 加 h-full、items-stretch（替换 items-start）
+Flow 面板 div: 加 h-full（内容不足也铺满，防止弹性收缩）
+Calendar 面板 div: 加 h-full overflow-y-auto（Calendar 自管滚动）
+```
+
+---
+
+### Phase 1：后端架构
+
+**目录结构**：
+```
+backend/
+  src/
+    index.ts          # Express 入口
+    routes/
+      auth.ts         # 注册/登录/刷新
+      tasks.ts        # 任务 CRUD
+    middleware/
+      auth.ts         # JWT 鉴权中间件
+    prisma/
+      schema.prisma   # User + Task 数据模型
+  Dockerfile
+  .env.example
+docker-compose.yml    # 仓库根目录
+nginx.conf
+```
+
+**数据模型（Prisma）**：
+```prisma
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String   // bcrypt hash
+  createdAt DateTime @default(now())
+  tasks     Task[]
+}
+
+model Task {
+  id               String   @id @default(cuid())
+  userId           String
+  title            String
+  priority         String   // P1/P2/P3
+  estimateMinutes  Int
+  status           String   // todo/doing/done/snoozed/skipped
+  tag              String?
+  progress         Int      @default(0)
+  dueDate          String?
+  sortOrder        Int      @default(0)  // 保存用户手动排序
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation(fields: [userId], references: [id])
+}
+```
+
+**Auth 流程**：
+- `POST /auth/register` → bcrypt hash 密码，返回 accessToken（15min）+ refreshToken（7d）
+- `POST /auth/login` → 校验密码，返回同上
+- `POST /auth/refresh` → 验证 refreshToken，返回新 accessToken
+- accessToken 存 `localStorage`；refreshToken 存 `httpOnly cookie`
+
+**Task API**：
+- `GET /tasks` → 返回当前用户所有任务（按 sortOrder）
+- `POST /tasks` → 创建任务
+- `PATCH /tasks/:id` → 更新状态/进度/排序
+- `DELETE /tasks/:id` → 删除任务
+
+---
+
+### Phase 2：前端接入
+
+**路由逻辑**（无 React Router，用状态机模拟）：
+```
+appState: 'loading' | 'auth' | 'app'
+- loading: 检查 localStorage 是否有有效 token → 自动跳转
+- auth: 显示 LoginPage / RegisterPage
+- app: 显示当前 App 主界面
+```
+
+**API client（`src/app/api.ts`）**：
+- 封装 `apiFetch(path, options)` 自动带 Bearer Token
+- 401 时自动调用 `/auth/refresh`，刷新后重试原请求
+
+**数据同步策略**：
+- 登录后：从服务端拉取任务，覆盖本地 localStorage（以服务端为准）
+- 操作任务：乐观更新本地 state，同时异步 API 请求；失败时回滚
+
+---
+
+## 4. 更新日志
+
+| 版本 | 内容 |
+|---|---|
+| Round 1 | iOS viewport/字体修复，Add Task 动画改为 Bottom Sheet |
+| Round 2 | 滚动锁定、Add Task 改居中卡片、Deadline 字段全宽 |
+| Round 3 | 滚动 Bug 根因修复、后端 + 登录体系规划 |
+| Review | 代码审查修复（6个问题）：React Hooks 违规（AppShell 拆分）、Express async 错误处理、access token localStorage → 内存、认证失败无退出路径、clearCookie 选项缺失、生产 nginx HTTP 时 Secure cookie 冲突 |
+
+
 ## 1. 功能目的
 
 ### 问题

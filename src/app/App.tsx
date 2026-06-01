@@ -4,10 +4,12 @@ import {
   Check, X, Clock, Plus, Flame, CheckCircle2,
   Calendar, Tag, XCircle, ChevronLeft, ChevronRight,
   ListTodo, SkipForward, AlarmClock, RotateCcw,
-  GripVertical, ArrowUpDown
+  GripVertical, ArrowUpDown, LogOut
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { storageGet, storageSet, restoreFromNativeStorage } from './storage';
+import { AuthPage } from './AuthPage';
+import { apiRefresh, apiLogout, setAuthFailureHandler } from './api';
 
 // --- Types ---
 type Priority = 'P1' | 'P2' | 'P3';
@@ -618,7 +620,9 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 }
 
 // --- Main App ---
-export default function App() {
+
+// AppShell contains all hooks — must never be rendered conditionally to satisfy Rules of Hooks
+function AppShell({ onLogout }: { onLogout: () => void }) {
   const [tasks, setTasks] = useState<Task[]>(() => loadTasks());
   const [streak, setStreak] = useState(() => loadStreak());
   const [completedToday, setCompletedToday] = useState(() => loadCompletedToday());
@@ -730,9 +734,18 @@ export default function App() {
             <span>{completedToday} {completedToday === 1 ? 'task' : 'tasks'} done today</span>
           </p>
         </div>
-        <div className="flex items-center gap-2 bg-card border border-border px-3 py-1.5 rounded-full shadow-sm">
-          <Flame className="w-4 h-4 text-orange-500" fill="currentColor" />
-          <span className="text-sm font-semibold">{streak} Day{streak !== 1 ? 's' : ''}</span>
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 bg-card border border-border px-3 py-1.5 rounded-full shadow-sm">
+            <Flame className="w-4 h-4 text-orange-500" fill="currentColor" />
+            <span className="text-sm font-semibold">{streak} Day{streak !== 1 ? 's' : ''}</span>
+          </div>
+          <button
+            onClick={onLogout}
+            title="Sign out"
+            className="w-9 h-9 flex items-center justify-center rounded-full bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground transition-colors"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
         </div>
       </header>
 
@@ -746,16 +759,16 @@ export default function App() {
        * to reveal the active panel. Eliminates AnimatePresence exit/enter timing
        * issues and produces perfectly smooth transitions in both directions.
        */}
-      <div className="w-full max-w-md overflow-x-hidden flex-1 overflow-y-auto relative">
+      <div className="w-full max-w-md overflow-x-hidden flex-1 overflow-hidden relative">
         <motion.div
-          className="flex items-start"
+          className="flex items-stretch h-full"
           style={{ width: '200%', willChange: 'transform' }}
           animate={{ x: viewMode === 'flow' ? '0%' : '-50%' }}
           initial={false}
           transition={{ type: 'spring', stiffness: 360, damping: 36, mass: 0.85 }}
         >
           {/* ── Flow panel ── */}
-          <div className="flex flex-col items-center px-4 sm:px-6 pb-4" style={{ width: '50%' }}>
+          <div className="flex flex-col items-center px-4 sm:px-6 pb-4 h-full" style={{ width: '50%' }}>
             {pendingTasks.length > 0 ? (
               <>
                 <div className="relative w-full aspect-[4/5] max-w-[360px] mt-2">
@@ -816,7 +829,7 @@ export default function App() {
               </>
             ) : (
               <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
-                className="flex flex-col items-center justify-center flex-1 w-full max-w-sm text-center px-6 pt-8">
+                className="flex flex-col items-center justify-center h-full w-full max-w-sm text-center px-6">
                 <div className="w-24 h-24 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-500 rounded-full flex items-center justify-center mb-6">
                   <CheckCircle2 className="w-12 h-12" />
                 </div>
@@ -828,7 +841,7 @@ export default function App() {
           </div>
 
           {/* ── Calendar panel ── */}
-          <div className="flex flex-col items-center px-4 sm:px-6 pb-4" style={{ width: '50%' }}>
+          <div className="flex flex-col items-center px-4 sm:px-6 pb-4 h-full overflow-y-auto" style={{ width: '50%' }}>
             <CalendarView
               tasks={tasks}
               onAction={handleAction}
@@ -956,4 +969,53 @@ export default function App() {
       </AnimatePresence>
     </div>
   );
+}
+
+// App handles auth state only; AppShell holds all hooks (Rules of Hooks compliance)
+export default function App() {
+  // 'loading' = checking refresh cookie, 'auth' = not logged in, 'app' = logged in
+  const [appState, setAppState] = useState<'loading' | 'auth' | 'app'>(() =>
+    localStorage.getItem('taskflow_logged_in') ? 'loading' : 'auth'
+  );
+
+  // Register a global auth-failure callback so apiFetch can trigger logout
+  useEffect(() => {
+    setAuthFailureHandler(() => {
+      localStorage.removeItem('taskflow_logged_in');
+      setAppState('auth');
+    });
+    return () => setAuthFailureHandler(null);
+  }, []);
+
+  // On mount, attempt silent token refresh if the user was previously logged in
+  useEffect(() => {
+    if (appState !== 'loading') return;
+    apiRefresh().then(ok => setAppState(ok ? 'app' : 'auth'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function handleAuth() {
+    localStorage.setItem('taskflow_logged_in', '1');
+    setAppState('app');
+  }
+
+  async function handleLogout() {
+    await apiLogout();
+    localStorage.removeItem('taskflow_logged_in');
+    setAppState('auth');
+  }
+
+  if (appState === 'loading') {
+    return (
+      <div className="h-screen bg-background flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (appState === 'auth') {
+    return <AuthPage onAuth={handleAuth} />;
+  }
+
+  return <AppShell onLogout={handleLogout} />;
 }
