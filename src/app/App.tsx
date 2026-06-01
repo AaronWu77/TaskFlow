@@ -132,6 +132,24 @@ interface AddTaskState {
 }
 const DEFAULT_FORM: AddTaskState = { title: '', minutes: '25', priority: 'P2', dueDate: '', tag: PRESET_TAGS[0] };
 
+// Returns index at which newTask should be inserted among existing tasks.
+// Only compares against 'todo' tasks; preserves manual ordering otherwise.
+const PRIORITY_RANK: Record<Priority, number> = { P1: 1, P2: 2, P3: 3 };
+function insertIndex(tasks: Task[], newTask: Task): number {
+  const idx = tasks.findIndex(t => {
+    if (t.status !== 'todo') return false;
+    const nd = newTask.dueDate, ed = t.dueDate;
+    if (nd && !ed) return true;
+    if (!nd && ed) return false;
+    if (nd && ed) {
+      if (nd < ed) return true;
+      if (nd > ed) return false;
+    }
+    return PRIORITY_RANK[newTask.priority] < PRIORITY_RANK[t.priority];
+  });
+  return idx === -1 ? tasks.length : idx;
+}
+
 // --- View Toggle ---
 function ViewToggle({ view, onChange }: { view: ViewMode; onChange: (v: ViewMode) => void }) {
   return (
@@ -624,6 +642,15 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (!isAddingTask) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); setIsAddingTask(false); setIsRepeatMode(false); setForm(DEFAULT_FORM); }
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [isAddingTask]);
+
   useEffect(() => { saveTasks(tasks); }, [tasks]);
 
   const pendingTasks = tasks.filter(t => t.status === 'todo');
@@ -675,20 +702,24 @@ export default function App() {
   const handleAddTask = (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.title.trim()) return;
-    setTasks(prev => [...prev, {
+    const newTask: Task = {
       id: Math.random().toString(36).substring(7),
       title: form.title, priority: form.priority,
       estimateMinutes: parseInt(form.minutes) || 15,
       status: 'todo', progress: 0,
       dueDate: form.dueDate || null, tag: form.tag,
-    }]);
+    };
+    setTasks(prev => {
+      const i = insertIndex(prev, newTask);
+      return [...prev.slice(0, i), newTask, ...prev.slice(i)];
+    });
     setIsAddingTask(false);
     setIsRepeatMode(false);
     setForm(DEFAULT_FORM);
   };
 
   return (
-    <div className="min-h-screen bg-background text-foreground flex flex-col items-center pt-safe pb-safe selection:bg-primary/20">
+    <div className="h-screen bg-background text-foreground flex flex-col items-center pt-safe overflow-hidden selection:bg-primary/20">
 
       {/* Header */}
       <header className="w-full max-w-md px-4 sm:px-6 flex items-center justify-between mb-5">
@@ -715,7 +746,7 @@ export default function App() {
        * to reveal the active panel. Eliminates AnimatePresence exit/enter timing
        * issues and produces perfectly smooth transitions in both directions.
        */}
-      <div className="w-full max-w-md overflow-x-hidden flex-1 relative">
+      <div className="w-full max-w-md overflow-x-hidden flex-1 overflow-y-auto relative">
         <motion.div
           className="flex items-start"
           style={{ width: '200%', willChange: 'transform' }}
@@ -818,73 +849,111 @@ export default function App() {
       />
 
       {/* FAB */}
-      <Dialog.Root open={isAddingTask} onOpenChange={(open) => { if (!open) { setIsAddingTask(false); setIsRepeatMode(false); setForm(DEFAULT_FORM); } }}>
-        <Dialog.Trigger asChild>
-          <button onClick={openAddTask} className="fixed bottom-safe right-6 sm:right-8 w-14 h-14 bg-primary text-primary-foreground rounded-full flex items-center justify-center shadow-xl shadow-primary/30 hover:bg-primary/90 transition-transform active:scale-90 z-40">
-            <Plus className="w-7 h-7" />
-          </button>
-        </Dialog.Trigger>
-        <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-          <Dialog.Content className="fixed left-[50%] top-[50%] z-50 grid w-full max-w-md translate-x-[-50%] translate-y-[-50%] gap-4 border border-border bg-card p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-2xl">
-            <div className="flex flex-col space-y-1.5">
-              <Dialog.Title className="text-lg font-semibold leading-none tracking-tight">{isRepeatMode ? 'Repeat Task' : 'Add to your Flow'}</Dialog.Title>
-              <Dialog.Description className="text-sm text-muted-foreground">{form.title ? 'Edit the details and pick a new deadline.' : "What's the next thing you need to focus on?"}</Dialog.Description>
-            </div>
-            <form onSubmit={handleAddTask} className="space-y-4 py-2">
-              <div className="space-y-2">
-                <label htmlFor="title" className="text-sm font-medium leading-none">Task Name</label>
-                <input id="title" type="text" autoFocus placeholder="e.g., Draft weekly update"
-                  className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                  value={form.title} onChange={(e) => setForm(f => ({ ...f, title: e.target.value }))} required />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <label htmlFor="minutes" className="text-sm font-medium leading-none">Est. Minutes</label>
-                  <input id="minutes" type="number" min="1"
-                    className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                    value={form.minutes} onChange={(e) => setForm(f => ({ ...f, minutes: e.target.value }))} />
+      <button
+        onClick={openAddTask}
+        className="fixed bottom-safe right-6 sm:right-8 w-14 h-14 bg-primary text-primary-foreground rounded-full flex items-center justify-center shadow-xl shadow-primary/30 hover:bg-primary/90 transition-transform active:scale-90 z-40"
+      >
+        <Plus className="w-7 h-7" />
+      </button>
+
+      {/* Add Task centered card */}
+      <AnimatePresence>
+        {isAddingTask && (
+          <>
+            {/* Backdrop */}
+            <motion.div
+              key="add-backdrop"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="fixed inset-0 bg-black/50 z-50"
+              onClick={() => { setIsAddingTask(false); setIsRepeatMode(false); setForm(DEFAULT_FORM); }}
+            />
+            {/* Card */}
+            <motion.div
+              key="add-card"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="add-task-title"
+              onClick={(e) => e.stopPropagation()}
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              transition={{ type: 'spring', stiffness: 400, damping: 30, mass: 0.8 }}
+              style={{ willChange: 'transform' }}
+              className="fixed left-[50%] top-[50%] z-50 w-full max-w-[360px] translate-x-[-50%] translate-y-[-50%] bg-card rounded-3xl border border-border shadow-xl flex flex-col"
+            >
+              {/* Header */}
+              <div className="flex items-start justify-between px-6 pt-6 pb-4">
+                <div>
+                  <h2 id="add-task-title" className="text-lg font-bold">{isRepeatMode ? 'Repeat Task' : 'Add to your Flow'}</h2>
+                  <p className="text-sm text-muted-foreground mt-0.5">
+                    {form.title ? 'Edit the details and pick a new deadline.' : "What's the next thing you need to focus on?"}
+                  </p>
                 </div>
-                <div className="space-y-2">
-                  <label htmlFor="priority" className="text-sm font-medium leading-none">Priority</label>
-                  <select id="priority"
-                    className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                    value={form.priority} onChange={(e) => setForm(f => ({ ...f, priority: e.target.value as Priority }))}>
-                    <option value="P1">High (P1)</option><option value="P2">Medium (P2)</option><option value="P3">Low (P3)</option>
-                  </select>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => { setIsAddingTask(false); setIsRepeatMode(false); setForm(DEFAULT_FORM); }}
+                  className="w-8 h-8 flex items-center justify-center rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors flex-shrink-0 ml-3 mt-0.5"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
-              <div className="grid grid-cols-2 gap-4">
+
+              {/* Form body */}
+              <form onSubmit={handleAddTask} className="overflow-y-auto px-6 pb-6 space-y-4" style={{ maxHeight: 'calc(75vh - 80px)' }}>
+                <div className="space-y-2">
+                  <label htmlFor="title" className="text-sm font-medium leading-none">Task Name</label>
+                  <input id="title" type="text" autoFocus placeholder="e.g., Draft weekly update"
+                    className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    value={form.title} onChange={(e) => setForm(f => ({ ...f, title: e.target.value }))} required />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label htmlFor="minutes" className="text-sm font-medium leading-none">Est. Minutes</label>
+                    <input id="minutes" type="number" min="1"
+                      className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                      value={form.minutes} onChange={(e) => setForm(f => ({ ...f, minutes: e.target.value }))} />
+                  </div>
+                  <div className="space-y-2">
+                    <label htmlFor="priority" className="text-sm font-medium leading-none">Priority</label>
+                    <select id="priority"
+                      className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                      value={form.priority} onChange={(e) => setForm(f => ({ ...f, priority: e.target.value as Priority }))}>
+                      <option value="P1">High (P1)</option><option value="P2">Medium (P2)</option><option value="P3">Low (P3)</option>
+                    </select>
+                  </div>
+                </div>
                 <div className="space-y-2">
                   <label htmlFor="dueDate" className="text-sm font-medium leading-none">Deadline (Optional)</label>
                   <input id="dueDate" type="date"
-                    className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    className="flex h-10 w-full appearance-none rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                     value={form.dueDate} onChange={(e) => setForm(f => ({ ...f, dueDate: e.target.value }))} />
                 </div>
                 <div className="space-y-2">
                   <label htmlFor="tag" className="text-sm font-medium leading-none">Category Tag</label>
                   <select id="tag"
-                    className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                     value={form.tag} onChange={(e) => setForm(f => ({ ...f, tag: e.target.value }))}>
                     {PRESET_TAGS.map(tag => <option key={tag} value={tag}>{tag}</option>)}
                   </select>
                 </div>
-              </div>
-              <div className="flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2 pt-4">
-                <Dialog.Close asChild>
-                  <button type="button" onClick={() => setForm(DEFAULT_FORM)} className="mt-2 sm:mt-0 px-4 py-2 bg-secondary text-secondary-foreground hover:bg-secondary/80 rounded-md text-sm font-medium transition-colors">Cancel</button>
-                </Dialog.Close>
-                <button type="submit" className="px-4 py-2 bg-primary text-primary-foreground hover:bg-primary/90 rounded-md text-sm font-medium transition-colors">
-                  {isRepeatMode ? 'Add Repeated Task' : 'Add Task'}
-                </button>
-              </div>
-            </form>
-            <Dialog.Close asChild>
-              <button onClick={() => setForm(DEFAULT_FORM)} className="absolute right-4 top-4 opacity-70 transition-opacity hover:opacity-100 focus:outline-none"><XCircle className="h-4 w-4" /></button>
-            </Dialog.Close>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
+                {/* Actions */}
+                <div className="flex flex-col gap-3 pt-1">
+                  <button type="submit" className="w-full py-3.5 bg-primary text-primary-foreground rounded-xl font-semibold text-base hover:bg-primary/90 transition-colors active:scale-95">
+                    {isRepeatMode ? 'Add Repeated Task' : 'Add Task'}
+                  </button>
+                  <button type="button" onClick={() => { setIsAddingTask(false); setIsRepeatMode(false); setForm(DEFAULT_FORM); }}
+                    className="w-full py-3 bg-muted text-muted-foreground rounded-xl text-sm font-medium hover:bg-muted/80 transition-colors active:scale-95">
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

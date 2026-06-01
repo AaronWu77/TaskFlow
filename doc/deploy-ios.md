@@ -49,7 +49,7 @@ npx cap open ios    # 用 Xcode 打开项目
 1. 打开 `ios/App/App.xcworkspace`（如果 `npm run ios` 已自动打开则跳过）
 2. 点击左侧 **App** 项目 → 选 **Signing & Capabilities** Tab
 3. **Team**：点击下拉菜单 → 选你的 Apple ID（若未登录：Xcode → Preferences → Accounts → 添加账号）
-4. **Bundle Identifier**：改为 `com.yourname.taskflow`（与 `capacitor.config.ts` 保持一致）
+4. **Bundle Identifier**：改为 `com.wuyuchen.taskflow`（或你自己的唯一反向域名，且需与 `capacitor.config.ts` 保持一致）
 5. 勾选 **Automatically manage signing**
 
 > 免费账号签名的证书有效期 **7 天**，到期后需重签（见下文）。
@@ -86,6 +86,31 @@ npx cap open ios    # 用 Xcode 打开项目
 
 1. 安装 [AltStore](https://altstore.io) 到 Mac 并安装配套 AltServer 服务
 2. AltServer 在后台每 7 天自动帮 iPhone 上的 App 续签
+
+---
+
+## 常见报错排查（Signing）
+
+### 报错：Communication with Apple failed / No profiles found
+
+这通常不是代码问题，而是 Apple 开发团队下还没有可用于签名的真机设备。
+
+按下面顺序处理：
+
+1. 用 USB 线连接 iPhone，解锁手机并点“信任此电脑”。
+2. 在 Xcode 顶部设备选择器里选中你的 iPhone（不要选 Simulator）。
+3. 打开 Xcode → Settings → Accounts → 选你的 Apple ID → Manage Certificates，确认存在 **Apple Development** 证书；没有就点 `+` 创建。
+4. 回到项目 Signing & Capabilities：
+	- Team 选个人团队
+	- Bundle Identifier 保持唯一（如 `com.wuyuchen.taskflow`）
+	- 勾选 Automatically manage signing
+5. 执行 Product → Clean Build Folder，然后点 Run（`⌘R`）。
+
+如果仍失败，再检查：
+
+- 是否已接受最新 Apple Developer 协议（登录 https://developer.apple.com/account 查看提示）。
+- 网络是否拦截 Apple 服务（关闭代理/VPN 后重试）。
+- 在 Xcode 账户页先 Sign Out 再 Sign In。
 
 ---
 

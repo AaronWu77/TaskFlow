@@ -150,9 +150,55 @@ DELETE /tasks/:id      -- 删除任务
 
 ---
 
+---
+
+## iOS 动画 & 缩放修复计划（2026-05-31）
+
+### 功能目的
+修复 iPhone 上两个体验问题：
+1. 点击添加任务时弹窗动画卡顿
+2. 页面有时进入放大/非全屏状态
+
+### 根因定位
+| 问题 | 文件 | 根因 |
+|---|---|---|
+| 动画卡顿 | `App.tsx` L829 | Dialog 用 CSS 多属性动画（opacity+scale+translateX+translateY）+ backdrop-blur-sm |
+| 页面放大 | `App.tsx` L837–869 | 表单 input/select `text-sm`（14px），iOS 聚焦自动缩放 |
+| 页面放大 | `index.html` L8 | viewport meta 缺少 `maximum-scale=1, user-scalable=no` |
+
+### TodoList
+- **T1**：`index.html`：补充 `maximum-scale=1, user-scalable=no`
+- **T2**：`App.tsx` 表单 input/select：移除 `text-sm`，确保字体 ≥ 16px
+- **T3**：`App.tsx`：Add Task Dialog → Bottom Sheet（motion/react，仅 Y 轴，移除 backdrop-blur）
+
+---
+
 ## 更新日志
 
-### 2026-05-29 — Phase 1 代码已完成
+### 2026-05-31 — UI 体验修复（Round 2）
+
+**问题与方案：**
+- **R2-T1** 空页面可滚动 → 根 div `min-h-screen` 改 `h-screen overflow-hidden`，内容区 `overflow-y-auto`
+- **R2-T2** Add Task 动画异常 → Bottom Sheet 改居中卡片（motion/react scale+opacity spring）
+- **R2-T3** Deadline 字段太窄 → Deadline 和 Category Tag 各自独占一整行
+
+### 2026-05-31 — 代码审查修复
+
+**代码审查发现的问题（已修复）：**
+
+| 严重度 | 问题 | 受影响项 | 修复 |
+|---|---|---|---|
+| High | Bottom Sheet 未阻止点击事件冒泡，backdrop 点击可能穿透到 Sheet 内部元素 | T3 | Sheet `motion.div` 增加 `onClick={(e) => e.stopPropagation()}` |
+| Medium | Escape 键处理函数缺少 `e.preventDefault()`，可能与其他处理器冲突 | T3 | Escape handler 增加 `e.preventDefault()` |
+
+### 2026-05-31 — iOS 动画 & 缩放修复完成
+
+**已完成的代码变更：**
+- `index.html` — viewport meta 补充 `maximum-scale=1, user-scalable=no`，禁止 Capacitor App 被误操作缩放
+- `src/app/App.tsx` — Add Task 表单所有 input/select 从 `text-sm`（14px）改为 `text-base`（16px），阻止 iOS WKWebView 自动缩放
+- `src/app/App.tsx` — Add Task Dialog 改为 Bottom Sheet（`motion/react` spring，仅 Y 轴动画，移除 backdrop-blur-sm），增加 Escape 键关闭支持
+
+
 
 **已完成的代码变更：**
 - `index.html` — 添加 iOS PWA meta 标签（`viewport-fit=cover`、`apple-mobile-web-app-capable`、状态栏样式）和 manifest 链接

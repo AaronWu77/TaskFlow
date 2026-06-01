@@ -1,8 +1,8 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  // Must be a unique reverse-domain identifier. Change 'yourname' to your own handle.
-  appId: 'com.yourname.taskflow',
+  // Must be a unique reverse-domain identifier for Apple signing.
+  appId: 'com.wuyuchen.taskflow',
   appName: 'TaskFlow',
   webDir: 'dist',
   // Keep the splash screen hidden until the web layer is ready
