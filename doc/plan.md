@@ -1,94 +1,67 @@
-# TaskFlow 同步策略重构计划
+# TaskFlow Phase 2 — UI 完善 & 账户系统
 
 ## 1. 功能目的
 
-当前同步存在多个问题：缺少同步状态追踪、退出不清除本地数据、离线任务重复创建。需重新设计为以云端为主的同步架构。
-
-**核心策略**：
-1. **登录时**：云端拉取全量 → 本地存储（标记已同步 + 时间戳）
-2. **操作时**：本地优先 → 标记脏数据 → 后台推送到云端 → 失败弹 toast
-3. **退出时**：推送所有脏数据 → 彻底清除本地数据库
+1. 消除登录页 iOS 弹性回弹
+2. 主界面退出图标 → 用户头像按钮
+3. 新增账户页面（头像 + 用户名 + 退出）
+4. 清空测试数据
 
 ---
 
 ## 2. TodoList
 
-| ID | 任务 | 描述 | 依赖 |
-|----|------|------|------|
-| `add-sync-metadata` | 添加同步元数据 | Task 类型加 `_dirty` 字段，localStorage 加 `taskflow_last_sync` 时间戳 | 无 |
-| `redesign-init-login` | 重构登录/初始化流程 | 云端拉取全量任务 → 标记 `_dirty: false` → 存本地 | `add-sync-metadata` |
-| `redesign-write-flow` | 重构写入流程 | 所有操作：先写本地 → 标记 dirty → 后台推送 → 成功后标记 clean → 失败弹 toast | `add-sync-metadata` |
-| `add-logout-sync` | 添加退出同步 | 退出时推送所有脏数据 → 清除全部 localStorage | `redesign-write-flow` |
-| `add-toast-notifications` | 添加同步失败 toast 提示 | 用 sonner toast 通知用户推送失败 | `redesign-write-flow` |
-| `test-sync-redesign` | 端到端测试 | 验证登录拉取 → 操作推送 → 退出清除 全流程 | 以上全部 |
+| ID | 任务 | 描述 |
+|----|------|------|
+| `fix-auth-bounce` | 修复 AuthPage iOS bounce | 加 `overscroll-none` 消除橡胶回弹 |
+| `add-avatar-button` | 替换退出图标为头像按钮 | Header 右侧 LogOut → 圆形头像，点击跳转账户页 |
+| `create-account-page` | 创建 AccountPage 组件 | 居中头像 + email 前缀用户名 + 底部退出按钮 |
+| `clear-test-data` | 清空数据库测试数据 | 删除所有 User/Task/UserStats |
 
 ---
 
 ## 3. 具体执行方案
 
-### 3.1 同步元数据
+### 3.1 AuthPage iOS bounce
 
-**Task 类型**（仅前端内部使用）：
-```ts
-interface Task {
-  // ...existing fields...
-  _dirty?: boolean;
+在根 div 加 Tailwind 类 `overscroll-none`：
+```html
+<div className="h-dvh ... overscroll-none">
+```
+
+### 3.2 用户头像按钮
+
+Header 右侧：
+- 移除 `<LogOut>` 图标
+- 替换为 32px 圆形头像 div（灰色占位背景 + 用户图标）
+- 点击设置 `accountOpen: true`
+
+### 3.3 AccountPage 组件
+
+```tsx
+function AccountPage({ email, onClose, onLogout }: {
+  email: string; onClose: () => void; onLogout: () => void;
+}) {
+  const displayName = email.split('@')[0];
+  return (
+    <div className="h-dvh ...">
+      {/* 关闭按钮 左上 */}
+      {/* 头像 居中 */}
+      {/* 用户名 */}
+      {/* 退出按钮 底部 */}
+    </div>
+  );
 }
 ```
 
-**localStorage 新增键值**：`taskflow_last_sync`（ISO 时间戳）
+使用 `motion/react` 做进入/退出动画。
 
-### 3.2 登录/初始化流程
+### 3.4 清空数据库
 
-```
-login → apiGetTasks() → 全部标记 _dirty: false → saveTasksToCache + lastSyncTime
-     → apiGetUserStats() → setStreak/setCompletedToday
-如果 offline：使用 localStorage 缓存
-```
-
-### 3.3 写入流程
-
-所有操作统一模式：
-```
-1. 乐观更新 state
-2. 标记 _dirty: true → saveTasksToCache
-3. 后台推送 API → 成功: _dirty: false + saveTasksToCache
-                    失败: toast.error + 保持 dirty
+```sql
+DELETE FROM "UserStats";
+DELETE FROM "Task";
+DELETE FROM "User";
 ```
 
-### 3.4 退出同步
-
-```
-logout →
-  1. flushDirtyTasks() → 逐个推送 apiUpdateTask
-  2. apiUpdateUserStats() → 推送当前统计
-  3. apiLogout()
-  4. clear localStorage (tasks, streak, stats, lastSync, logged_in)
-```
-
-### 3.5 Toast
-
-```ts
-import { toast } from 'sonner';
-toast.error('Sync failed — retrying on next action');
-```
-
-### 3.6 执行顺序
-
-```
-Phase 1: add-sync-metadata
-Phase 2: redesign-init-login + redesign-write-flow (并行)
-Phase 3: add-toast-notifications → add-logout-sync
-Phase 4: test-sync-redesign
-```
-
-## 6. 代码审查（2026-06-02 同步策略重构）
-
-| 发现 | 严重度 | 修复 |
-|------|--------|------|
-| `Toaster` 组件未 import — 运行时崩溃 | 🔴 Critical | ✅ `import { toast, Toaster } from 'sonner'` |
-| 退出 flush 不调 `apiCreateTask` — 新建脏数据丢失 | 🔴 High | ✅ 用 `flushDirtyTasks()` 替代 inline 逻辑 |
-| Init 云端拉取丢弃本地脏数据 — 刷新丢数据 | 🔴 High | ✅ 保留 localStorage 中 `_dirty: true` 的任务 |
-| `completedToday` stale closure — 快速完成多个任务计数丢失 | 🟡 Medium | ✅ 改用 `setCompletedToday(c => { const n = c+1; push(n); return n })` |
-
-构建验证 ✅
+或通过 Prisma: `prisma.user.deleteMany()`

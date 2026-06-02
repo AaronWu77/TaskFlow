@@ -4,7 +4,7 @@ import { CheckCircle2, Mail, Lock, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { apiLogin, apiRegister } from './api';
 
 interface AuthPageProps {
-  onAuth: () => void;
+  onAuth: (email: string) => void;
 }
 
 export function AuthPage({ onAuth }: AuthPageProps) {
@@ -24,8 +24,8 @@ export function AuthPage({ onAuth }: AuthPageProps) {
     setLoading(true);
     try {
       const fn = mode === 'login' ? apiLogin : apiRegister;
-      await fn(email.trim().toLowerCase(), password);
-      onAuth();
+      const result = await fn(email.trim().toLowerCase(), password);
+      onAuth(result.user.email);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {
@@ -34,7 +34,7 @@ export function AuthPage({ onAuth }: AuthPageProps) {
   }
 
   return (
-    <div className="h-dvh bg-background text-foreground flex flex-col items-center justify-center pt-safe overflow-hidden px-6">
+    <div className="h-dvh bg-background text-foreground flex flex-col items-center justify-center pt-safe overflow-hidden overscroll-none px-6">
       <motion.div
         initial={{ opacity: 0, y: 24 }}
         animate={{ opacity: 1, y: 0 }}

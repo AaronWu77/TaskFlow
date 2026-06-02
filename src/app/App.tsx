@@ -4,7 +4,7 @@ import {
   Check, X, Clock, Plus, Flame, CheckCircle2,
   Calendar, Tag, XCircle, ChevronLeft, ChevronRight,
   ListTodo, SkipForward, AlarmClock, RotateCcw,
-  GripVertical, ArrowUpDown, LogOut
+  GripVertical, ArrowUpDown
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { storageGet, storageSet, restoreFromNativeStorage } from './storage';
@@ -665,10 +665,60 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
   );
 }
 
+// --- Account Page ---
+
+function AccountPage({ email, onClose, onLogout }: {
+  email: string; onClose: () => void; onLogout: () => void;
+}) {
+  const displayName = email.split('@')[0];
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.2 }}
+      className="fixed inset-0 z-50 bg-background flex flex-col items-center"
+    >
+      {/* Close button */}
+      <button
+        onClick={onClose}
+        className="absolute top-0 left-4 w-9 h-9 flex items-center justify-center rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
+        style={{ top: 'max(1.5rem, env(safe-area-inset-top))' }}
+      >
+        <X className="w-5 h-5" />
+      </button>
+
+      {/* Content */}
+      <div className="flex-1 flex flex-col items-center justify-center px-6">
+        {/* Avatar */}
+        <div className="w-24 h-24 rounded-full bg-muted flex items-center justify-center mb-6">
+          <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='1.5'%3E%3Cpath d='M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='12' cy='7' r='4'/%3E%3C/svg%3E"
+            alt="Avatar" className="w-10 h-10 opacity-50" />
+        </div>
+
+        {/* Username */}
+        <h2 className="text-xl font-bold text-foreground mb-1">{displayName}</h2>
+        <p className="text-sm text-muted-foreground mb-8">{email}</p>
+      </div>
+
+      {/* Logout button */}
+      <div className="w-full max-w-md px-6 pb-safe mb-6">
+        <button
+          onClick={onLogout}
+          className="w-full py-3.5 bg-destructive/10 text-destructive rounded-xl font-semibold text-base hover:bg-destructive/20 transition-colors active:scale-95"
+        >
+          Sign Out
+        </button>
+      </div>
+    </motion.div>
+  );
+}
+
 // --- Main App ---
 
 // AppShell contains all hooks — must never be rendered conditionally to satisfy Rules of Hooks
-function AppShell({ onLogout }: { onLogout: () => void }) {
+function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) {
   const [tasks, setTasks] = useState<Task[]>(() => loadTasks());
   const [streak, setStreak] = useState(() => loadStatsFromCache().streak);
   const [completedToday, setCompletedToday] = useState(() => loadStatsFromCache().completedToday);
@@ -677,6 +727,7 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
   const [viewMode, setViewMode] = useState<ViewMode>('flow');
   const [greeting] = useState(() => getGreeting());
   const [isReordering, setIsReordering] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
 
   const [isAddingTask, setIsAddingTask] = useState(false);
   const [isRepeatMode, setIsRepeatMode] = useState(false);
@@ -895,6 +946,13 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
   return (
     <div className="h-dvh bg-background text-foreground flex flex-col items-center pt-safe overflow-hidden selection:bg-primary/20">
 
+      {/* Account Page */}
+      <AnimatePresence>
+        {accountOpen && (
+          <AccountPage email={email} onClose={() => setAccountOpen(false)} onLogout={onLogout} />
+        )}
+      </AnimatePresence>
+
       {/* Header */}
       <header className="w-full max-w-md px-4 sm:px-6 flex items-center justify-between mb-5">
         <div>
@@ -910,11 +968,12 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
             <span className="text-sm font-semibold">{streak} Day{streak !== 1 ? 's' : ''}</span>
           </div>
           <button
-            onClick={onLogout}
-            title="Sign out"
-            className="w-9 h-9 flex items-center justify-center rounded-full bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground transition-colors"
+            onClick={() => setAccountOpen(true)}
+            title="Account"
+            className="w-9 h-9 flex items-center justify-center rounded-full bg-muted hover:bg-muted/80 transition-colors overflow-hidden"
           >
-            <LogOut className="w-4 h-4" />
+            <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2'%3E%3Cpath d='M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='12' cy='7' r='4'/%3E%3C/svg%3E"
+              alt="User" className="w-5 h-5 opacity-60" />
           </button>
         </div>
       </header>
@@ -1159,6 +1218,9 @@ export default function App() {
   const [appState, setAppState] = useState<'loading' | 'auth' | 'app'>(() =>
     localStorage.getItem('taskflow_logged_in') ? 'loading' : 'auth'
   );
+  const [userEmail, setUserEmail] = useState(() =>
+    localStorage.getItem('taskflow_user_email') || ''
+  );
 
   // Register a global auth-failure callback so apiFetch can trigger logout
   useEffect(() => {
@@ -1176,8 +1238,10 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function handleAuth() {
+  function handleAuth(email: string) {
+    setUserEmail(email);
     localStorage.setItem('taskflow_logged_in', '1');
+    localStorage.setItem('taskflow_user_email', email);
     setAppState('app');
   }
 
@@ -1201,7 +1265,9 @@ export default function App() {
     storageSet('taskflow_completed_today', '');
     storageSet(SYNC_META_KEY, '');
     localStorage.removeItem('taskflow_logged_in');
+    localStorage.removeItem('taskflow_user_email');
     setAppState('auth');
+    setUserEmail('');
   }
 
   if (appState === 'loading') {
@@ -1216,5 +1282,5 @@ export default function App() {
     return <AuthPage onAuth={handleAuth} />;
   }
 
-  return <AppShell onLogout={handleLogout} />;
+  return <AppShell email={userEmail} onLogout={handleLogout} />;
 }
