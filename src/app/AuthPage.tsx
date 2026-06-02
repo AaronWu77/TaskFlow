@@ -34,7 +34,7 @@ export function AuthPage({ onAuth }: AuthPageProps) {
   }
 
   return (
-    <div className="h-screen bg-background text-foreground flex flex-col items-center justify-center pt-safe overflow-hidden px-6">
+    <div className="h-dvh bg-background text-foreground flex flex-col items-center justify-center pt-safe overflow-hidden px-6">
       <motion.div
         initial={{ opacity: 0, y: 24 }}
         animate={{ opacity: 1, y: 0 }}

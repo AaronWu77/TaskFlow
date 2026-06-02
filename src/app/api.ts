@@ -97,3 +97,116 @@ export async function apiLogout(): Promise<void> {
   await fetch(`${BASE_URL}/auth/logout`, { method: 'POST', credentials: 'include' });
   setAccessToken(null);
 }
+
+// ── Task CRUD ──
+
+export interface TaskDTO {
+  id: string;
+  userId: string;
+  title: string;
+  priority: string;
+  estimateMinutes: number;
+  status: string;
+  tag: string | null;
+  progress: number;
+  dueDate: string | null;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function apiGetTasks(): Promise<TaskDTO[]> {
+  const res = await apiFetch('/tasks');
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to fetch tasks' })) as { error: string };
+    throw new Error(err.error || 'Failed to fetch tasks');
+  }
+  return res.json() as Promise<TaskDTO[]>;
+}
+
+export async function apiCreateTask(task: {
+  title: string;
+  priority: string;
+  estimateMinutes: number;
+  status?: string;
+  tag?: string;
+  progress?: number;
+  dueDate?: string | null;
+  sortOrder?: number;
+}): Promise<TaskDTO> {
+  const res = await apiFetch('/tasks', {
+    method: 'POST',
+    body: JSON.stringify(task),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to create task' })) as { error: string };
+    throw new Error(err.error || 'Failed to create task');
+  }
+  return res.json() as Promise<TaskDTO>;
+}
+
+export async function apiUpdateTask(id: string, data: Partial<{
+  title: string;
+  priority: string;
+  estimateMinutes: number;
+  status: string;
+  tag: string;
+  progress: number;
+  dueDate: string | null;
+  sortOrder: number;
+}>): Promise<TaskDTO> {
+  const res = await apiFetch(`/tasks/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to update task' })) as { error: string };
+    throw new Error(err.error || 'Failed to update task');
+  }
+  return res.json() as Promise<TaskDTO>;
+}
+
+export async function apiDeleteTask(id: string): Promise<void> {
+  const res = await apiFetch(`/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!res.ok && res.status !== 404) {
+    throw new Error('Failed to delete task');
+  }
+}
+
+export async function apiReorderTasks(order: Array<{ id: string; sortOrder: number }>): Promise<void> {
+  const res = await apiFetch('/tasks/reorder', {
+    method: 'PUT',
+    body: JSON.stringify({ order }),
+  });
+  if (!res.ok) {
+    throw new Error('Failed to reorder tasks');
+  }
+}
+
+// ── User Stats ──
+
+export interface UserStatsDTO {
+  streak: number;
+  streakDate: string | null;
+  completedToday: string;
+  todayCount: number;
+}
+
+export async function apiGetUserStats(): Promise<UserStatsDTO> {
+  const res = await apiFetch('/user/stats');
+  if (!res.ok) {
+    throw new Error('Failed to fetch user stats');
+  }
+  return res.json() as Promise<UserStatsDTO>;
+}
+
+export async function apiUpdateUserStats(data: Partial<UserStatsDTO>): Promise<UserStatsDTO> {
+  const res = await apiFetch('/user/stats', {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    throw new Error('Failed to update user stats');
+  }
+  return res.json() as Promise<UserStatsDTO>;
+}

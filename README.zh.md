@@ -146,3 +146,7 @@ interface Task {
 UI 设计与资产生成由 [Figma Make](https://www.figma.com/design/qG1eukwOvwztxOcpCx1h5j/) 提供。  
 第三方依赖归属详见 [ATTRIBUTIONS.md](./ATTRIBUTIONS.md)。
 
+## 版本
+
+### 1.0.0 — 前后端流程测试
+### 1.0.1 — 修复 Progress Slider 不实时更新、任务数据迁移到服务器

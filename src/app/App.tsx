@@ -9,7 +9,7 @@ import {
 import * as Dialog from '@radix-ui/react-dialog';
 import { storageGet, storageSet, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { apiRefresh, apiLogout, setAuthFailureHandler } from './api';
+import { apiRefresh, apiLogout, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiDeleteTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats } from './api';
 
 // --- Types ---
 type Priority = 'P1' | 'P2' | 'P3';
@@ -26,6 +26,7 @@ interface Task {
   tag?: string;
   progress: number;
   dueDate?: string | null;
+  sortOrder: number;
 }
 
 // --- Constants ---
@@ -49,7 +50,7 @@ function loadTasks(): Task[] {
   return [];
 }
 
-function saveTasks(tasks: Task[]) {
+function saveTasksToCache(tasks: Task[]) {
   try {
     storageSet('taskflow_tasks', JSON.stringify(tasks));
   } catch { /**/ }
@@ -58,58 +59,34 @@ function saveTasks(tasks: Task[]) {
 // --- Persistence helpers ---
 const todayStr = () => new Date().toISOString().split('T')[0];
 
-function loadStreak(): number {
+function loadStatsFromCache(): { streak: number; completedToday: number } {
+  let streak = 0, completedToday = 0;
   try {
-    const raw = storageGet('taskflow_streak');
-    if (!raw) return 0;
-    const { count, lastDate } = JSON.parse(raw) as { count: number; lastDate: string };
-    const today = todayStr();
-    if (lastDate === today) return count;
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    if (lastDate === yesterday.toISOString().split('T')[0]) return count;
-    return 0;
-  } catch { return 0; }
-}
-
-function recordCompletion(): { streak: number; completedToday: number } {
-  const today = todayStr();
-  let completedToday = 0;
-  try {
-    const raw = storageGet('taskflow_completed_today');
-    if (raw) { const { date, count } = JSON.parse(raw); completedToday = date === today ? count : 0; }
-  } catch { /**/ }
-  completedToday += 1;
-  storageSet('taskflow_completed_today', JSON.stringify({ date: today, count: completedToday }));
-
-  let streak = 0;
-  try {
-    const raw = storageGet('taskflow_streak');
-    if (raw) {
-      const { count, lastDate } = JSON.parse(raw);
-      if (lastDate === today) {
-        streak = count;
-      } else {
-        const yesterday = new Date();
-        yesterday.setDate(yesterday.getDate() - 1);
-        streak = lastDate === yesterday.toISOString().split('T')[0] ? count + 1 : 1;
-        storageSet('taskflow_streak', JSON.stringify({ count: streak, lastDate: today }));
+    const rawS = storageGet('taskflow_streak');
+    if (rawS) {
+      const { count, lastDate } = JSON.parse(rawS) as { count: number; lastDate: string };
+      const today = todayStr();
+      if (lastDate === today) streak = count;
+      else {
+        const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+        if (lastDate === yesterday.toISOString().split('T')[0]) streak = count;
       }
-    } else {
-      streak = 1;
-      storageSet('taskflow_streak', JSON.stringify({ count: 1, lastDate: today }));
     }
-  } catch { streak = 1; }
+    const rawC = storageGet('taskflow_completed_today');
+    if (rawC) {
+      const { date, count } = JSON.parse(rawC) as { date: string; count: number };
+      completedToday = date === todayStr() ? count : 0;
+    }
+  } catch { /**/ }
   return { streak, completedToday };
 }
 
-function loadCompletedToday(): number {
-  try {
-    const raw = storageGet('taskflow_completed_today');
-    if (!raw) return 0;
-    const { date, count } = JSON.parse(raw);
-    return date === todayStr() ? count : 0;
-  } catch { return 0; }
+function saveStatsToCache(streak: number, completedToday: number) {
+  const today = todayStr();
+  const ys = new Date(); ys.setDate(ys.getDate() - 1);
+  const yStr = ys.toISOString().split('T')[0];
+  storageSet('taskflow_streak', JSON.stringify({ count: streak, lastDate: today }));
+  storageSet('taskflow_completed_today', JSON.stringify({ date: today, count: completedToday }));
 }
 
 function getGreeting(): string {
@@ -462,7 +439,8 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
   const [selectedDate, setSelectedDate] = useState<string | null>(
     fmtDate(today.getFullYear(), today.getMonth(), today.getDate())
   );
-  const [detailTask, setDetailTask] = useState<Task | null>(null);
+  const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
+  const detailTask = detailTaskId ? tasks.find(t => t.id === detailTaskId) ?? null : null;
   const [repeatTask, setRepeatTask] = useState<Task | null>(null);
 
   const firstDay = new Date(year, month, 1).getDay();
@@ -489,7 +467,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 
   return (
     <>
-      <TaskDetailModal task={detailTask} onClose={() => setDetailTask(null)} onAction={onAction} onProgressChange={onProgressChange} />
+      <TaskDetailModal task={detailTask} onClose={() => setDetailTaskId(null)} onAction={onAction} onProgressChange={onProgressChange} />
       <RepeatTaskModal task={repeatTask} onClose={() => setRepeatTask(null)} onRepeat={onRepeatTask} />
 
       <div className="w-full max-w-md space-y-4">
@@ -565,7 +543,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
                       <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground px-1">To Do — {pendingDayTasks.length}</p>
                       {pendingDayTasks.map((task, i) => (
                         <motion.button key={task.id} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.04, duration: 0.2 }}
-                          onClick={() => setDetailTask(task)}
+                          onClick={() => setDetailTaskId(task.id)}
                           className="w-full text-left bg-card border border-border rounded-xl p-4 flex items-start gap-3 hover:border-primary/40 hover:shadow-sm transition-all active:scale-[0.99]">
                           <span className={`mt-1 w-2 h-2 rounded-full flex-shrink-0 ${DOT_COLOR[task.priority]}`} />
                           <div className="flex-1 min-w-0">
@@ -624,8 +602,9 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 // AppShell contains all hooks — must never be rendered conditionally to satisfy Rules of Hooks
 function AppShell({ onLogout }: { onLogout: () => void }) {
   const [tasks, setTasks] = useState<Task[]>(() => loadTasks());
-  const [streak, setStreak] = useState(() => loadStreak());
-  const [completedToday, setCompletedToday] = useState(() => loadCompletedToday());
+  const [streak, setStreak] = useState(() => loadStatsFromCache().streak);
+  const [completedToday, setCompletedToday] = useState(() => loadStatsFromCache().completedToday);
+  const [tasksLoading, setTasksLoading] = useState(true);
   const [exitAction, setExitAction] = useState<ExitAction | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('flow');
   const [greeting] = useState(() => getGreeting());
@@ -635,13 +614,89 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
   const [isRepeatMode, setIsRepeatMode] = useState(false);
   const [form, setForm] = useState<AddTaskState>(DEFAULT_FORM);
 
+  // On mount: sync tasks and stats from server, fall back to cache
+  useEffect(() => {
+    let cancelled = false;
+    async function init() {
+      // Fetch tasks from server
+      let remoteTasks: Task[] = [];
+      let serverReachable = false;
+      try {
+        const remote = await apiGetTasks();
+        if (!cancelled) {
+          serverReachable = true;
+          remoteTasks = remote.map(t => ({
+            id: t.id, title: t.title, priority: t.priority as Priority,
+            estimateMinutes: t.estimateMinutes, status: t.status as TaskStatus,
+            tag: t.tag ?? undefined, progress: t.progress, dueDate: t.dueDate,
+            sortOrder: t.sortOrder,
+          }));
+        }
+      } catch { /* server unreachable, will use cache */ }
+
+      if (cancelled) return;
+
+      const localTasks = loadTasks();
+
+      if (serverReachable) {
+        // Merge: remote wins on conflicts, sync local-only tasks to server
+        const remoteMap = new Map(remoteTasks.map(t => [t.id, t]));
+        const localOnly = localTasks.filter(t => !remoteMap.has(t.id));
+
+        // Sync local-only tasks to server (fire-and-forget)
+        for (const t of localOnly) {
+          apiCreateTask({
+            title: t.title, priority: t.priority,
+            estimateMinutes: t.estimateMinutes,
+            status: t.status, tag: t.tag,
+            progress: t.progress, dueDate: t.dueDate,
+            sortOrder: t.sortOrder,
+          }).catch(() => {});
+        }
+
+        const merged = [...remoteTasks, ...localOnly];
+        setTasks(merged);
+        saveTasksToCache(merged);
+      } else {
+        // Offline: use cached tasks
+        setTasks(localTasks.length > 0 ? localTasks : remoteTasks);
+      }
+
+      // Stats
+      try {
+        if (serverReachable) {
+          const stats = await apiGetUserStats();
+          if (!cancelled) {
+            setStreak(stats.streak);
+            setCompletedToday(stats.todayCount);
+            saveStatsToCache(stats.streak, stats.todayCount);
+          }
+        } else {
+          throw new Error('offline');
+        }
+      } catch {
+        if (!cancelled) {
+          const cached = loadStatsFromCache();
+          setStreak(cached.streak);
+          setCompletedToday(cached.completedToday);
+        }
+      }
+      if (!cancelled) setTasksLoading(false);
+    }
+    init();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // On native cold-start, restore data from Capacitor Preferences if localStorage was cleared
   useEffect(() => {
     const STORAGE_KEYS = ['taskflow_tasks', 'taskflow_streak', 'taskflow_completed_today'];
     restoreFromNativeStorage(STORAGE_KEYS).then(() => {
-      setTasks(loadTasks());
-      setStreak(loadStreak());
-      setCompletedToday(loadCompletedToday());
+      // Re-read from localStorage into state; if API already loaded, don't overwrite
+      setTasks(prev => prev.length === 0 ? loadTasks() : prev);
+      const cached = loadStatsFromCache();
+      setStreak(prev => prev === 0 ? cached.streak : prev);
+      setCompletedToday(prev => prev === 0 ? cached.completedToday : prev);
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -655,12 +710,15 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
     return () => document.removeEventListener('keydown', handleKey);
   }, [isAddingTask]);
 
-  useEffect(() => { saveTasks(tasks); }, [tasks]);
+  // Cache tasks to localStorage whenever they change
+  useEffect(() => { saveTasksToCache(tasks); }, [tasks]);
 
   const pendingTasks = tasks.filter(t => t.status === 'todo');
 
   const handleProgressChange = (id: string, newProgress: number) => {
     setTasks(prev => prev.map(t => t.id === id ? { ...t, progress: newProgress } : t));
+    // Sync to server (fire-and-forget)
+    apiUpdateTask(id, { progress: newProgress }).catch(() => {});
   };
 
   const handleAction = (id: string, action: ExitAction) => {
@@ -673,15 +731,26 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
           return [...prev.filter(t => t.id !== id), task];
         });
         setExitAction(null);
+        // Move to end of queue on server
+        apiUpdateTask(id, { status: 'snoozed' }).catch(() => {});
       }, 320);
     } else {
       setExitAction(action);
+      const newStatus = action === 'complete' ? 'done' : 'skipped';
       setTimeout(() => {
-        setTasks(prev => prev.map(t => t.id !== id ? t : { ...t, status: action === 'complete' ? 'done' : 'skipped' }));
+        setTasks(prev => prev.map(t => t.id !== id ? t : { ...t, status: newStatus as TaskStatus }));
+        // Sync to server
+        apiUpdateTask(id, { status: newStatus }).catch(() => {});
         if (action === 'complete') {
-          const { streak: s, completedToday: c } = recordCompletion();
-          setStreak(s);
-          setCompletedToday(c);
+          // Optimistic local update, then reconcile with server
+          setCompletedToday(c => c + 1);
+          setStreak(s => s + 1);
+          const today = todayStr();
+          apiUpdateUserStats({ completedToday: today, todayCount: completedToday + 1, streak: streak + 1 }).then(stats => {
+            setStreak(stats.streak);
+            setCompletedToday(stats.todayCount);
+            saveStatsToCache(stats.streak, stats.todayCount);
+          }).catch(() => {});
         }
       }, 50);
     }
@@ -693,6 +762,9 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
       const nonPending = prev.filter(t => t.status !== 'todo');
       return [...newPendingOrder, ...nonPending];
     });
+    // Sync new sort order to server
+    const order = newPendingOrder.map((t, i) => ({ id: t.id, sortOrder: i }));
+    apiReorderTasks(order).catch(() => {});
   };
 
   const handleRepeatTask = (task: Task) => {
@@ -703,27 +775,51 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
 
   const openAddTask = () => { setForm(DEFAULT_FORM); setIsRepeatMode(false); setIsAddingTask(true); };
 
-  const handleAddTask = (e: React.FormEvent) => {
+  const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.title.trim()) return;
-    const newTask: Task = {
-      id: Math.random().toString(36).substring(7),
+    const tempId = Math.random().toString(36).substring(7);
+
+    // Compute insert position to determine sortOrder
+    const pending = tasks.filter(t => t.status === 'todo');
+    const idx = insertIndex(tasks, { id: tempId, title: '', priority: form.priority, estimateMinutes: 0, status: 'todo', progress: 0, dueDate: form.dueDate || null, sortOrder: 0 } as Task);
+
+    const optimisticTask: Task = {
+      id: tempId,
       title: form.title, priority: form.priority,
       estimateMinutes: parseInt(form.minutes) || 15,
       status: 'todo', progress: 0,
       dueDate: form.dueDate || null, tag: form.tag,
+      sortOrder: idx,
     };
+    // Optimistic insert
     setTasks(prev => {
-      const i = insertIndex(prev, newTask);
-      return [...prev.slice(0, i), newTask, ...prev.slice(i)];
+      const i = insertIndex(prev, optimisticTask);
+      return [...prev.slice(0, i), optimisticTask, ...prev.slice(i)];
     });
     setIsAddingTask(false);
     setIsRepeatMode(false);
     setForm(DEFAULT_FORM);
+    // Sync to server, replace temp ID with server ID
+    try {
+      const created = await apiCreateTask({
+        title: optimisticTask.title,
+        priority: optimisticTask.priority,
+        estimateMinutes: optimisticTask.estimateMinutes,
+        status: optimisticTask.status,
+        tag: optimisticTask.tag,
+        progress: optimisticTask.progress,
+        dueDate: optimisticTask.dueDate,
+        sortOrder: optimisticTask.sortOrder,
+      });
+      setTasks(prev => prev.map(t => t.id === tempId ? { ...t, id: created.id } : t));
+    } catch {
+      // Task stays with temp ID; will be overwritten on next server sync
+    }
   };
-
+  
   return (
-    <div className="h-screen bg-background text-foreground flex flex-col items-center pt-safe overflow-hidden selection:bg-primary/20">
+    <div className="h-dvh bg-background text-foreground flex flex-col items-center pt-safe overflow-hidden selection:bg-primary/20">
 
       {/* Header */}
       <header className="w-full max-w-md px-4 sm:px-6 flex items-center justify-between mb-5">
@@ -754,6 +850,13 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
         <ViewToggle view={viewMode} onChange={setViewMode} />
       </div>
 
+      {/* Loading state */}
+      {tasksLoading ? (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+        </div>
+      ) : (
+        <>
       {/*
        * Sliding container: both views rendered side-by-side, container translates
        * to reveal the active panel. Eliminates AnimatePresence exit/enter timing
@@ -860,6 +963,8 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
         onClose={() => setIsReordering(false)}
         onSave={handleSaveOrder}
       />
+      </>
+      )}
 
       {/* FAB */}
       <button
@@ -1007,7 +1112,7 @@ export default function App() {
 
   if (appState === 'loading') {
     return (
-      <div className="h-screen bg-background flex items-center justify-center">
+      <div className="h-dvh bg-background flex items-center justify-center">
         <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
       </div>
     );
