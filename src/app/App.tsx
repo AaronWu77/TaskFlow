@@ -1226,6 +1226,8 @@ export default function App() {
   useEffect(() => {
     setAuthFailureHandler(() => {
       localStorage.removeItem('taskflow_logged_in');
+      localStorage.removeItem('taskflow_user_email');
+      localStorage.removeItem('taskflow_refresh_token');
       setAppState('auth');
     });
     return () => setAuthFailureHandler(null);
@@ -1258,14 +1260,15 @@ export default function App() {
       try { await apiUpdateUserStats({ todayCount: stats.completedToday }); } catch { /* */ }
     } catch { /* non-critical */ }
 
-    await apiLogout();
-    // Wipe local database
+    try { await apiLogout(); } catch { /* still clean up locally */ }
+    // Wipe local database (always, even if network logout fails)
     storageSet('taskflow_tasks', '');
     storageSet('taskflow_streak', '');
     storageSet('taskflow_completed_today', '');
     storageSet(SYNC_META_KEY, '');
     localStorage.removeItem('taskflow_logged_in');
     localStorage.removeItem('taskflow_user_email');
+    localStorage.removeItem('taskflow_refresh_token');
     setAppState('auth');
     setUserEmail('');
   }

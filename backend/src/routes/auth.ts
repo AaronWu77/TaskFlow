@@ -55,7 +55,7 @@ router.post('/register', asyncHandler(async (req, res) => {
   const accessToken = signAccess(user.id);
   const refreshToken = signRefresh(user.id);
   res.cookie(REFRESH_COOKIE, refreshToken, COOKIE_OPTS);
-  res.status(201).json({ accessToken, user: { id: user.id, email: user.email } });
+  res.status(201).json({ accessToken, refreshToken, user: { id: user.id, email: user.email } });
 }));
 
 // POST /auth/login
@@ -78,12 +78,12 @@ router.post('/login', asyncHandler(async (req, res) => {
   const accessToken = signAccess(user.id);
   const refreshToken = signRefresh(user.id);
   res.cookie(REFRESH_COOKIE, refreshToken, COOKIE_OPTS);
-  res.json({ accessToken, user: { id: user.id, email: user.email } });
+  res.json({ accessToken, refreshToken, user: { id: user.id, email: user.email } });
 }));
 
 // POST /auth/refresh
 router.post('/refresh', (req: Request, res: Response): void => {
-  const token = req.cookies?.[REFRESH_COOKIE];
+  const token = req.cookies?.[REFRESH_COOKIE] || req.headers.authorization?.replace('Bearer ', '');
   if (!token) {
     res.status(401).json({ error: 'No refresh token' });
     return;

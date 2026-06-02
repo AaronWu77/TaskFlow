@@ -3,8 +3,12 @@
 const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || 'http://localhost:3000';
 
 // Access token stored in memory only (not localStorage) — reduces XSS risk.
-// On page refresh, the token is gone; a silent refresh via httpOnly cookie re-issues it.
+// On page refresh, the token is gone; a silent refresh via stored refreshToken re-issues it.
 let accessToken: string | null = null;
+
+// Refresh token stored in localStorage for persistent auto-login across app restarts
+let refreshToken: string | null = null;
+const REFRESH_TOKEN_KEY = 'taskflow_refresh_token';
 
 // Callback invoked when both the access token and refresh cookie are expired.
 // The App component registers this to transition back to the login screen.
@@ -15,13 +19,34 @@ function setAccessToken(token: string | null) {
   accessToken = token;
 }
 
-/** Attempt a silent token refresh using the httpOnly refresh cookie.
+function getRefreshToken(): string | null {
+  if (refreshToken) return refreshToken;
+  try {
+    refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
+  } catch { /**/ }
+  return refreshToken;
+}
+
+function setRefreshToken(token: string | null) {
+  refreshToken = token;
+  try {
+    if (token) localStorage.setItem(REFRESH_TOKEN_KEY, token);
+    else localStorage.removeItem(REFRESH_TOKEN_KEY);
+  } catch { /**/ }
+}
+
+/** Attempt a silent token refresh using stored refreshToken (header) or httpOnly cookie.
  *  Returns true if a new access token was obtained, false otherwise. */
 export async function apiRefresh(): Promise<boolean> {
   try {
+    const token = getRefreshToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
     const res = await fetch(`${BASE_URL}/auth/refresh`, {
       method: 'POST',
       credentials: 'include',
+      headers,
     });
     if (!res.ok) return false;
     const data = await res.json() as { accessToken: string };
@@ -72,8 +97,9 @@ export async function apiLogin(email: string, password: string): Promise<{ user:
     const err = await res.json() as { error: string };
     throw new Error(err.error || 'Login failed');
   }
-  const data = await res.json() as { user: AuthUser; accessToken: string };
+  const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken: string };
   setAccessToken(data.accessToken);
+  if (data.refreshToken) setRefreshToken(data.refreshToken);
   return data;
 }
 
@@ -88,14 +114,16 @@ export async function apiRegister(email: string, password: string): Promise<{ us
     const err = await res.json() as { error: string };
     throw new Error(err.error || 'Registration failed');
   }
-  const data = await res.json() as { user: AuthUser; accessToken: string };
+  const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken: string };
   setAccessToken(data.accessToken);
+  if (data.refreshToken) setRefreshToken(data.refreshToken);
   return data;
 }
 
 export async function apiLogout(): Promise<void> {
-  await fetch(`${BASE_URL}/auth/logout`, { method: 'POST', credentials: 'include' });
+  try { await fetch(`${BASE_URL}/auth/logout`, { method: 'POST', credentials: 'include' }); } catch { /* */ }
   setAccessToken(null);
+  setRefreshToken(null);
 }
 
 // ── Task CRUD ──
