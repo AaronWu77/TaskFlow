@@ -756,11 +756,9 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
         // Sync to server
         apiUpdateTask(id, { status: newStatus }).catch((e) => console.warn('Failed to sync task status:', e));
         if (action === 'complete') {
-          // Optimistic local update, then reconcile with server
+          // Increment completedToday locally; streak is computed server-side
           setCompletedToday(c => c + 1);
-          setStreak(s => s + 1);
-          const today = todayStr();
-          apiUpdateUserStats({ completedToday: today, todayCount: completedToday + 1, streak: streak + 1 }).then(stats => {
+          apiUpdateUserStats({ todayCount: completedToday + 1 }).then(stats => {
             setStreak(stats.streak);
             setCompletedToday(stats.todayCount);
             saveStatsToCache(stats.streak, stats.todayCount);

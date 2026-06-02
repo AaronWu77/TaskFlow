@@ -128,6 +128,12 @@ git pull
 docker compose up -d --build api
 ```
 
+如果出现了env里内容不匹配的问题，则
+```bash
+cat /opt/TaskFlow/.env
+nano /opt/TaskFlow/.env
+```
+
 ---
 
 ## 四、前端构建（iOS）
