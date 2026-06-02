@@ -10,6 +10,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { storageGet, storageSet, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
 import { apiRefresh, apiLogout, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiDeleteTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats } from './api';
+import { toast, Toaster } from 'sonner';
 
 // --- Types ---
 type Priority = 'P1' | 'P2' | 'P3';
@@ -27,6 +28,71 @@ interface Task {
   progress: number;
   dueDate?: string | null;
   sortOrder: number;
+  _dirty?: boolean; // local-only: true if pending sync to server
+}
+
+// Sync metadata
+type SyncMeta = { lastSync: string };
+const SYNC_META_KEY = 'taskflow_sync_meta';
+
+function loadSyncMeta(): SyncMeta {
+  try {
+    const raw = storageGet(SYNC_META_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch { /**/ }
+  return { lastSync: '' };
+}
+
+function saveSyncMeta(meta: SyncMeta) {
+  storageSet(SYNC_META_KEY, JSON.stringify(meta));
+}
+
+/** Mark a task as dirty and persist to cache */
+function markDirty(tasks: Task[], id: string): Task[] {
+  const updated = tasks.map(t => t.id === id ? { ...t, _dirty: true } : t);
+  saveTasksToCache(updated);
+  return updated;
+}
+
+/** Mark a task as clean and persist to cache */
+function markClean(tasks: Task[], id: string): Task[] {
+  const updated = tasks.map(t => t.id === id ? { ...t, _dirty: false } : t);
+  saveTasksToCache(updated);
+  return updated;
+}
+
+/** Push all dirty tasks to server, returning tasks with clean flags */
+async function flushDirtyTasks(tasks: Task[]): Promise<Task[]> {
+  const dirty = tasks.filter(t => t._dirty);
+  if (dirty.length === 0) return tasks;
+
+  let updated = [...tasks];
+  for (const t of dirty) {
+    try {
+      const remote = await apiGetTasks().catch(() => [] as { id: string }[]);
+      const exists = remote.some((r: { id: string }) => r.id === t.id);
+      if (exists) {
+        await apiUpdateTask(t.id, {
+          title: t.title, priority: t.priority,
+          estimateMinutes: t.estimateMinutes, status: t.status,
+          tag: t.tag, progress: t.progress, dueDate: t.dueDate,
+          sortOrder: t.sortOrder,
+        });
+      } else {
+        const created = await apiCreateTask({
+          title: t.title, priority: t.priority,
+          estimateMinutes: t.estimateMinutes, status: t.status,
+          tag: t.tag, progress: t.progress, dueDate: t.dueDate,
+          sortOrder: t.sortOrder,
+        });
+        updated = updated.map(x => x.id === t.id ? { ...x, id: created.id } : x);
+      }
+      updated = markClean(updated, t.id);
+    } catch {
+      // Keep dirty, will retry later
+    }
+  }
+  return updated;
 }
 
 // --- Constants ---
@@ -616,63 +682,42 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
   const [isRepeatMode, setIsRepeatMode] = useState(false);
   const [form, setForm] = useState<AddTaskState>(DEFAULT_FORM);
 
-  // On mount: sync tasks and stats from server, fall back to cache
+  // On mount: pull all tasks from cloud (cloud-primary), fall back to cache
   useEffect(() => {
     let cancelled = false;
     async function init() {
-      // Fetch tasks from server
-      let remoteTasks: Task[] = [];
       let serverReachable = false;
       try {
         const remote = await apiGetTasks();
         if (!cancelled) {
           serverReachable = true;
-          remoteTasks = remote.map(t => ({
+          const remoteTasks: Task[] = remote.map(t => ({
             id: t.id, title: t.title, priority: t.priority as Priority,
             estimateMinutes: t.estimateMinutes, status: t.status as TaskStatus,
             tag: t.tag ?? undefined, progress: t.progress, dueDate: t.dueDate,
-            sortOrder: t.sortOrder,
+            sortOrder: t.sortOrder, _dirty: false,
           }));
+
+          // Preserve dirty tasks from cache that haven't reached the server yet
+          const cached = loadTasks();
+          const remoteIds = new Set(remoteTasks.map(t => t.id));
+          const dirtyTasks = cached.filter(t => t._dirty && !remoteIds.has(t.id));
+
+          const merged = [...remoteTasks, ...dirtyTasks];
+          setTasks(merged);
+          saveTasksToCache(merged);
+          saveSyncMeta({ lastSync: new Date().toISOString() });
         }
-      } catch (e) { 
-        console.warn('TaskFlow: failed to fetch tasks from server:', e);
-        /* server unreachable, will use cache */ 
+      } catch {
+        console.warn('TaskFlow: server unreachable, using cached data');
       }
 
       if (cancelled) return;
 
-      const localTasks = loadTasks();
-
-      if (serverReachable) {
-        // Merge: remote wins on conflicts, sync local-only tasks to server
-        const remoteMap = new Map(remoteTasks.map(t => [t.id, t]));
-        const localOnly = localTasks.filter(t => !remoteMap.has(t.id));
-
-        // Sync local-only tasks to server, then update local IDs with server IDs
-        const syncedTasks: Task[] = [];
-        for (const t of localOnly) {
-          try {
-            const created = await apiCreateTask({
-              title: t.title, priority: t.priority,
-              estimateMinutes: t.estimateMinutes,
-              status: t.status, tag: t.tag,
-              progress: t.progress, dueDate: t.dueDate,
-              sortOrder: t.sortOrder,
-            });
-            syncedTasks.push({ ...t, id: created.id });
-          } catch (e) {
-            console.warn('Failed to sync local task to server:', t.title, e);
-            syncedTasks.push(t); // keep temp ID, will retry next refresh
-          }
-        }
-
-        const merged = [...remoteTasks, ...syncedTasks];
-        setTasks(merged);
-        saveTasksToCache(merged);
-      } else {
-        console.warn('TaskFlow: server unreachable, using cached data');
-        // Offline: use cached tasks
-        setTasks(localTasks.length > 0 ? localTasks : remoteTasks);
+      // If offline, use cached tasks
+      if (!serverReachable) {
+        const cached = loadTasks();
+        setTasks(cached.length > 0 ? cached : []);
       }
 
       // Stats
@@ -689,7 +734,6 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
         }
       } catch {
         if (!cancelled) {
-          console.warn('TaskFlow: failed to fetch user stats, using cache');
           const cached = loadStatsFromCache();
           setStreak(cached.streak);
           setCompletedToday(cached.completedToday);
@@ -730,9 +774,14 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
   const pendingTasks = tasks.filter(t => t.status === 'todo');
 
   const handleProgressChange = (id: string, newProgress: number) => {
-    setTasks(prev => prev.map(t => t.id === id ? { ...t, progress: newProgress } : t));
-    // Sync to server (fire-and-forget)
-    apiUpdateTask(id, { progress: newProgress }).catch((e) => console.warn('Failed to sync progress:', e));
+    setTasks(prev => {
+      const updated = prev.map(t => t.id === id ? { ...t, progress: newProgress } : t);
+      return markDirty(updated, id);
+    });
+    // Background push
+    apiUpdateTask(id, { progress: newProgress })
+      .then(() => setTasks(prev => markClean(prev, id)))
+      .catch(() => toast.error('Sync failed — retrying on next action'));
   };
 
   const handleAction = (id: string, action: ExitAction) => {
@@ -742,27 +791,34 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
         setTasks(prev => {
           const task = prev.find(t => t.id === id);
           if (!task) return prev;
-          return [...prev.filter(t => t.id !== id), task];
+          return markDirty([...prev.filter(t => t.id !== id), task], id);
         });
         setExitAction(null);
-        // Move to end of queue on server
-        apiUpdateTask(id, { status: 'snoozed' }).catch((e) => console.warn('Failed to sync snooze:', e));
+        apiUpdateTask(id, { status: 'snoozed' })
+          .then(() => setTasks(prev => markClean(prev, id)))
+          .catch(() => toast.error('Sync failed — retrying on next action'));
       }, 320);
     } else {
       setExitAction(action);
       const newStatus = action === 'complete' ? 'done' : 'skipped';
       setTimeout(() => {
-        setTasks(prev => prev.map(t => t.id !== id ? t : { ...t, status: newStatus as TaskStatus }));
-        // Sync to server
-        apiUpdateTask(id, { status: newStatus }).catch((e) => console.warn('Failed to sync task status:', e));
+        setTasks(prev => {
+          const updated = prev.map(t => t.id !== id ? t : { ...t, status: newStatus as TaskStatus });
+          return markDirty(updated, id);
+        });
+        apiUpdateTask(id, { status: newStatus })
+          .then(() => setTasks(prev => markClean(prev, id)))
+          .catch(() => toast.error('Sync failed — retrying on next action'));
         if (action === 'complete') {
-          // Increment completedToday locally; streak is computed server-side
-          setCompletedToday(c => c + 1);
-          apiUpdateUserStats({ todayCount: completedToday + 1 }).then(stats => {
-            setStreak(stats.streak);
-            setCompletedToday(stats.todayCount);
-            saveStatsToCache(stats.streak, stats.todayCount);
-          }).catch((e) => console.warn('Failed to sync user stats:', e));
+          setCompletedToday(c => {
+            const newCount = c + 1;
+            apiUpdateUserStats({ todayCount: newCount }).then(stats => {
+              setStreak(stats.streak);
+              setCompletedToday(stats.todayCount);
+              saveStatsToCache(stats.streak, stats.todayCount);
+            }).catch(() => toast.error('Stats sync failed — retrying'));
+            return newCount;
+          });
         }
       }, 50);
     }
@@ -772,11 +828,23 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
   const handleSaveOrder = (newPendingOrder: Task[]) => {
     setTasks(prev => {
       const nonPending = prev.filter(t => t.status !== 'todo');
-      return [...newPendingOrder, ...nonPending];
+      const merged = [...newPendingOrder, ...nonPending];
+      // Mark all reordered pending tasks as dirty
+      const ids = new Set(newPendingOrder.map(t => t.id));
+      saveTasksToCache(merged.map(t => ids.has(t.id) ? { ...t, _dirty: true } : t));
+      return merged.map(t => ids.has(t.id) ? { ...t, _dirty: true } : t);
     });
-    // Sync new sort order to server
     const order = newPendingOrder.map((t, i) => ({ id: t.id, sortOrder: i }));
-    apiReorderTasks(order).catch((e) => console.warn('Failed to sync reorder:', e));
+    apiReorderTasks(order)
+      .then(() => {
+        const ids = new Set(newPendingOrder.map(t => t.id));
+        setTasks(prev => {
+          const cleaned = prev.map(t => ids.has(t.id) ? { ...t, _dirty: false } : t);
+          saveTasksToCache(cleaned);
+          return cleaned;
+        });
+      })
+      .catch(() => toast.error('Reorder sync failed — retrying'));
   };
 
   const handleRepeatTask = (task: Task) => {
@@ -792,19 +860,17 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
     if (!form.title.trim()) return;
     const tempId = Math.random().toString(36).substring(7);
 
-    // Compute insert position to determine sortOrder
     const pending = tasks.filter(t => t.status === 'todo');
     const idx = insertIndex(tasks, { id: tempId, title: '', priority: form.priority, estimateMinutes: 0, status: 'todo', progress: 0, dueDate: form.dueDate || null, sortOrder: 0 } as Task);
 
     const optimisticTask: Task = {
-      id: tempId,
+      id: tempId, _dirty: true,
       title: form.title, priority: form.priority,
       estimateMinutes: parseInt(form.minutes) || 15,
       status: 'todo', progress: 0,
       dueDate: form.dueDate || null, tag: form.tag,
       sortOrder: idx,
     };
-    // Optimistic insert
     setTasks(prev => {
       const i = insertIndex(prev, optimisticTask);
       return [...prev.slice(0, i), optimisticTask, ...prev.slice(i)];
@@ -812,23 +878,18 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
     setIsAddingTask(false);
     setIsRepeatMode(false);
     setForm(DEFAULT_FORM);
-    // Sync to server, replace temp ID with server ID
-    try {
-      const created = await apiCreateTask({
-        title: optimisticTask.title,
-        priority: optimisticTask.priority,
-        estimateMinutes: optimisticTask.estimateMinutes,
-        status: optimisticTask.status,
-        tag: optimisticTask.tag,
-        progress: optimisticTask.progress,
-        dueDate: optimisticTask.dueDate,
-        sortOrder: optimisticTask.sortOrder,
-      });
-      setTasks(prev => prev.map(t => t.id === tempId ? { ...t, id: created.id } : t));
-    } catch (e) {
-      console.warn('Failed to sync new task to server, will retry on next refresh:', optimisticTask.title, e);
-      // Task stays with temp ID; merge loop will re-sync on next page load
-    }
+    // Background push
+    apiCreateTask({
+      title: optimisticTask.title, priority: optimisticTask.priority,
+      estimateMinutes: optimisticTask.estimateMinutes,
+      status: optimisticTask.status, tag: optimisticTask.tag,
+      progress: optimisticTask.progress, dueDate: optimisticTask.dueDate,
+      sortOrder: optimisticTask.sortOrder,
+    }).then(created => {
+      setTasks(prev => markClean(prev.map(t => t.id === tempId ? { ...t, id: created.id } : t), created.id));
+    }).catch((e) => {
+      toast.error('New task sync failed — will retry on next action');
+    });
   };
   
   return (
@@ -857,6 +918,9 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
           </button>
         </div>
       </header>
+
+      {/* Toast notifications */}
+      <Toaster />
 
       {/* View Toggle */}
       <div className="w-full max-w-md px-4 sm:px-6 flex justify-center mb-5">
@@ -1118,7 +1182,24 @@ export default function App() {
   }
 
   async function handleLogout() {
+    // Flush dirty tasks to cloud before logout
+    try {
+      const raw = storageGet('taskflow_tasks');
+      if (raw) {
+        const tasks = JSON.parse(raw) as Task[];
+        await flushDirtyTasks(tasks);
+      }
+      // Push current stats
+      const stats = loadStatsFromCache();
+      try { await apiUpdateUserStats({ todayCount: stats.completedToday }); } catch { /* */ }
+    } catch { /* non-critical */ }
+
     await apiLogout();
+    // Wipe local database
+    storageSet('taskflow_tasks', '');
+    storageSet('taskflow_streak', '');
+    storageSet('taskflow_completed_today', '');
+    storageSet(SYNC_META_KEY, '');
     localStorage.removeItem('taskflow_logged_in');
     setAppState('auth');
   }
