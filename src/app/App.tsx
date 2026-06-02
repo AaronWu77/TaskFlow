@@ -944,7 +944,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
   };
   
   return (
-    <div className="h-dvh bg-background text-foreground flex flex-col items-center pt-safe overflow-hidden selection:bg-primary/20">
+    <div className="h-dvh bg-background text-foreground flex flex-col items-center pt-safe overflow-hidden overscroll-none selection:bg-primary/20">
 
       {/* Account Page */}
       <AnimatePresence>
