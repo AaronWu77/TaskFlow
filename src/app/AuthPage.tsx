@@ -4,12 +4,13 @@ import { CheckCircle2, Mail, Lock, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { apiLogin, apiRegister } from './api';
 
 interface AuthPageProps {
-  onAuth: (email: string) => void;
+  onAuth: (email: string, password: string) => void;
+  savedEmail?: string;
 }
 
-export function AuthPage({ onAuth }: AuthPageProps) {
+export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
   const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(savedEmail || '');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -25,7 +26,7 @@ export function AuthPage({ onAuth }: AuthPageProps) {
     try {
       const fn = mode === 'login' ? apiLogin : apiRegister;
       const result = await fn(email.trim().toLowerCase(), password);
-      onAuth(result.user.email);
+      onAuth(result.user.email, password);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {

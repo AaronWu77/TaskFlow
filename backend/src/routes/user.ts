@@ -52,8 +52,10 @@ router.patch('/stats', asyncHandler(async (req, res) => {
     });
   }
 
+  const oldCompletedToday = stats.completedToday;
+
   // Reset todayCount if the stored date is not today
-  if (stats.completedToday !== today) {
+  if (oldCompletedToday !== today) {
     stats = await prisma.userStats.update({
       where: { userId: req.userId! },
       data: { completedToday: today, todayCount: 0 },
@@ -62,7 +64,7 @@ router.patch('/stats', asyncHandler(async (req, res) => {
 
   // Compute streak: only increment on a new day, and only if consecutive
   let newStreak = stats.streak;
-  if (stats.completedToday !== today) {
+  if (oldCompletedToday !== today) {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
     const yStr = yesterday.toISOString().split('T')[0];

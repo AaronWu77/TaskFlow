@@ -9,7 +9,7 @@ import {
 import * as Dialog from '@radix-ui/react-dialog';
 import { storageGet, storageSet, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { apiRefresh, apiLogout, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiDeleteTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats } from './api';
+import { apiLogout, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiDeleteTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiLogin } from './api';
 import { toast, Toaster } from 'sonner';
 
 // --- Types ---
@@ -1226,24 +1226,40 @@ export default function App() {
   useEffect(() => {
     setAuthFailureHandler(() => {
       localStorage.removeItem('taskflow_logged_in');
-      localStorage.removeItem('taskflow_user_email');
+      localStorage.removeItem('taskflow_user_pwd');
       localStorage.removeItem('taskflow_refresh_token');
+      // Keep taskflow_user_email so login form is pre-filled
       setAppState('auth');
     });
     return () => setAuthFailureHandler(null);
   }, []);
 
-  // On mount, attempt silent token refresh if the user was previously logged in
+  // On mount: if user didn't logout, auto-login with stored credentials
   useEffect(() => {
     if (appState !== 'loading') return;
-    apiRefresh().then(ok => setAppState(ok ? 'app' : 'auth'));
+    const email = localStorage.getItem('taskflow_user_email');
+    const pwd = localStorage.getItem('taskflow_user_pwd');
+    if (email && pwd) {
+      apiLogin(email, pwd)
+        .then(result => {
+          setUserEmail(result.user.email);
+          setAppState('app');
+        })
+        .catch(() => {
+          // Credentials invalid, show login form
+          setAppState('auth');
+        });
+    } else {
+      setAppState('auth');
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function handleAuth(email: string) {
+  function handleAuth(email: string, password: string) {
     setUserEmail(email);
     localStorage.setItem('taskflow_logged_in', '1');
     localStorage.setItem('taskflow_user_email', email);
+    localStorage.setItem('taskflow_user_pwd', password);
     setAppState('app');
   }
 
@@ -1268,6 +1284,7 @@ export default function App() {
     storageSet(SYNC_META_KEY, '');
     localStorage.removeItem('taskflow_logged_in');
     localStorage.removeItem('taskflow_user_email');
+    localStorage.removeItem('taskflow_user_pwd');
     localStorage.removeItem('taskflow_refresh_token');
     setAppState('auth');
     setUserEmail('');
@@ -1282,7 +1299,7 @@ export default function App() {
   }
 
   if (appState === 'auth') {
-    return <AuthPage onAuth={handleAuth} />;
+    return <AuthPage onAuth={handleAuth} savedEmail={localStorage.getItem('taskflow_user_email') || undefined} />;
   }
 
   return <AppShell email={userEmail} onLogout={handleLogout} />;
