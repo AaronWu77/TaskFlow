@@ -15,14 +15,12 @@
 
 ## 2. TodoList
 
-| ID | 任务 | 说明 |
-|----|------|------|
-| `fix-docker-prisma` | 修复 Dockerfile 中 Prisma 迁移所需的文件缺失 | 当前 runner 阶段缺少 migrations 目录和 prisma CLI |
-| `self-host-plan` | 制定「自有电脑 24h 部署」方案 | 含公网访问、动态 IP 处理、HTTPS、端口映射 |
-| `cloud-host-plan` | 制定「云服务器部署」方案 | 含服务器选购、安全组、域名、HTTPS |
-| `docker-compose-fix` | 修复 docker-compose.yml 中的 schema 路径问题 | `--schema=prisma/schema.prisma` vs 实际路径 |
-| `ios-rebuild-guide` | 编写 iPhone 重新构建指南 | 部署完成后如何让 App 指向新服务器 |
-| `update-doc` | 更新 TUTORIAL.md 添加部署章节 | 将两个方案写入教程，提供完整操作步骤 |
+| ID | 任务 | 说明 | 状态 |
+|----|------|------|------|
+| `fix-docker-prisma` | 修复 Dockerfile 中 Prisma 迁移所需的文件缺失 | 已补充 prisma CLI、@prisma 包、migrations 目录复制 | ✅ 完成 |
+| `cloud-host-plan` | 制定「云服务器部署」方案 | 详见 `doc/deploy-aliyun.md` | ✅ 完成 |
+| `ios-rebuild-guide` | 编写 iPhone 重新构建指南 | 已包含在部署指南第 6 节 | ✅ 完成 |
+| `update-doc` | 更新 TUTORIAL.md 添加部署章节 | 待用户确认后更新 | ⏳ 待定 |
 
 ---
 
