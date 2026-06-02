@@ -28,6 +28,7 @@ iPhone (Capacitor WKWebView)
 | 系统 | Ubuntu 22.04 |
 | 安全组 | 开放 22 / 80 / 443 |
 | 域名 | taskflow.top（阿里云万网） |
+| Git | GitHub SSH key 免密访问 |
 
 ### 2. DNS
 
@@ -49,7 +50,19 @@ apt update && apt install -y docker-ce docker-ce-cli containerd.io docker-compos
 systemctl enable docker && systemctl start docker
 ```
 
-### 4. Docker 镜像加速
+### 4. Git 配置（服务器）
+
+```bash
+# 生成 SSH key
+ssh-keygen -t ed25519 -C "server@taskflow" -f ~/.ssh/id_ed25519 -N ""
+cat ~/.ssh/id_ed25519.pub
+# → 复制公钥，添加到 https://github.com/settings/keys
+
+# 测试连接
+ssh -T git@github.com
+```
+
+### 5. Docker 镜像加速
 
 ```bash
 mkdir -p /etc/docker
@@ -65,21 +78,12 @@ systemctl daemon-reload && systemctl restart docker
 
 ## 二、代码部署
 
-### 1. 上传代码（Mac → 服务器）
+### 1. 首次克隆（服务器）
 
 ```bash
-# Mac 端——打包（排除 .git 和 node_modules）
-cd ~/Desktop
-COPYFILE_DISABLE=1 tar --exclude='TaskFlow/.git' \
-  --exclude='TaskFlow/node_modules' \
-  --exclude='TaskFlow/backend/node_modules' \
-  -czf taskflow.tar.gz TaskFlow/
-
-# 上传
-scp taskflow.tar.gz root@47.95.226.89:/opt/
-
-# SSH 端——解压
-cd /opt && tar xzf taskflow.tar.gz && cd TaskFlow
+mkdir -p /opt && cd /opt
+git clone git@github.com:AaronWu77/TaskFlow.git
+cd TaskFlow
 ```
 
 ### 2. 配置环境变量
@@ -89,7 +93,7 @@ cat > .env << EOF
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 JWT_ACCESS_SECRET=$(openssl rand -hex 48)
 JWT_REFRESH_SECRET=$(openssl rand -hex 48)
-CORS_ORIGIN=http://47.95.226.89,capacitor://localhost,http://localhost:5173
+CORS_ORIGIN=http://47.95.226.89,capacitor://localhost,http://localhost:5173,https://taskflow.top
 COOKIE_SECURE=false
 EOF
 ```
@@ -106,6 +110,22 @@ docker compose up -d
 ```bash
 docker compose ps          # 三个容器均为 Up
 curl http://localhost/health    # → {"status":"ok"}
+```
+
+### 5. 后续更新（标准流程）
+
+```bash
+# Mac 本地 → 推送到 GitHub
+cd ~/Desktop/TaskFlow
+git add .
+git commit -m "描述你的改动"
+git push origin main
+
+# 服务器 → 拉取并重建
+ssh root@47.95.226.89
+cd /opt/TaskFlow
+git pull
+docker compose up -d --build api
 ```
 
 ---
@@ -153,10 +173,8 @@ VITE_API_URL=https://taskflow.top/api npm run ios
 ## 五、常用运维命令
 
 ```bash
-# 更新代码（Mac 上传新文件后）
-scp <文件> root@47.95.226.89:/opt/TaskFlow/<路径>
-# SSH 重建
-cd /opt/TaskFlow && docker compose build && docker compose up -d
+# 更新代码
+cd /opt/TaskFlow && git pull && docker compose up -d --build api
 
 # 查看日志
 docker compose logs -f api
@@ -224,7 +242,7 @@ app.use(cors({
 POSTGRES_PASSWORD=<随机生成>
 JWT_ACCESS_SECRET=<随机生成>
 JWT_REFRESH_SECRET=<随机生成>
-CORS_ORIGIN=http://47.95.226.89,capacitor://localhost,http://localhost:5173
+CORS_ORIGIN=http://47.95.226.89,capacitor://localhost,http://localhost:5173,https://taskflow.top
 COOKIE_SECURE=false
 ```
 

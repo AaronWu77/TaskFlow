@@ -210,14 +210,16 @@ function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
             </div>
             <div className="flex items-center gap-3 bg-muted/30 backdrop-blur-sm px-3 py-2 rounded-lg">
               <span className="text-sm font-medium text-muted-foreground whitespace-nowrap">Progress</span>
-              <input
-                type="range" min="0" max="100" step="5"
-                value={task.progress}
-                onChange={(e) => onProgressChange(task.id, parseInt(e.target.value))}
-                onPointerDown={(e) => e.stopPropagation()}
-                className="flex-1 h-1.5 bg-muted rounded-full appearance-none cursor-pointer"
-                style={{ accentColor: 'var(--primary)' }}
-              />
+              {/* Wrapper div isolates slider from parent motion drag events */}
+              <div onPointerDown={(e) => e.stopPropagation()} onPointerMove={(e) => e.stopPropagation()} className="flex-1">
+                <input
+                  type="range" min="0" max="100" step="5"
+                  value={task.progress}
+                  onChange={(e) => onProgressChange(task.id, parseInt(e.target.value))}
+                  className="w-full h-1.5 bg-muted rounded-full appearance-none cursor-pointer"
+                  style={{ accentColor: 'var(--primary)' }}
+                />
+              </div>
               <span className="text-sm font-medium text-muted-foreground w-9 text-right">{task.progress}%</span>
             </div>
           </div>
@@ -632,7 +634,10 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
             sortOrder: t.sortOrder,
           }));
         }
-      } catch { /* server unreachable, will use cache */ }
+      } catch (e) { 
+        console.warn('TaskFlow: failed to fetch tasks from server:', e);
+        /* server unreachable, will use cache */ 
+      }
 
       if (cancelled) return;
 
@@ -643,21 +648,29 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
         const remoteMap = new Map(remoteTasks.map(t => [t.id, t]));
         const localOnly = localTasks.filter(t => !remoteMap.has(t.id));
 
-        // Sync local-only tasks to server (fire-and-forget)
+        // Sync local-only tasks to server, then update local IDs with server IDs
+        const syncedTasks: Task[] = [];
         for (const t of localOnly) {
-          apiCreateTask({
-            title: t.title, priority: t.priority,
-            estimateMinutes: t.estimateMinutes,
-            status: t.status, tag: t.tag,
-            progress: t.progress, dueDate: t.dueDate,
-            sortOrder: t.sortOrder,
-          }).catch(() => {});
+          try {
+            const created = await apiCreateTask({
+              title: t.title, priority: t.priority,
+              estimateMinutes: t.estimateMinutes,
+              status: t.status, tag: t.tag,
+              progress: t.progress, dueDate: t.dueDate,
+              sortOrder: t.sortOrder,
+            });
+            syncedTasks.push({ ...t, id: created.id });
+          } catch (e) {
+            console.warn('Failed to sync local task to server:', t.title, e);
+            syncedTasks.push(t); // keep temp ID, will retry next refresh
+          }
         }
 
-        const merged = [...remoteTasks, ...localOnly];
+        const merged = [...remoteTasks, ...syncedTasks];
         setTasks(merged);
         saveTasksToCache(merged);
       } else {
+        console.warn('TaskFlow: server unreachable, using cached data');
         // Offline: use cached tasks
         setTasks(localTasks.length > 0 ? localTasks : remoteTasks);
       }
@@ -676,6 +689,7 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
         }
       } catch {
         if (!cancelled) {
+          console.warn('TaskFlow: failed to fetch user stats, using cache');
           const cached = loadStatsFromCache();
           setStreak(cached.streak);
           setCompletedToday(cached.completedToday);
@@ -718,7 +732,7 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
   const handleProgressChange = (id: string, newProgress: number) => {
     setTasks(prev => prev.map(t => t.id === id ? { ...t, progress: newProgress } : t));
     // Sync to server (fire-and-forget)
-    apiUpdateTask(id, { progress: newProgress }).catch(() => {});
+    apiUpdateTask(id, { progress: newProgress }).catch((e) => console.warn('Failed to sync progress:', e));
   };
 
   const handleAction = (id: string, action: ExitAction) => {
@@ -732,7 +746,7 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
         });
         setExitAction(null);
         // Move to end of queue on server
-        apiUpdateTask(id, { status: 'snoozed' }).catch(() => {});
+        apiUpdateTask(id, { status: 'snoozed' }).catch((e) => console.warn('Failed to sync snooze:', e));
       }, 320);
     } else {
       setExitAction(action);
@@ -740,7 +754,7 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
       setTimeout(() => {
         setTasks(prev => prev.map(t => t.id !== id ? t : { ...t, status: newStatus as TaskStatus }));
         // Sync to server
-        apiUpdateTask(id, { status: newStatus }).catch(() => {});
+        apiUpdateTask(id, { status: newStatus }).catch((e) => console.warn('Failed to sync task status:', e));
         if (action === 'complete') {
           // Optimistic local update, then reconcile with server
           setCompletedToday(c => c + 1);
@@ -750,7 +764,7 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
             setStreak(stats.streak);
             setCompletedToday(stats.todayCount);
             saveStatsToCache(stats.streak, stats.todayCount);
-          }).catch(() => {});
+          }).catch((e) => console.warn('Failed to sync user stats:', e));
         }
       }, 50);
     }
@@ -764,7 +778,7 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
     });
     // Sync new sort order to server
     const order = newPendingOrder.map((t, i) => ({ id: t.id, sortOrder: i }));
-    apiReorderTasks(order).catch(() => {});
+    apiReorderTasks(order).catch((e) => console.warn('Failed to sync reorder:', e));
   };
 
   const handleRepeatTask = (task: Task) => {
@@ -813,8 +827,9 @@ function AppShell({ onLogout }: { onLogout: () => void }) {
         sortOrder: optimisticTask.sortOrder,
       });
       setTasks(prev => prev.map(t => t.id === tempId ? { ...t, id: created.id } : t));
-    } catch {
-      // Task stays with temp ID; will be overwritten on next server sync
+    } catch (e) {
+      console.warn('Failed to sync new task to server, will retry on next refresh:', optimisticTask.title, e);
+      // Task stays with temp ID; merge loop will re-sync on next page load
     }
   };
   
