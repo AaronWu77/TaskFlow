@@ -457,7 +457,7 @@ npx cap open ios
 | `JWT_REFRESH_EXPIRES_IN` | `7d` | RefreshToken 有效期 |
 | `PORT` | `3000` | 监听端口 |
 | `NODE_ENV` | `development` | 环境标识 |
-| `CORS_ORIGIN` | `http://localhost:5173` | 允许的前端来源 |
+| `CORS_ORIGIN` | `capacitor://localhost,http://localhost:5173` | 允许的前端来源 |
 
 ### 前端环境变量
 

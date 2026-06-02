@@ -1,0 +1,39 @@
+# TaskFlow 后端依赖清单
+# =======================
+# ⚠️ 注意：TaskFlow 后端是 Node.js/Express 项目，依赖管理使用 package.json。
+# 本文件为依赖参考清单，并非 pip install 可用。实际安装命令：
+#   cd backend && npm install
+#
+# 如果你是从零开始的环境，请确保已安装：
+#   - Node.js >= 18
+#   - npm (随 Node.js 附带) 或 pnpm
+#   - PostgreSQL 16+（或 Docker 运行 postgres:16-alpine）
+
+# === 生产依赖（运行时必需）===
+
+@prisma/client>=5.22.0,<6.0        # ORM 客户端，连接 PostgreSQL
+bcryptjs>=2.4.3,<3.0               # 密码 bcrypt 哈希
+cookie-parser>=1.4.7,<2.0          # 解析 HTTP Cookie（refreshToken）
+cors>=2.8.5,<3.0                   # 跨域 CORS 中间件
+dotenv>=16.4.7,<17.0               # 加载 .env 环境变量
+express>=4.21.2,<5.0               # Web 框架
+jsonwebtoken>=9.0.2,<10.0          # JWT Token 签发与验证
+
+# === 开发依赖（仅本地开发/构建需要）===
+
+typescript>=5.7.2,<6.0             # TypeScript 编译器
+tsx>=4.19.2,<5.0                   # TypeScript 开发服务器（替代 ts-node）
+prisma>=5.22.0,<6.0                # Prisma CLI（迁移、Studio、生成）
+@types/bcryptjs>=2.4.6,<3.0        # bcryptjs TypeScript 类型
+@types/cookie-parser>=1.4.8,<2.0   # cookie-parser TypeScript 类型
+@types/cors>=2.8.17,<3.0           # cors TypeScript 类型
+@types/express>=5.0.0,<6.0         # express TypeScript 类型
+@types/jsonwebtoken>=9.0.7,<10.0   # jsonwebtoken TypeScript 类型
+@types/node>=22.10.0,<23.0         # Node.js TypeScript 类型
+
+# === 系统级依赖（非 npm）===
+
+# PostgreSQL 16             数据库服务（可通过 Docker 运行）
+# Node.js >= 18             JavaScript 运行时
+# npm / pnpm                包管理器
+# Docker（可选）            容器化运行 PostgreSQL + Nginx
