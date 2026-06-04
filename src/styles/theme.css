@@ -1,7 +1,6 @@
-@custom-variant dark (&:is(.dark *));
-
 :root {
   --font-size: 16px;
+  --app-vh: 100dvh;
   --background: #f4f5f7;
   --foreground: #111827;
   --card: #ffffff;
@@ -39,43 +38,6 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
-}
-
-.dark {
-  --background: #0f1115;
-  --foreground: #f9fafb;
-  --card: #181b21;
-  --card-foreground: #f9fafb;
-  --popover: #181b21;
-  --popover-foreground: #f9fafb;
-  --primary: #6366f1;
-  --primary-foreground: #ffffff;
-  --secondary: #312e81;
-  --secondary-foreground: #e0e7ff;
-  --muted: #1f2937;
-  --muted-foreground: #9ca3af;
-  --accent: #1f2937;
-  --accent-foreground: #f9fafb;
-  --destructive: #ef4444;
-  --destructive-foreground: #ffffff;
-  --border: #374151;
-  --input: #374151;
-  --ring: #6366f1;
-  --font-weight-medium: 500;
-  --font-weight-normal: 400;
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(0.269 0 0);
-  --sidebar-ring: oklch(0.439 0 0);
 }
 
 @theme inline {
@@ -120,12 +82,28 @@
 }
 
 @layer base {
+  html {
+    background-color: var(--background);
+  }
+
+  html, body, #root {
+    height: 100%;
+    min-height: 100%;
+  }
+
+  html, body {
+    overscroll-behavior: none;
+  }
+
   * {
     @apply border-border outline-ring/50;
   }
 
   body {
     @apply bg-background text-foreground;
+    min-height: 100vh;
+    min-height: 100dvh;
+    min-height: -webkit-fill-available;
     font-family: 'Plus Jakarta Sans', sans-serif;
   }
 
@@ -182,6 +160,18 @@
 }
 
 @layer utilities {
+  .app-viewport {
+    width: 100%;
+    height: var(--app-vh);
+    min-height: var(--app-vh);
+    overflow: hidden;
+  }
+
+  .app-safe-y {
+    padding-top: max(1.25rem, calc(0.5rem + env(safe-area-inset-top, 0px)));
+    padding-bottom: max(1rem, calc(0.5rem + env(safe-area-inset-bottom, 0px)));
+  }
+
   @keyframes waveMove {
     0% { transform: translateX(0); }
     100% { transform: translateX(-50%); }
@@ -192,12 +182,12 @@
 
   /* Safe area helpers — respect iPhone notch / Dynamic Island / Home Indicator */
   .pt-safe {
-    padding-top: max(2rem, calc(0.5rem + env(safe-area-inset-top)));
+    padding-top: max(2rem, calc(0.5rem + env(safe-area-inset-top, 0px)));
   }
   .pb-safe {
-    padding-bottom: max(6rem, calc(4rem + env(safe-area-inset-bottom)));
+    padding-bottom: max(6rem, calc(4rem + env(safe-area-inset-bottom, 0px)));
   }
   .bottom-safe {
-    bottom: max(1.5rem, calc(0.25rem + env(safe-area-inset-bottom)));
+    bottom: max(1.5rem, calc(0.25rem + env(safe-area-inset-bottom, 0px)));
   }
 }

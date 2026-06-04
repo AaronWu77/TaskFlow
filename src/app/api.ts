@@ -228,7 +228,7 @@ export async function apiGetUserStats(): Promise<UserStatsDTO> {
   return res.json() as Promise<UserStatsDTO>;
 }
 
-export async function apiUpdateUserStats(data: { todayCount: number }): Promise<UserStatsDTO> {
+export async function apiUpdateUserStats(data: { todayCount: number; streak?: number }): Promise<UserStatsDTO> {
   const res = await apiFetch('/user/stats', {
     method: 'PATCH',
     body: JSON.stringify(data),

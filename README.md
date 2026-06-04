@@ -13,7 +13,6 @@ TaskFlow replaces the anxiety of a never-ending list with a card-stack interface
 - **Progress tracking** — per-task progress slider (0–100 %) with a live wave fill animation
 - **Daily streak** — consecutive completion days tracked and synced
 - **Repeat task** — re-queue a completed task with one tap from the calendar
-- **Dark mode** — full light/dark theme via CSS custom properties
 - **Auth** — email + password registration/login; JWT access token + httpOnly refresh cookie
 - **Self-hosted backend** — Docker Compose stack (Node.js API + PostgreSQL + Nginx)
 
@@ -137,9 +136,66 @@ interface Task {
 
 All color and spacing tokens are CSS custom properties defined in `src/styles/theme.css` and mapped into Tailwind via `@theme inline`. Use semantic Tailwind classes (`bg-card`, `text-primary`, `border-border`) — never hardcode hex values.
 
-Dark mode is activated via the `.dark` class on a parent element.
-
 Use `cn()` from `src/app/components/ui/utils.ts` for conditional class merging (`clsx` + `tailwind-merge`).
+
+## Full Repository Structure
+
+```
+TaskFlow/
+├── src/                          # ──  FRONTEND (React 18 + Vite 6) ──
+│   ├── app/
+│   │   ├── App.tsx               # Main app — all UI components, state, view logic
+│   │   ├── AuthPage.tsx          # Login / Register screen
+│   │   ├── api.ts                # API client — auth, auto-refresh, task CRUD
+│   │   ├── storage.ts            # Storage layer — localStorage + Capacitor Preferences
+│   │   └── components/
+│   │       ├── ui/               # shadcn/ui library (Radix UI wrappers, do not modify)
+│   │       └── figma/
+│   │           └── ImageWithFallback.tsx
+│   ├── i18n/
+│   │   ├── index.ts              # i18next init (react-i18next)
+│   │   └── locales/
+│   │       ├── en.json           # English translations
+│   │       └── zh.json           # Chinese translations
+│   ├── main.tsx                  # React entry — renders <App />
+│   └── styles/
+│       ├── theme.css             # Design tokens (CSS variables, light theme)
+│       ├── index.css             # Global styles entry
+│       ├── globals.css
+│       ├── tailwind.css
+│       └── fonts.css
+├── backend/                      # ──  BACKEND (Express + Prisma + PostgreSQL) ──
+│   ├── src/
+│   │   ├── index.ts              # Express server entry
+│   │   ├── middleware/
+│   │   │   └── auth.ts           # JWT Bearer auth middleware
+│   │   ├── routes/
+│   │   │   ├── auth.ts           # Register / Login / Refresh / Logout
+│   │   │   ├── tasks.ts          # Task CRUD + reorder
+│   │   │   └── user.ts           # User stats (streak)
+│   │   └── prisma/
+│   │       └── schema.prisma     # DB schema (User, Task, UserStats)
+│   ├── Dockerfile
+│   ├── package.json
+│   └── tsconfig.json
+├── doc/                          # Documentation
+│   ├── DEVELOPER.md
+│   ├── plan.md
+│   └── VERSIONING.md
+├── public/                       # Static assets (PWA icons, manifest)
+├── docker-compose.yml            # Production: API + PostgreSQL + Nginx
+├── nginx.conf                    # Reverse proxy config
+├── capacitor.config.ts           # Capacitor iOS config
+├── vite.config.ts                # Vite + Tailwind + Figma asset plugin
+├── index.html                    # HTML entry
+├── package.json                  # Frontend dependencies
+├── pnpm-workspace.yaml
+├── .env.example
+├── README.md                     # English docs (this file)
+└── README.zh.md                  # Chinese docs
+```
+
+**Frontend/Backend boundary**: `src/` is the standalone React SPA. `backend/` is the standalone Express API. They communicate via REST (`src/app/api.ts` → `backend/src/routes/*`). Each can be developed, built, and deployed independently.
 
 ## Acknowledgements
 

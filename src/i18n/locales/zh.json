@@ -1,0 +1,96 @@
+{
+  "greeting": {
+    "morning": "早上好",
+    "afternoon": "下午好",
+    "evening": "晚上好",
+    "night": "夜深了"
+  },
+  "priority": {
+    "P1": "高优先级",
+    "P2": "中优先级",
+    "P3": "低优先级"
+  },
+  "tag": {
+    "Work": "工作",
+    "Personal": "个人",
+    "Study": "学习",
+    "Planning": "规划",
+    "Health": "健康",
+    "Other": "其他"
+  },
+  "task": {
+    "progress": "进度",
+    "complete": "完成任务",
+    "snooze": "延后",
+    "skip": "跳过",
+    "repeat": "重复",
+    "repeatTask": "重复任务",
+    "completedTask": "已完成任务",
+    "donePrompt": "此任务已完成。要再次安排吗？",
+    "cancel": "取消",
+    "addTask": "添加任务",
+    "addRepeatedTask": "添加重复任务",
+    "addToFlow": "添加到任务流",
+    "repeatModeTitle": "重复任务",
+    "addPrompt": "下一步需要关注什么？",
+    "editPrompt": "编辑详情并选择新的截止日期。",
+    "taskName": "任务名称",
+    "estMinutes": "预估时长（分钟）",
+    "priority": "优先级",
+    "deadline": "截止日期（可选）",
+    "categoryTag": "分类标签",
+    "titlePlaceholder": "例如：撰写周报",
+    "noTasksScheduled": "当天无任务安排。",
+    "addTaskPrompt": "添加任务",
+    "allCaughtUp": "全部完成！",
+    "allCaughtUpDesc": "你已经清理了所有任务流。休息一下或添加新任务吧。",
+    "addNewTask": "添加新任务",
+    "upNext": "下一个",
+    "noPendingTasks": "任务流中没有待办任务。",
+    "reorder": "排序",
+    "reorderTasks": "任务排序",
+    "reorderHint": "拖拽手柄来重新排列你的任务流",
+    "done": "完成",
+    "tasksInFlow": "个任务在流中 · 第一张卡片 = 下一个焦点",
+    "snoozeHint": "延后 — 移到队尾",
+    "skipHint": "跳过 — 移出任务流",
+    "tasksDoneToday_one": "{{count}} 个任务今日已完成",
+    "tasksDoneToday_other": "{{count}} 个任务今日已完成"
+  },
+  "view": {
+    "flow": "任务流",
+    "calendar": "日历",
+    "toDo": "待办",
+    "completed": "已完成"
+  },
+  "calendar": {
+    "weekdays": ["日", "一", "二", "三", "四", "五", "六"],
+    "months": ["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月"],
+    "pendingOnly": "仅待办",
+    "high": "高",
+    "medium": "中",
+    "low": "低"
+  },
+  "auth": {
+    "signIn": "登录",
+    "signUp": "注册",
+    "welcomeBack": "欢迎回来",
+    "createAccount": "创建你的账号",
+    "email": "邮箱",
+    "password": "密码",
+    "passwordHint": "（至少8个字符）",
+    "emailPlaceholder": "example@domain.com",
+    "passwordPlaceholder": "••••••••",
+    "privacyNote": "你的任务数据仅自己可见，跨设备同步。"
+  },
+  "account": {
+    "signOut": "退出登录",
+    "theme": "主题",
+    "light": "浅色",
+    "dark": "深色",
+    "system": "跟随系统",
+    "language": "语言",
+    "chinese": "中文",
+    "english": "English"
+  }
+}

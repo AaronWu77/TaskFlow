@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CheckCircle2, Mail, Lock, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { apiLogin, apiRegister } from './api';
@@ -15,12 +15,14 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
 
   const inputClass =
     'flex h-11 w-full rounded-xl border border-input bg-input-background px-4 py-2 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-colors';
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    (document.activeElement as HTMLElement | null)?.blur();
     setError('');
     setLoading(true);
     try {
@@ -34,13 +36,24 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
     }
   }
 
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const updateKeyboardState = () => {
+      setKeyboardOpen(window.innerHeight - viewport.height > 120);
+    };
+    updateKeyboardState();
+    viewport.addEventListener('resize', updateKeyboardState);
+    return () => viewport.removeEventListener('resize', updateKeyboardState);
+  }, []);
+
   return (
-    <div className="h-dvh bg-background text-foreground flex flex-col items-center justify-center pt-safe overflow-hidden overscroll-none px-6">
+    <div className={`app-viewport bg-background text-foreground flex flex-col items-center overflow-y-auto overscroll-none px-6 ${keyboardOpen ? 'pt-safe pb-4 justify-start' : 'app-safe-y justify-center'}`}>
       <motion.div
         initial={{ opacity: 0, y: 24 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ type: 'spring', stiffness: 340, damping: 28 }}
-        className="w-full max-w-[360px]"
+        className={`w-full max-w-[360px] ${keyboardOpen ? 'mt-4 mb-4' : ''}`}
       >
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">

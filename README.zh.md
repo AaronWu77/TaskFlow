@@ -13,7 +13,6 @@ TaskFlow 用卡片堆叠界面取代了永无止境的清单，让你每次只�
 - **进度追踪** — 每个任务附带进度滑块（0–100%），实时波浪填充动效
 - **连续打卡** — 统计连续完成任务的天数（Streak），跨设备同步
 - **重复任务** — 在日历视图中一键将已完成任务重新加入队列
-- **深色模式** — 通过 CSS 自定义属性实现完整的亮色/暗色主题
 - **账号系统** — 邮箱 + 密码注册/登录，JWT 访问令牌 + httpOnly 刷新 Cookie
 - **自托管后端** — Docker Compose 一键启动（Node.js API + PostgreSQL + Nginx）
 
@@ -137,9 +136,68 @@ interface Task {
 
 所有颜色和间距 Token 以 CSS 自定义属性的形式定义在 `src/styles/theme.css` 中，并通过 `@theme inline` 映射为 Tailwind 类名。请使用语义化 Tailwind 类（如 `bg-card`、`text-primary`、`border-border`），不要硬编码十六进制颜色值。
 
-暗色模式通过在父元素上添加 `.dark` 类来激活。
+
 
 条件合并类名请使用 `src/app/components/ui/utils.ts` 中导出的 `cn()` 工具函数（`clsx` + `tailwind-merge` 的封装）。
+
+## 完整仓库结构
+
+```
+TaskFlow/
+├── src/                          # ──  前端 (React 18 + Vite 6) ──
+│   ├── app/
+│   │   ├── App.tsx               # 主应用 — 所有 UI 组件、状态、视图逻辑
+│   │   ├── AuthPage.tsx          # 登录 / 注册页
+│   │   ├── api.ts                # API 客户端 — 认证、自动刷新、任务 CRUD
+│   │   ├── storage.ts            # 存储层 — localStorage + Capacitor Preferences
+│   │   └── components/
+│   │       ├── ui/               # shadcn/ui 组件库 (Radix UI 封装，请勿修改)
+│   │       └── figma/
+│   │           └── ImageWithFallback.tsx
+│   ├── i18n/
+│   │   ├── index.ts              # i18next 初始化 (react-i18next)
+│   │   └── locales/
+│   │       ├── en.json           # 英文翻译
+│   │       └── zh.json           # 中文翻译
+│   ├── main.tsx                  # React 入口 — 渲染 <App />
+│   └── styles/
+│       ├── theme.css             # 设计 Token (CSS 变量，亮色主题)
+│       ├── index.css             # 全局样式入口
+│       ├── globals.css
+│       ├── tailwind.css
+│       └── fonts.css
+├── backend/                      # ──  后端 (Express + Prisma + PostgreSQL) ──
+│   ├── src/
+│   │   ├── index.ts              # Express 服务入口
+│   │   ├── middleware/
+│   │   │   └── auth.ts           # JWT Bearer 鉴权中间件
+│   │   ├── routes/
+│   │   │   ├── auth.ts           # 注册 / 登录 / 刷新 / 登出
+│   │   │   ├── tasks.ts          # 任务 CRUD + 排序
+│   │   │   └── user.ts           # 用户统计 (连续打卡)
+│   │   └── prisma/
+│   │       └── schema.prisma     # 数据库模型 (User, Task, UserStats)
+│   ├── Dockerfile
+│   ├── package.json
+│   └── tsconfig.json
+├── doc/                          # 项目文档
+│   ├── DEVELOPER.md
+│   ├── plan.md
+│   └── VERSIONING.md
+├── public/                       # 静态资源 (PWA 图标、manifest)
+├── docker-compose.yml            # 生产部署: API + PostgreSQL + Nginx
+├── nginx.conf                    # 反向代理配置
+├── capacitor.config.ts           # Capacitor iOS 配置
+├── vite.config.ts                # Vite + Tailwind + Figma 资源插件
+├── index.html                    # HTML 入口
+├── package.json                  # 前端依赖
+├── pnpm-workspace.yaml
+├── .env.example
+├── README.md                     # 英文文档
+└── README.zh.md                  # 中文文档 (本文件)
+```
+
+**前后端边界**：`src/` 是独立 React SPA，`backend/` 是独立 Express API。两者通过 REST 通信（`src/app/api.ts` → `backend/src/routes/*`）。前端和后端可独立开发、构建、部署。
 
 ## 致谢
 

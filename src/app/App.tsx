@@ -1,16 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import {
   Check, X, Clock, Plus, Flame, CheckCircle2,
   Calendar, Tag, XCircle, ChevronLeft, ChevronRight,
   ListTodo, SkipForward, AlarmClock, RotateCcw,
-  GripVertical, ArrowUpDown
+  GripVertical, ArrowUpDown, Globe
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
+import { useTranslation } from 'react-i18next';
 import { storageGet, storageSet, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
 import { apiLogout, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiDeleteTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiLogin } from './api';
 import { toast, Toaster } from 'sonner';
+import { Haptics, ImpactStyle } from '@capacitor/haptics';
 
 // --- Types ---
 type Priority = 'P1' | 'P2' | 'P3';
@@ -47,18 +49,14 @@ function saveSyncMeta(meta: SyncMeta) {
   storageSet(SYNC_META_KEY, JSON.stringify(meta));
 }
 
-/** Mark a task as dirty and persist to cache */
+/** Mark a task as dirty (in-memory only — cache save via useEffect) */
 function markDirty(tasks: Task[], id: string): Task[] {
-  const updated = tasks.map(t => t.id === id ? { ...t, _dirty: true } : t);
-  saveTasksToCache(updated);
-  return updated;
+  return tasks.map(t => t.id === id ? { ...t, _dirty: true } : t);
 }
 
-/** Mark a task as clean and persist to cache */
+/** Mark a task as clean (in-memory only — cache save via useEffect) */
 function markClean(tasks: Task[], id: string): Task[] {
-  const updated = tasks.map(t => t.id === id ? { ...t, _dirty: false } : t);
-  saveTasksToCache(updated);
-  return updated;
+  return tasks.map(t => t.id === id ? { ...t, _dirty: false } : t);
 }
 
 /** Push all dirty tasks to server, returning tasks with clean flags */
@@ -101,12 +99,33 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
 const PRIORITY_BADGE = {
-  P1: 'text-rose-600 bg-rose-100 dark:bg-rose-900/30 dark:text-rose-400',
-  P2: 'text-amber-600 bg-amber-100 dark:bg-amber-900/30 dark:text-amber-400',
-  P3: 'text-emerald-600 bg-emerald-100 dark:bg-emerald-900/30 dark:text-emerald-400',
+  P1: 'text-rose-600 bg-rose-100',
+  P2: 'text-amber-600 bg-amber-100',
+  P3: 'text-emerald-600 bg-emerald-100',
 };
 const PRIORITY_LABEL = { P1: 'High Priority', P2: 'Medium Priority', P3: 'Low Priority' };
+const PRIORITY_LABEL_KEY: Record<Priority, string> = { P1: 'priority.P1', P2: 'priority.P2', P3: 'priority.P3' };
 const DOT_COLOR = { P1: 'bg-rose-500', P2: 'bg-amber-400', P3: 'bg-emerald-500' };
+
+// --- Translation-aware helpers ---
+const PRIORITY_TAGS = ['P1', 'P2', 'P3'] as const;
+
+function getGreeting(t: (key: string) => string): string {
+  const h = new Date().getHours();
+  if (h >= 5 && h < 12) return t('greeting.morning');
+  if (h >= 12 && h < 17) return t('greeting.afternoon');
+  if (h >= 17 && h < 21) return t('greeting.evening');
+  return t('greeting.night');
+}
+
+function syncAppViewportHeight(forceInnerHeight = false) {
+  const viewport = window.visualViewport;
+  const viewportHeight = forceInnerHeight
+    ? window.innerHeight
+    : (viewport?.height ?? window.innerHeight);
+  const nextHeight = Math.max(320, Math.round(viewportHeight));
+  document.documentElement.style.setProperty('--app-vh', `${nextHeight}px`);
+}
 
 function loadTasks(): Task[] {
   try {
@@ -147,20 +166,10 @@ function loadStatsFromCache(): { streak: number; completedToday: number } {
   return { streak, completedToday };
 }
 
-function saveStatsToCache(streak: number, completedToday: number) {
+function saveStatsToCache(streak: number, completedToday: number, lastDate?: string | null) {
   const today = todayStr();
-  const ys = new Date(); ys.setDate(ys.getDate() - 1);
-  const yStr = ys.toISOString().split('T')[0];
-  storageSet('taskflow_streak', JSON.stringify({ count: streak, lastDate: today }));
+  storageSet('taskflow_streak', JSON.stringify({ count: streak, lastDate: lastDate || today }));
   storageSet('taskflow_completed_today', JSON.stringify({ date: today, count: completedToday }));
-}
-
-function getGreeting(): string {
-  const h = new Date().getHours();
-  if (h >= 5 && h < 12) return 'Good morning';
-  if (h >= 12 && h < 17) return 'Good afternoon';
-  if (h >= 17 && h < 21) return 'Good evening';
-  return 'Good night';
 }
 
 function fmtDate(y: number, m: number, d: number) {
@@ -197,6 +206,7 @@ function insertIndex(tasks: Task[], newTask: Task): number {
 
 // --- View Toggle ---
 function ViewToggle({ view, onChange }: { view: ViewMode; onChange: (v: ViewMode) => void }) {
+  const { t } = useTranslation();
   return (
     <div className="relative flex items-center bg-muted rounded-full p-1">
       <button
@@ -210,7 +220,7 @@ function ViewToggle({ view, onChange }: { view: ViewMode; onChange: (v: ViewMode
             transition={{ type: 'spring', stiffness: 400, damping: 35 }}
           />
         )}
-        <span className="relative z-10 flex items-center gap-2"><ListTodo className="w-3.5 h-3.5 flex-shrink-0" />Flow</span>
+        <span className="relative z-10 flex items-center gap-2"><ListTodo className="w-3.5 h-3.5 flex-shrink-0" />{t('view.flow')}</span>
       </button>
       <button
         onClick={() => onChange('calendar')}
@@ -223,7 +233,7 @@ function ViewToggle({ view, onChange }: { view: ViewMode; onChange: (v: ViewMode
             transition={{ type: 'spring', stiffness: 400, damping: 35 }}
           />
         )}
-        <span className="relative z-10 flex items-center gap-2"><Calendar className="w-3.5 h-3.5 flex-shrink-0" />Calendar</span>
+        <span className="relative z-10 flex items-center gap-2"><Calendar className="w-3.5 h-3.5 flex-shrink-0" />{t('view.calendar')}</span>
       </button>
     </div>
   );
@@ -238,13 +248,22 @@ interface TaskCardProps {
 }
 
 function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
+  const { t } = useTranslation();
+  const [localProgress, setLocalProgress] = React.useState(task.progress);
+  const [isSlidingProgress, setIsSlidingProgress] = React.useState(false);
+  React.useEffect(() => { setLocalProgress(task.progress); }, [task.progress]);
+
+  const commitProgress = (value: number) => {
+    if (value !== task.progress) onProgressChange(task.id, value);
+  };
+
   return (
     <div className="relative w-full h-full bg-card rounded-3xl border border-border flex flex-col overflow-hidden">
       <div
         className="absolute bottom-0 left-0 w-full bg-primary/10 transition-all duration-500 ease-out z-0"
-        style={{ height: `${task.progress}%` }}
+        style={{ height: `${localProgress}%` }}
       >
-        {task.progress > 0 && task.progress < 100 && (
+        {localProgress > 0 && localProgress < 100 && (
           <div className="absolute top-[-20px] left-0 w-[200%] h-[20px] overflow-hidden z-0">
             <svg viewBox="0 0 800 50" preserveAspectRatio="none" className="w-full h-full fill-primary/10 animate-wave">
               <path d="M 0 25 Q 100 50 200 25 T 400 25 Q 500 50 600 25 T 800 25 L 800 50 L 0 50 Z" />
@@ -254,7 +273,7 @@ function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
       </div>
       <div className="relative z-10 flex flex-col h-full p-6">
         <div className="flex items-center justify-between mb-6">
-          <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${PRIORITY_BADGE[task.priority]}`}>{PRIORITY_LABEL[task.priority]}</span>
+          <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${PRIORITY_BADGE[task.priority]}`}>{t(PRIORITY_LABEL_KEY[task.priority])}</span>
           {task.tag && (
             <span className="text-xs font-medium text-muted-foreground bg-muted/80 backdrop-blur-sm px-2.5 py-1 rounded-full flex items-center gap-1">
               <Tag className="w-3 h-3" />{task.tag}
@@ -275,30 +294,58 @@ function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
               )}
             </div>
             <div className="flex items-center gap-3 bg-muted/30 backdrop-blur-sm px-3 py-2 rounded-lg">
-              <span className="text-sm font-medium text-muted-foreground whitespace-nowrap">Progress</span>
-              {/* Wrapper div isolates slider from parent motion drag events */}
-              <div onPointerDown={(e) => e.stopPropagation()} onPointerMove={(e) => e.stopPropagation()} className="flex-1">
+              <span className="text-sm font-medium text-muted-foreground whitespace-nowrap">{t('task.progress')}</span>
+              <div
+                onClick={(e) => e.stopPropagation()}
+                className="flex-1"
+              >
                 <input
                   type="range" min="0" max="100" step="5"
-                  value={task.progress}
-                  onChange={(e) => onProgressChange(task.id, parseInt(e.target.value))}
-                  className="w-full h-1.5 bg-muted rounded-full appearance-none cursor-pointer"
-                  style={{ accentColor: 'var(--primary)' }}
+                  value={localProgress}
+                  onInput={(e) => setLocalProgress(parseInt((e.target as HTMLInputElement).value))}
+                  onChange={(e) => setLocalProgress(parseInt((e.target as HTMLInputElement).value))}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    setIsSlidingProgress(true);
+                  }}
+                  onPointerUp={(e) => {
+                    e.stopPropagation();
+                    setIsSlidingProgress(false);
+                    commitProgress(parseInt((e.target as HTMLInputElement).value));
+                  }}
+                  onPointerCancel={() => setIsSlidingProgress(false)}
+                  onMouseUp={(e) => {
+                    e.stopPropagation();
+                    setIsSlidingProgress(false);
+                    commitProgress(parseInt((e.target as HTMLInputElement).value));
+                  }}
+                  onTouchStart={(e) => {
+                    e.stopPropagation();
+                    setIsSlidingProgress(true);
+                  }}
+                  onTouchEnd={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setIsSlidingProgress(false);
+                    commitProgress(parseInt((e.target as HTMLInputElement).value));
+                  }}
+                  className="w-full h-6 bg-transparent appearance-none cursor-pointer outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
+                  style={{ accentColor: 'var(--primary)', WebkitTapHighlightColor: 'transparent' }}
                 />
               </div>
-              <span className="text-sm font-medium text-muted-foreground w-9 text-right">{task.progress}%</span>
+              <span className="text-sm font-medium text-muted-foreground w-9 text-right">{localProgress}%</span>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <button onClick={() => onAction(task.id, 'snooze')} className="flex items-center justify-center gap-2 bg-secondary/80 backdrop-blur-sm text-secondary-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95">
-              <AlarmClock className="w-5 h-5" />Snooze
+            <button onClick={() => { if (!isSlidingProgress) onAction(task.id, 'snooze'); }} className="flex items-center justify-center gap-2 bg-secondary/80 backdrop-blur-sm text-secondary-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95">
+              <AlarmClock className="w-5 h-5" />{t('task.snooze')}
             </button>
-            <button onClick={() => onAction(task.id, 'skip')} className="flex items-center justify-center gap-2 bg-muted/80 backdrop-blur-sm text-muted-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95 hover:bg-muted">
-              <SkipForward className="w-5 h-5" />Skip
+            <button onClick={() => { if (!isSlidingProgress) onAction(task.id, 'skip'); }} className="flex items-center justify-center gap-2 bg-muted/80 backdrop-blur-sm text-muted-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95 hover:bg-muted">
+              <SkipForward className="w-5 h-5" />{t('task.skip')}
             </button>
           </div>
-          <button onClick={() => onAction(task.id, 'complete')} className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground py-4 rounded-xl font-bold text-lg shadow-lg shadow-primary/25 transition-transform active:scale-95 hover:bg-primary/90">
-            <Check className="w-6 h-6" />Complete Task
+          <button onClick={() => { if (!isSlidingProgress) onAction(task.id, 'complete'); }} className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground py-4 rounded-xl font-bold text-lg shadow-lg shadow-primary/25 transition-transform active:scale-95 hover:bg-primary/90">
+            <Check className="w-6 h-6" />{t('task.complete')}
           </button>
         </div>
       </div>
@@ -315,8 +362,8 @@ function TaskDetailModal({ task, onClose, onAction, onProgressChange }: {
   return (
     <Dialog.Root open={!!task} onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-        <Dialog.Content className="fixed left-[50%] top-[50%] z-50 w-full max-w-[360px] h-[520px] translate-x-[-50%] translate-y-[-50%] duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 rounded-3xl focus:outline-none">
+        <Dialog.Overlay className="fixed inset-0 backdrop-blur-md z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Content className="fixed left-[50%] top-[50%] z-50 w-full max-w-[360px] h-[520px] translate-x-[-50%] translate-y-[-50%] duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 rounded-3xl focus:outline-none shadow-2xl">
           <Dialog.Title className="sr-only">{task?.title}</Dialog.Title>
           <Dialog.Description className="sr-only">Task actions</Dialog.Description>
           {task && (
@@ -328,7 +375,7 @@ function TaskDetailModal({ task, onClose, onAction, onProgressChange }: {
             />
           )}
           <Dialog.Close asChild>
-            <button className="absolute top-4 right-4 z-20 w-8 h-8 flex items-center justify-center rounded-full bg-black/20 text-white hover:bg-black/30 transition-colors">
+            <button className="absolute -top-1 -right-1 z-20 w-9 h-9 flex items-center justify-center rounded-full bg-card border border-border shadow-sm text-muted-foreground hover:text-foreground transition-colors">
               <X className="w-4 h-4" />
             </button>
           </Dialog.Close>
@@ -342,13 +389,14 @@ function TaskDetailModal({ task, onClose, onAction, onProgressChange }: {
 function RepeatTaskModal({ task, onClose, onRepeat }: {
   task: Task | null; onClose: () => void; onRepeat: (task: Task) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <Dialog.Root open={!!task} onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Overlay className="fixed inset-0 bg-black/20 backdrop-blur-md z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <Dialog.Content className="fixed left-[50%] top-[50%] z-50 w-full max-w-sm translate-x-[-50%] translate-y-[-50%] border border-border bg-card rounded-2xl p-6 shadow-xl duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 focus:outline-none">
-          <Dialog.Title className="text-base font-bold mb-1">Completed Task</Dialog.Title>
-          <Dialog.Description className="text-sm text-muted-foreground mb-4">This task is done. Want to schedule it again?</Dialog.Description>
+          <Dialog.Title className="text-base font-bold mb-1">{t('task.completedTask')}</Dialog.Title>
+          <Dialog.Description className="text-sm text-muted-foreground mb-4">{t('task.donePrompt')}</Dialog.Description>
           {task && (
             <>
               <div className="bg-muted/50 rounded-xl p-4 mb-5 space-y-2">
@@ -356,17 +404,17 @@ function RepeatTaskModal({ task, onClose, onRepeat }: {
                   <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />{task.title}
                 </p>
                 <div className="flex flex-wrap gap-2 ml-6">
-                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${PRIORITY_BADGE[task.priority]}`}>{PRIORITY_LABEL[task.priority]}</span>
+                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${PRIORITY_BADGE[task.priority]}`}>{t(PRIORITY_LABEL_KEY[task.priority])}</span>
                   {task.tag && <span className="text-xs text-muted-foreground flex items-center gap-1"><Tag className="w-3 h-3" />{task.tag}</span>}
                   <span className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" />{task.estimateMinutes}m</span>
                 </div>
               </div>
               <div className="flex gap-3">
                 <Dialog.Close asChild>
-                  <button className="flex-1 py-2.5 bg-muted text-muted-foreground rounded-xl text-sm font-semibold hover:bg-muted/80 transition-colors">Cancel</button>
+                  <button className="flex-1 py-2.5 bg-muted text-muted-foreground rounded-xl text-sm font-semibold hover:bg-muted/80 transition-colors">{t('task.cancel')}</button>
                 </Dialog.Close>
                 <button onClick={() => { onRepeat(task); onClose(); }} className="flex-1 py-2.5 bg-primary text-primary-foreground rounded-xl text-sm font-semibold flex items-center justify-center gap-1.5 hover:bg-primary/90 transition-colors active:scale-95">
-                  <RotateCcw className="w-4 h-4" />Repeat Task
+                  <RotateCcw className="w-4 h-4" />{t('task.repeatTask')}
                 </button>
               </div>
             </>
@@ -416,6 +464,7 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
   isOpen: boolean; pendingTasks: Task[];
   onClose: () => void; onSave: (ordered: Task[]) => void;
 }) {
+  const { t } = useTranslation();
   const [order, setOrder] = useState<Task[]>(pendingTasks);
 
   // Sync when tasks change externally
@@ -455,14 +504,14 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
             {/* Header */}
             <div className="flex items-center justify-between px-5 py-3 border-b border-border">
               <div>
-                <h2 className="text-base font-bold">Reorder Tasks</h2>
-                <p className="text-xs text-muted-foreground mt-0.5">Drag the handle to rearrange your flow</p>
+                <h2 className="text-base font-bold">{t('task.reorderTasks')}</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">{t('task.reorderHint')}</p>
               </div>
               <button
                 onClick={handleDone}
                 className="flex items-center gap-1.5 bg-primary text-primary-foreground px-4 py-2 rounded-xl text-sm font-semibold active:scale-95 transition-transform"
               >
-                <Check className="w-4 h-4" />Done
+                <Check className="w-4 h-4" />{t('task.done')}
               </button>
             </div>
 
@@ -471,7 +520,7 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
               {order.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
                   <CheckCircle2 className="w-10 h-10 text-emerald-500 mb-3" />
-                  <p className="text-sm text-muted-foreground">No pending tasks in your flow.</p>
+                  <p className="text-sm text-muted-foreground">{t('task.noPendingTasks')}</p>
                 </div>
               ) : (
                 <Reorder.Group axis="y" values={order} onReorder={setOrder} className="space-y-2">
@@ -483,7 +532,7 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
             {/* Footer */}
             <div className="px-5 py-3 border-t border-border">
               <p className="text-xs text-center text-muted-foreground">
-                {order.length} task{order.length !== 1 ? 's' : ''} in flow · first card = next to focus
+                {order.length} {t('task.tasksInFlow')}
               </p>
             </div>
           </motion.div>
@@ -501,6 +550,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
   onAddTask: () => void;
   onRepeatTask: (task: Task) => void;
 }) {
+  const { t } = useTranslation();
   const today = new Date();
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth());
@@ -510,6 +560,9 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
   const detailTask = detailTaskId ? tasks.find(t => t.id === detailTaskId) ?? null : null;
   const [repeatTask, setRepeatTask] = useState<Task | null>(null);
+
+  const translatedWeekdays = t('calendar.weekdays', { returnObjects: true }) as unknown as string[];
+  const translatedMonths = t('calendar.months', { returnObjects: true }) as unknown as string[];
 
   const firstDay = new Date(year, month, 1).getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -541,13 +594,13 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
       <div className="w-full max-w-md space-y-4">
         <div className="flex items-center justify-between px-1">
           <button onClick={prevMonth} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"><ChevronLeft className="w-5 h-5" /></button>
-          <h2 className="text-base font-bold tracking-tight">{MONTHS[month]} {year}</h2>
+          <h2 className="text-base font-bold tracking-tight">{translatedMonths[month]} {year}</h2>
           <button onClick={nextMonth} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"><ChevronRight className="w-5 h-5" /></button>
         </div>
 
         <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-sm">
           <div className="grid grid-cols-7 border-b border-border">
-            {WEEKDAYS.map(d => <div key={d} className="py-2 text-center text-xs font-semibold text-muted-foreground tracking-wide">{d}</div>)}
+            {translatedWeekdays.map(d => <div key={d} className="py-2 text-center text-xs font-semibold text-muted-foreground tracking-wide">{d}</div>)}
           </div>
           <div className="grid grid-cols-7">
             {cells.map((day, idx) => {
@@ -575,10 +628,10 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
         </div>
 
         <div className="flex items-center justify-center gap-4 text-xs text-muted-foreground">
-          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-rose-500" />High</span>
-          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-amber-400" />Medium</span>
-          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500" />Low</span>
-          <span className="flex items-center gap-1.5 opacity-50"><span className="w-2 h-2 rounded-full bg-muted-foreground" />Pending only</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-rose-500" />{t('calendar.high')}</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-amber-400" />{t('calendar.medium')}</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500" />{t('calendar.low')}</span>
+          <span className="flex items-center gap-1.5 opacity-50"><span className="w-2 h-2 rounded-full bg-muted-foreground" />{t('calendar.pendingOnly')}</span>
         </div>
 
         <AnimatePresence mode="wait">
@@ -601,14 +654,14 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
               {dayTasks.length === 0 ? (
                 <div className="bg-card border border-border rounded-2xl p-6 flex flex-col items-center gap-3 text-center">
                   <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center"><Calendar className="w-5 h-5 text-muted-foreground" /></div>
-                  <p className="text-sm text-muted-foreground">No tasks scheduled for this day.</p>
-                  <button onClick={onAddTask} className="text-sm font-semibold text-primary flex items-center gap-1 hover:opacity-80 transition-opacity"><Plus className="w-4 h-4" />Add a task</button>
+                  <p className="text-sm text-muted-foreground">{t('task.noTasksScheduled')}</p>
+                  <button onClick={onAddTask} className="text-sm font-semibold text-primary flex items-center gap-1 hover:opacity-80 transition-opacity"><Plus className="w-4 h-4" />{t('task.addTaskPrompt')}</button>
                 </div>
               ) : (
                 <div className="space-y-4">
                   {pendingDayTasks.length > 0 && (
                     <div className="space-y-2">
-                      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground px-1">To Do — {pendingDayTasks.length}</p>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground px-1">{t('view.toDo')} — {pendingDayTasks.length}</p>
                       {pendingDayTasks.map((task, i) => (
                         <motion.button key={task.id} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.04, duration: 0.2 }}
                           onClick={() => setDetailTaskId(task.id)}
@@ -617,7 +670,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
                           <div className="flex-1 min-w-0">
                             <p className="text-sm font-semibold text-foreground leading-snug">{task.title}</p>
                             <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                              <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${PRIORITY_BADGE[task.priority]}`}>{PRIORITY_LABEL[task.priority]}</span>
+                              <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${PRIORITY_BADGE[task.priority]}`}>{t(PRIORITY_LABEL_KEY[task.priority])}</span>
                               {task.tag && <span className="text-xs text-muted-foreground flex items-center gap-1"><Tag className="w-3 h-3" />{task.tag}</span>}
                               <span className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" />{task.estimateMinutes}m</span>
                             </div>
@@ -635,7 +688,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
                   )}
                   {doneDayTasks.length > 0 && (
                     <div className="space-y-2">
-                      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground px-1">Completed — {doneDayTasks.length}</p>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground px-1">{t('view.completed')} — {doneDayTasks.length}</p>
                       {doneDayTasks.map((task, i) => (
                         <motion.button key={task.id} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.04, duration: 0.2 }}
                           onClick={() => setRepeatTask(task)}
@@ -649,7 +702,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
                             </div>
                           </div>
                           <span className="text-xs text-primary font-semibold flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5">
-                            <RotateCcw className="w-3.5 h-3.5" />Repeat
+                            <RotateCcw className="w-3.5 h-3.5" />{t('task.repeat')}
                           </span>
                         </motion.button>
                       ))}
@@ -670,6 +723,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 function AccountPage({ email, onClose, onLogout }: {
   email: string; onClose: () => void; onLogout: () => void;
 }) {
+  const { t, i18n } = useTranslation();
   const displayName = email.split('@')[0];
 
   return (
@@ -678,7 +732,7 @@ function AccountPage({ email, onClose, onLogout }: {
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: 0.2 }}
-      className="fixed inset-0 z-50 bg-background flex flex-col items-center"
+      className="fixed inset-0 z-50 bg-background flex flex-col items-center overflow-hidden"
     >
       {/* Close button */}
       <button
@@ -690,7 +744,7 @@ function AccountPage({ email, onClose, onLogout }: {
       </button>
 
       {/* Content */}
-      <div className="flex-1 flex flex-col items-center justify-center px-6">
+      <div className="flex-1 flex flex-col items-center justify-center px-6 w-full max-w-md">
         {/* Avatar */}
         <div className="w-24 h-24 rounded-full bg-muted flex items-center justify-center mb-6">
           <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='1.5'%3E%3Cpath d='M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='12' cy='7' r='4'/%3E%3C/svg%3E"
@@ -700,6 +754,32 @@ function AccountPage({ email, onClose, onLogout }: {
         {/* Username */}
         <h2 className="text-xl font-bold text-foreground mb-1">{displayName}</h2>
         <p className="text-sm text-muted-foreground mb-8">{email}</p>
+
+        {/* Settings */}
+        <div className="w-full space-y-5 mb-6">
+          {/* Language */}
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.language')}</p>
+            <div className="flex bg-muted rounded-xl p-1">
+              <button
+                onClick={() => { i18n.changeLanguage('zh'); try { localStorage.setItem('taskflow_lang', 'zh'); } catch { /**/ } }}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-sm font-semibold rounded-lg transition-all ${
+                  i18n.language === 'zh' ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <Globe className="w-4 h-4 flex-shrink-0" />{t('account.chinese')}
+              </button>
+              <button
+                onClick={() => { i18n.changeLanguage('en'); try { localStorage.setItem('taskflow_lang', 'en'); } catch { /**/ } }}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-sm font-semibold rounded-lg transition-all ${
+                  i18n.language !== 'zh' ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <Globe className="w-4 h-4 flex-shrink-0" />{t('account.english')}
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Logout button */}
@@ -708,7 +788,7 @@ function AccountPage({ email, onClose, onLogout }: {
           onClick={onLogout}
           className="w-full py-3.5 bg-destructive/10 text-destructive rounded-xl font-semibold text-base hover:bg-destructive/20 transition-colors active:scale-95"
         >
-          Sign Out
+          {t('account.signOut')}
         </button>
       </div>
     </motion.div>
@@ -719,13 +799,17 @@ function AccountPage({ email, onClose, onLogout }: {
 
 // AppShell contains all hooks — must never be rendered conditionally to satisfy Rules of Hooks
 function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) {
+  const { t } = useTranslation();
   const [tasks, setTasks] = useState<Task[]>(() => loadTasks());
   const [streak, setStreak] = useState(() => loadStatsFromCache().streak);
   const [completedToday, setCompletedToday] = useState(() => loadStatsFromCache().completedToday);
+  const completedTodayRef = React.useRef(completedToday);
+  completedTodayRef.current = completedToday;
+  const hasInteractedRef = React.useRef(false);
   const [tasksLoading, setTasksLoading] = useState(true);
   const [exitAction, setExitAction] = useState<ExitAction | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('flow');
-  const [greeting] = useState(() => getGreeting());
+  const greeting = useMemo(() => getGreeting(t), [t]);
   const [isReordering, setIsReordering] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
 
@@ -771,24 +855,27 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
         setTasks(cached.length > 0 ? cached : []);
       }
 
-      // Stats
+      // Stats — cache is the authority for streak; server is a mirror
       try {
-        if (serverReachable) {
-          const stats = await apiGetUserStats();
-          if (!cancelled) {
-            setStreak(stats.streak);
-            setCompletedToday(stats.todayCount);
-            saveStatsToCache(stats.streak, stats.todayCount);
-          }
-        } else {
-          throw new Error('offline');
-        }
-      } catch {
-        if (!cancelled) {
-          const cached = loadStatsFromCache();
+        const cached = loadStatsFromCache();
+        if (!cancelled && !hasInteractedRef.current) {
           setStreak(cached.streak);
           setCompletedToday(cached.completedToday);
         }
+
+        // Background: sync with server (only populate cache, don't overwrite state)
+        if (serverReachable) {
+          apiGetUserStats().then(stats => {
+            if (!hasInteractedRef.current && cached.streak === 0) {
+              // First-ever login — sync initial streak from server
+              setStreak(stats.streak);
+              setCompletedToday(stats.todayCount);
+            }
+            saveStatsToCache(stats.streak, stats.todayCount, stats.streakDate);
+          }).catch(() => {});
+        }
+      } catch {
+        // Non-critical — cache already loaded above
       }
       if (!cancelled) setTasksLoading(false);
     }
@@ -836,6 +923,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
   };
 
   const handleAction = (id: string, action: ExitAction) => {
+    hasInteractedRef.current = true;
     if (action === 'snooze') {
       setExitAction('snooze');
       setTimeout(() => {
@@ -861,15 +949,37 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
           .then(() => setTasks(prev => markClean(prev, id)))
           .catch(() => toast.error('Sync failed — retrying on next action'));
         if (action === 'complete') {
-          setCompletedToday(c => {
-            const newCount = c + 1;
-            apiUpdateUserStats({ todayCount: newCount }).then(stats => {
-              setStreak(stats.streak);
-              setCompletedToday(stats.todayCount);
-              saveStatsToCache(stats.streak, stats.todayCount);
-            }).catch(() => toast.error('Stats sync failed — retrying'));
-            return newCount;
-          });
+          // Haptic feedback (silently ignored in browser)
+          Haptics.impact({ style: ImpactStyle.Medium }).catch(() => {});
+
+          const newCount = completedTodayRef.current + 1;
+          setCompletedToday(newCount);
+
+          // Compute streak locally: if first completion today, check continuity
+          let newStreak = streak; // default: same as current
+          if (completedTodayRef.current === 0) {
+            const yesterday = new Date();
+            yesterday.setDate(yesterday.getDate() - 1);
+            const yStr = yesterday.toISOString().split('T')[0];
+            try {
+              const raw = storageGet('taskflow_streak');
+              if (raw) {
+                const { count, lastDate } = JSON.parse(raw) as { count: number; lastDate: string };
+                newStreak = lastDate === yStr ? count + 1 : 1;
+              } else {
+                newStreak = 1;
+              }
+            } catch { newStreak = 1; }
+            setStreak(newStreak);
+            saveStatsToCache(newStreak, newCount);
+          } else {
+            saveStatsToCache(streak, newCount);
+          }
+
+          // Push to server (server stores what client computed)
+          apiUpdateUserStats({ todayCount: newCount, streak: newStreak }).catch(() =>
+            toast.error('Stats sync failed — retrying')
+          );
         }
       }, 50);
     }
@@ -879,21 +989,14 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
   const handleSaveOrder = (newPendingOrder: Task[]) => {
     setTasks(prev => {
       const nonPending = prev.filter(t => t.status !== 'todo');
-      const merged = [...newPendingOrder, ...nonPending];
-      // Mark all reordered pending tasks as dirty
       const ids = new Set(newPendingOrder.map(t => t.id));
-      saveTasksToCache(merged.map(t => ids.has(t.id) ? { ...t, _dirty: true } : t));
-      return merged.map(t => ids.has(t.id) ? { ...t, _dirty: true } : t);
+      return [...newPendingOrder, ...nonPending].map(t => ids.has(t.id) ? { ...t, _dirty: true } : t);
     });
     const order = newPendingOrder.map((t, i) => ({ id: t.id, sortOrder: i }));
     apiReorderTasks(order)
       .then(() => {
         const ids = new Set(newPendingOrder.map(t => t.id));
-        setTasks(prev => {
-          const cleaned = prev.map(t => ids.has(t.id) ? { ...t, _dirty: false } : t);
-          saveTasksToCache(cleaned);
-          return cleaned;
-        });
+        setTasks(prev => prev.map(t => ids.has(t.id) ? { ...t, _dirty: false } : t));
       })
       .catch(() => toast.error('Reorder sync failed — retrying'));
   };
@@ -944,7 +1047,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
   };
   
   return (
-    <div className="h-dvh bg-background text-foreground flex flex-col items-center pt-safe overflow-hidden overscroll-none selection:bg-primary/20">
+    <div className="app-viewport app-safe-y bg-background text-foreground flex flex-col items-center overscroll-none selection:bg-primary/20">
 
       {/* Account Page */}
       <AnimatePresence>
@@ -959,7 +1062,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
           <h1 className="text-2xl font-bold tracking-tight">{greeting} 👋</h1>
           <p className="text-muted-foreground text-sm flex items-center gap-1.5 mt-1">
             <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-            <span>{completedToday} {completedToday === 1 ? 'task' : 'tasks'} done today</span>
+            <span>{t('task.tasksDoneToday', { count: completedToday })}</span>
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -1047,7 +1150,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
                 {/* Up next + reorder button */}
                 <div className="w-full max-w-sm mt-10 flex items-center justify-between px-2">
                   <div className="flex flex-col">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Up Next</span>
+                    <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">{t('task.upNext')}</span>
                     <span className="text-sm truncate max-w-[180px] font-medium text-muted-foreground">
                       {pendingTasks.length > 1 ? pendingTasks[1].title : '—'}
                     </span>
@@ -1056,14 +1159,14 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
                     onClick={() => setIsReordering(true)}
                     className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors bg-muted/60 hover:bg-muted px-3 py-2 rounded-lg font-semibold"
                   >
-                    <ArrowUpDown className="w-3.5 h-3.5" />Reorder
+                    <ArrowUpDown className="w-3.5 h-3.5" />{t('task.reorder')}
                   </button>
                 </div>
 
                 {/* Hint */}
                 <div className="w-full max-w-sm mt-4 px-2 flex gap-4 text-xs text-muted-foreground">
-                  <span className="flex items-center gap-1"><AlarmClock className="w-3 h-3" /><strong>Snooze</strong> — re-queues to end</span>
-                  <span className="flex items-center gap-1"><SkipForward className="w-3 h-3" /><strong>Skip</strong> — removes from flow</span>
+                  <span className="flex items-center gap-1"><AlarmClock className="w-3 h-3" />{t('task.snoozeHint')}</span>
+                  <span className="flex items-center gap-1"><SkipForward className="w-3 h-3" />{t('task.skipHint')}</span>
                 </div>
               </>
             ) : (
@@ -1072,9 +1175,9 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
                 <div className="w-24 h-24 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-500 rounded-full flex items-center justify-center mb-6">
                   <CheckCircle2 className="w-12 h-12" />
                 </div>
-                <h2 className="text-2xl font-bold mb-2">All caught up!</h2>
-                <p className="text-muted-foreground mb-8">{"You've cleared your task flow. Take a break or add something new."}</p>
-                <button onClick={openAddTask} className="w-full py-3.5 bg-secondary text-secondary-foreground font-semibold rounded-xl">Add a new task</button>
+                <h2 className="text-2xl font-bold mb-2">{t('task.allCaughtUp')}</h2>
+                <p className="text-muted-foreground mb-8">{t('task.allCaughtUpDesc')}</p>
+                <button onClick={openAddTask} className="w-full py-3.5 bg-secondary text-secondary-foreground font-semibold rounded-xl">{t('task.addNewTask')}</button>
               </motion.div>
             )}
           </div>
@@ -1141,9 +1244,9 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
               {/* Header */}
               <div className="flex items-start justify-between px-6 pt-6 pb-4">
                 <div>
-                  <h2 id="add-task-title" className="text-lg font-bold">{isRepeatMode ? 'Repeat Task' : 'Add to your Flow'}</h2>
+                  <h2 id="add-task-title" className="text-lg font-bold">{isRepeatMode ? t('task.repeatModeTitle') : t('task.addToFlow')}</h2>
                   <p className="text-sm text-muted-foreground mt-0.5">
-                    {form.title ? 'Edit the details and pick a new deadline.' : "What's the next thing you need to focus on?"}
+                    {form.title ? t('task.editPrompt') : t('task.addPrompt')}
                   </p>
                 </div>
                 <button
@@ -1158,20 +1261,20 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
               {/* Form body */}
               <form onSubmit={handleAddTask} className="overflow-y-auto px-6 pb-6 space-y-4" style={{ maxHeight: 'calc(75vh - 80px)' }}>
                 <div className="space-y-2">
-                  <label htmlFor="title" className="text-sm font-medium leading-none">Task Name</label>
-                  <input id="title" type="text" autoFocus placeholder="e.g., Draft weekly update"
+                  <label htmlFor="title" className="text-sm font-medium leading-none">{t('task.taskName')}</label>
+                  <input id="title" type="text" autoFocus placeholder={t('task.titlePlaceholder')}
                     className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                     value={form.title} onChange={(e) => setForm(f => ({ ...f, title: e.target.value }))} required />
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <label htmlFor="minutes" className="text-sm font-medium leading-none">Est. Minutes</label>
+                    <label htmlFor="minutes" className="text-sm font-medium leading-none">{t('task.estMinutes')}</label>
                     <input id="minutes" type="number" min="1"
                       className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                       value={form.minutes} onChange={(e) => setForm(f => ({ ...f, minutes: e.target.value }))} />
                   </div>
                   <div className="space-y-2">
-                    <label htmlFor="priority" className="text-sm font-medium leading-none">Priority</label>
+                    <label htmlFor="priority" className="text-sm font-medium leading-none">{t('task.priority')}</label>
                     <select id="priority"
                       className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                       value={form.priority} onChange={(e) => setForm(f => ({ ...f, priority: e.target.value as Priority }))}>
@@ -1180,13 +1283,13 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <label htmlFor="dueDate" className="text-sm font-medium leading-none">Deadline (Optional)</label>
+                  <label htmlFor="dueDate" className="text-sm font-medium leading-none">{t('task.deadline')}</label>
                   <input id="dueDate" type="date"
                     className="flex h-10 w-full appearance-none rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                     value={form.dueDate} onChange={(e) => setForm(f => ({ ...f, dueDate: e.target.value }))} />
                 </div>
                 <div className="space-y-2">
-                  <label htmlFor="tag" className="text-sm font-medium leading-none">Category Tag</label>
+                  <label htmlFor="tag" className="text-sm font-medium leading-none">{t('task.categoryTag')}</label>
                   <select id="tag"
                     className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                     value={form.tag} onChange={(e) => setForm(f => ({ ...f, tag: e.target.value }))}>
@@ -1196,11 +1299,11 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
                 {/* Actions */}
                 <div className="flex flex-col gap-3 pt-1">
                   <button type="submit" className="w-full py-3.5 bg-primary text-primary-foreground rounded-xl font-semibold text-base hover:bg-primary/90 transition-colors active:scale-95">
-                    {isRepeatMode ? 'Add Repeated Task' : 'Add Task'}
+                    {isRepeatMode ? t('task.addRepeatedTask') : t('task.addTask')}
                   </button>
                   <button type="button" onClick={() => { setIsAddingTask(false); setIsRepeatMode(false); setForm(DEFAULT_FORM); }}
                     className="w-full py-3 bg-muted text-muted-foreground rounded-xl text-sm font-medium hover:bg-muted/80 transition-colors active:scale-95">
-                    Cancel
+                    {t('task.cancel')}
                   </button>
                 </div>
               </form>
@@ -1221,6 +1324,47 @@ export default function App() {
   const [userEmail, setUserEmail] = useState(() =>
     localStorage.getItem('taskflow_user_email') || ''
   );
+
+  // Keep a stable app viewport height across iOS toolbar/safe-area changes.
+  useEffect(() => {
+    const forceStableHeight = appState !== 'app';
+    const updateViewportHeight = () => {
+      syncAppViewportHeight(forceStableHeight);
+    };
+
+    updateViewportHeight();
+    const viewport = window.visualViewport;
+    window.addEventListener('resize', updateViewportHeight);
+    window.addEventListener('orientationchange', updateViewportHeight);
+    viewport?.addEventListener('resize', updateViewportHeight);
+    viewport?.addEventListener('scroll', updateViewportHeight);
+
+    return () => {
+      window.removeEventListener('resize', updateViewportHeight);
+      window.removeEventListener('orientationchange', updateViewportHeight);
+      viewport?.removeEventListener('resize', updateViewportHeight);
+      viewport?.removeEventListener('scroll', updateViewportHeight);
+    };
+  }, [appState]);
+
+  // Re-sync viewport after auth/loading → app transition to avoid iOS keyboard carryover.
+  useEffect(() => {
+    if (appState !== 'app') return;
+    const runForced = () => syncAppViewportHeight(true);
+    const runDynamic = () => syncAppViewportHeight(false);
+    window.scrollTo(0, 0);
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+    runForced();
+    const t1 = window.setTimeout(runForced, 120);
+    const t2 = window.setTimeout(runDynamic, 320);
+    const t3 = window.setTimeout(runDynamic, 800);
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.clearTimeout(t3);
+    };
+  }, [appState]);
 
   // Register a global auth-failure callback so apiFetch can trigger logout
   useEffect(() => {
@@ -1256,6 +1400,8 @@ export default function App() {
   }, []);
 
   function handleAuth(email: string, password: string) {
+    (document.activeElement as HTMLElement | null)?.blur();
+    syncAppViewportHeight(true);
     setUserEmail(email);
     localStorage.setItem('taskflow_logged_in', '1');
     localStorage.setItem('taskflow_user_email', email);
@@ -1292,7 +1438,7 @@ export default function App() {
 
   if (appState === 'loading') {
     return (
-      <div className="h-dvh bg-background flex items-center justify-center">
+      <div className="app-viewport app-safe-y bg-background flex items-center justify-center overscroll-none">
         <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
       </div>
     );

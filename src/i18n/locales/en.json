@@ -1,0 +1,96 @@
+{
+  "greeting": {
+    "morning": "Good morning",
+    "afternoon": "Good afternoon",
+    "evening": "Good evening",
+    "night": "Good night"
+  },
+  "priority": {
+    "P1": "High Priority",
+    "P2": "Medium Priority",
+    "P3": "Low Priority"
+  },
+  "tag": {
+    "Work": "Work",
+    "Personal": "Personal",
+    "Study": "Study",
+    "Planning": "Planning",
+    "Health": "Health",
+    "Other": "Other"
+  },
+  "task": {
+    "progress": "Progress",
+    "complete": "Complete Task",
+    "snooze": "Snooze",
+    "skip": "Skip",
+    "repeat": "Repeat",
+    "repeatTask": "Repeat Task",
+    "completedTask": "Completed Task",
+    "donePrompt": "This task is done. Want to schedule it again?",
+    "cancel": "Cancel",
+    "addTask": "Add Task",
+    "addRepeatedTask": "Add Repeated Task",
+    "addToFlow": "Add to your Flow",
+    "repeatModeTitle": "Repeat Task",
+    "addPrompt": "What's the next thing you need to focus on?",
+    "editPrompt": "Edit the details and pick a new deadline.",
+    "taskName": "Task Name",
+    "estMinutes": "Est. Minutes",
+    "priority": "Priority",
+    "deadline": "Deadline (Optional)",
+    "categoryTag": "Category Tag",
+    "titlePlaceholder": "e.g., Draft weekly update",
+    "noTasksScheduled": "No tasks scheduled for this day.",
+    "addTaskPrompt": "Add a task",
+    "allCaughtUp": "All caught up!",
+    "allCaughtUpDesc": "You've cleared your task flow. Take a break or add something new.",
+    "addNewTask": "Add a new task",
+    "upNext": "Up Next",
+    "noPendingTasks": "No pending tasks in your flow.",
+    "reorder": "Reorder",
+    "reorderTasks": "Reorder Tasks",
+    "reorderHint": "Drag the handle to rearrange your flow",
+    "done": "Done",
+    "tasksInFlow": "task(s) in flow · first card = next to focus",
+    "snoozeHint": "Snooze — re-queues to end",
+    "skipHint": "Skip — removes from flow",
+    "tasksDoneToday_one": "{{count}} task done today",
+    "tasksDoneToday_other": "{{count}} tasks done today"
+  },
+  "view": {
+    "flow": "Flow",
+    "calendar": "Calendar",
+    "toDo": "To Do",
+    "completed": "Completed"
+  },
+  "calendar": {
+    "weekdays": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    "months": ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"],
+    "pendingOnly": "Pending only",
+    "high": "High",
+    "medium": "Medium",
+    "low": "Low"
+  },
+  "auth": {
+    "signIn": "Sign In",
+    "signUp": "Sign Up",
+    "welcomeBack": "Welcome back",
+    "createAccount": "Create your account",
+    "email": "Email",
+    "password": "Password",
+    "passwordHint": "(min 8 chars)",
+    "emailPlaceholder": "you@example.com",
+    "passwordPlaceholder": "••••••••",
+    "privacyNote": "Your tasks stay private and sync across devices."
+  },
+  "account": {
+    "signOut": "Sign Out",
+    "theme": "Theme",
+    "light": "Light",
+    "dark": "Dark",
+    "system": "System",
+    "language": "Language",
+    "chinese": "中文",
+    "english": "English"
+  }
+}
