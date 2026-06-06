@@ -25,6 +25,30 @@
     "skip": "Skip",
     "repeat": "Repeat",
     "repeatTask": "Repeat Task",
+    "edit": "Edit",
+    "editTask": "Edit Task",
+    "delete": "Delete",
+    "deleted": "Task deleted",
+    "undo": "Undo",
+    "saveChanges": "Save Changes",
+    "skipped": "Skipped",
+    "allPriorities": "All Priorities",
+    "allStatuses": "All Statuses",
+    "searchPlaceholder": "Search tasks or tags",
+    "reminderAt": "Reminder",
+    "repeatRule": "Repeat",
+    "quickDate": {
+      "today": "Today",
+      "tomorrow": "Tomorrow",
+      "week": "This Week",
+      "none": "None"
+    },
+    "repeatRules": {
+      "none": "Does not repeat",
+      "daily": "Daily",
+      "weekly": "Weekly",
+      "monthly": "Monthly"
+    },
     "completedTask": "Completed Task",
     "donePrompt": "This task is done. Want to schedule it again?",
     "cancel": "Cancel",
@@ -92,5 +116,15 @@
     "language": "Language",
     "chinese": "中文",
     "english": "English"
+  },
+  "stats": {
+    "streakDays_one": "{{count}} Day",
+    "streakDays_other": "{{count}} Days"
+  },
+  "sync": {
+    "syncing": "Syncing changes...",
+    "offline": "Offline — changes are saved locally",
+    "error": "Sync failed — tap to retry",
+    "idle": "Synced"
   }
 }

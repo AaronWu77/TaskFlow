@@ -23,7 +23,7 @@ router.get('/', asyncHandler(async (req, res) => {
 
 // POST /tasks — create a new task
 router.post('/', asyncHandler(async (req, res) => {
-  const { title, priority, estimateMinutes, status, tag, progress, dueDate, sortOrder } = req.body as {
+  const { title, priority, estimateMinutes, status, tag, progress, dueDate, reminderAt, repeatRule, deletedAt, sortOrder } = req.body as {
     title?: string;
     priority?: string;
     estimateMinutes?: number;
@@ -31,6 +31,9 @@ router.post('/', asyncHandler(async (req, res) => {
     tag?: string;
     progress?: number;
     dueDate?: string | null;
+    reminderAt?: string | null;
+    repeatRule?: string | null;
+    deletedAt?: string | null;
     sortOrder?: number;
   };
   if (!title || !priority || estimateMinutes === undefined) {
@@ -47,6 +50,9 @@ router.post('/', asyncHandler(async (req, res) => {
       tag,
       progress: progress ?? 0,
       dueDate: dueDate ?? null,
+      reminderAt: reminderAt ?? null,
+      repeatRule: repeatRule ?? null,
+      deletedAt: deletedAt ?? null,
       sortOrder: sortOrder ?? 0,
     },
   });
@@ -61,7 +67,7 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     res.status(404).json({ error: 'Task not found' });
     return;
   }
-  const { title, priority, estimateMinutes, status, tag, progress, dueDate, sortOrder } = req.body as Partial<{
+  const { title, priority, estimateMinutes, status, tag, progress, dueDate, reminderAt, repeatRule, deletedAt, sortOrder } = req.body as Partial<{
     title: string;
     priority: string;
     estimateMinutes: number;
@@ -69,6 +75,9 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     tag: string;
     progress: number;
     dueDate: string | null;
+    reminderAt: string | null;
+    repeatRule: string | null;
+    deletedAt: string | null;
     sortOrder: number;
   }>;
   const updated = await prisma.task.update({
@@ -81,6 +90,9 @@ router.patch('/:id', asyncHandler(async (req, res) => {
       ...(tag !== undefined && { tag }),
       ...(progress !== undefined && { progress }),
       ...(dueDate !== undefined && { dueDate }),
+      ...(reminderAt !== undefined && { reminderAt }),
+      ...(repeatRule !== undefined && { repeatRule }),
+      ...(deletedAt !== undefined && { deletedAt }),
       ...(sortOrder !== undefined && { sortOrder }),
     },
   });

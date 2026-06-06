@@ -6,6 +6,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
+    "check": "npm run build && npm --prefix backend run build",
     "ios": "npm run build && npx cap sync ios && npx cap open ios",
     "cap:sync": "npm run build && npx cap sync ios",
     "cap:open": "npx cap open ios"

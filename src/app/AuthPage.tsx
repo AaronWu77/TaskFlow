@@ -2,13 +2,15 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CheckCircle2, Mail, Lock, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { apiLogin, apiRegister } from './api';
+import { useTranslation } from 'react-i18next';
 
 interface AuthPageProps {
-  onAuth: (email: string, password: string) => void;
+  onAuth: (email: string) => void;
   savedEmail?: string;
 }
 
 export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
+  const { t } = useTranslation();
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState(savedEmail || '');
   const [password, setPassword] = useState('');
@@ -28,7 +30,7 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
     try {
       const fn = mode === 'login' ? apiLogin : apiRegister;
       const result = await fn(email.trim().toLowerCase(), password);
-      onAuth(result.user.email, password);
+      onAuth(result.user.email);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {
@@ -62,7 +64,7 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
           </div>
           <h1 className="text-2xl font-bold tracking-tight">TaskFlow</h1>
           <p className="text-muted-foreground text-sm mt-1">
-            {mode === 'login' ? 'Welcome back' : 'Create your account'}
+            {mode === 'login' ? t('auth.welcomeBack') : t('auth.createAccount')}
           </p>
         </div>
 
@@ -81,7 +83,7 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                {m === 'login' ? 'Sign In' : 'Sign Up'}
+                {m === 'login' ? t('auth.signIn') : t('auth.signUp')}
               </button>
             ))}
           </div>
@@ -89,14 +91,14 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Email */}
             <div className="space-y-2">
-              <label htmlFor="auth-email" className="text-sm font-medium">Email</label>
+              <label htmlFor="auth-email" className="text-sm font-medium">{t('auth.email')}</label>
               <div className="relative">
                 <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
                 <input
                   id="auth-email"
                   type="email"
                   autoComplete="email"
-                  placeholder="you@example.com"
+                  placeholder={t('auth.emailPlaceholder')}
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
@@ -108,7 +110,7 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
             {/* Password */}
             <div className="space-y-2">
               <label htmlFor="auth-password" className="text-sm font-medium">
-                Password {mode === 'register' && <span className="text-muted-foreground font-normal">(min 8 chars)</span>}
+                {t('auth.password')} {mode === 'register' && <span className="text-muted-foreground font-normal">{t('auth.passwordHint')}</span>}
               </label>
               <div className="relative">
                 <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
@@ -116,7 +118,7 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
                   id="auth-password"
                   type={showPassword ? 'text' : 'password'}
                   autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-                  placeholder="••••••••"
+                  placeholder={t('auth.passwordPlaceholder')}
                   required
                   minLength={mode === 'register' ? 8 : undefined}
                   value={password}
@@ -155,13 +157,13 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
               className="w-full py-3.5 bg-primary text-primary-foreground rounded-xl font-semibold text-base hover:bg-primary/90 transition-colors active:scale-95 disabled:opacity-60 disabled:scale-100 flex items-center justify-center gap-2 mt-2"
             >
               {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-              {mode === 'login' ? 'Sign In' : 'Create Account'}
+              {mode === 'login' ? t('auth.signIn') : t('auth.createAccount')}
             </button>
           </form>
         </div>
 
         <p className="text-center text-xs text-muted-foreground mt-6">
-          Your tasks stay private and sync across devices.
+          {t('auth.privacyNote')}
         </p>
       </motion.div>
     </div>

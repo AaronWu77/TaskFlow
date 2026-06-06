@@ -25,6 +25,30 @@
     "skip": "跳过",
     "repeat": "重复",
     "repeatTask": "重复任务",
+    "edit": "编辑",
+    "editTask": "编辑任务",
+    "delete": "删除",
+    "deleted": "任务已删除",
+    "undo": "撤销",
+    "saveChanges": "保存修改",
+    "skipped": "已跳过",
+    "allPriorities": "全部优先级",
+    "allStatuses": "全部状态",
+    "searchPlaceholder": "搜索任务或标签",
+    "reminderAt": "提醒时间",
+    "repeatRule": "重复规则",
+    "quickDate": {
+      "today": "今天",
+      "tomorrow": "明天",
+      "week": "本周",
+      "none": "无"
+    },
+    "repeatRules": {
+      "none": "不重复",
+      "daily": "每天",
+      "weekly": "每周",
+      "monthly": "每月"
+    },
     "completedTask": "已完成任务",
     "donePrompt": "此任务已完成。要再次安排吗？",
     "cancel": "取消",
@@ -92,5 +116,15 @@
     "language": "语言",
     "chinese": "中文",
     "english": "English"
+  },
+  "stats": {
+    "streakDays_one": "{{count}} 天",
+    "streakDays_other": "{{count}} 天"
+  },
+  "sync": {
+    "syncing": "正在同步修改...",
+    "offline": "离线中 — 修改已保存在本地",
+    "error": "同步失败 — 点击重试",
+    "idle": "已同步"
   }
 }

@@ -1,14 +1,16 @@
 // API base URL — points to backend. In development use localhost:3000,
 // in production set VITE_API_URL to your server (e.g. https://yourdomain.com/api)
+import { Preferences } from '@capacitor/preferences';
+
 const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || 'http://localhost:3000';
 
 // Access token stored in memory only (not localStorage) — reduces XSS risk.
 // On page refresh, the token is gone; a silent refresh via stored refreshToken re-issues it.
 let accessToken: string | null = null;
 
-// Refresh token stored in localStorage for persistent auto-login across app restarts
-let refreshToken: string | null = null;
 const REFRESH_TOKEN_KEY = 'taskflow_refresh_token';
+const IS_NATIVE = typeof (window as unknown as { Capacitor?: { isNativePlatform: () => boolean } }).Capacitor !== 'undefined'
+  && (window as unknown as { Capacitor: { isNativePlatform: () => boolean } }).Capacitor.isNativePlatform();
 
 // Callback invoked when both the access token and refresh cookie are expired.
 // The App component registers this to transition back to the login screen.
@@ -19,29 +21,31 @@ function setAccessToken(token: string | null) {
   accessToken = token;
 }
 
-function getRefreshToken(): string | null {
-  if (refreshToken) return refreshToken;
+async function getNativeRefreshToken(): Promise<string | null> {
+  if (!IS_NATIVE) return null;
   try {
-    refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
-  } catch { /**/ }
-  return refreshToken;
+    const { value } = await Preferences.get({ key: REFRESH_TOKEN_KEY });
+    return value;
+  } catch {
+    return null;
+  }
 }
 
-function setRefreshToken(token: string | null) {
-  refreshToken = token;
-  try {
-    if (token) localStorage.setItem(REFRESH_TOKEN_KEY, token);
-    else localStorage.removeItem(REFRESH_TOKEN_KEY);
-  } catch { /**/ }
+function setNativeRefreshToken(token: string | null): void {
+  if (!IS_NATIVE) return;
+  if (token) Preferences.set({ key: REFRESH_TOKEN_KEY, value: token }).catch(() => { /**/ });
+  else Preferences.remove({ key: REFRESH_TOKEN_KEY }).catch(() => { /**/ });
 }
 
-/** Attempt a silent token refresh using stored refreshToken (header) or httpOnly cookie.
+/** Attempt a silent token refresh using the httpOnly refresh cookie.
+ *  Native Capacitor builds also send a Preferences-backed refresh token because
+ *  WKWebView cookie persistence is not reliable across all iOS app restarts.
  *  Returns true if a new access token was obtained, false otherwise. */
 export async function apiRefresh(): Promise<boolean> {
   try {
-    const token = getRefreshToken();
+    const nativeRefreshToken = await getNativeRefreshToken();
     const headers: Record<string, string> = {};
-    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (nativeRefreshToken) headers.Authorization = `Bearer ${nativeRefreshToken}`;
 
     const res = await fetch(`${BASE_URL}/auth/refresh`, {
       method: 'POST',
@@ -97,9 +101,9 @@ export async function apiLogin(email: string, password: string): Promise<{ user:
     const err = await res.json() as { error: string };
     throw new Error(err.error || 'Login failed');
   }
-  const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken: string };
+  const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken?: string };
   setAccessToken(data.accessToken);
-  if (data.refreshToken) setRefreshToken(data.refreshToken);
+  setNativeRefreshToken(data.refreshToken ?? null);
   return data;
 }
 
@@ -114,16 +118,16 @@ export async function apiRegister(email: string, password: string): Promise<{ us
     const err = await res.json() as { error: string };
     throw new Error(err.error || 'Registration failed');
   }
-  const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken: string };
+  const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken?: string };
   setAccessToken(data.accessToken);
-  if (data.refreshToken) setRefreshToken(data.refreshToken);
+  setNativeRefreshToken(data.refreshToken ?? null);
   return data;
 }
 
 export async function apiLogout(): Promise<void> {
   try { await fetch(`${BASE_URL}/auth/logout`, { method: 'POST', credentials: 'include' }); } catch { /* */ }
   setAccessToken(null);
-  setRefreshToken(null);
+  setNativeRefreshToken(null);
 }
 
 // ── Task CRUD ──
@@ -138,6 +142,9 @@ export interface TaskDTO {
   tag: string | null;
   progress: number;
   dueDate: string | null;
+  reminderAt: string | null;
+  repeatRule: string | null;
+  deletedAt: string | null;
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
@@ -160,6 +167,9 @@ export async function apiCreateTask(task: {
   tag?: string;
   progress?: number;
   dueDate?: string | null;
+  reminderAt?: string | null;
+  repeatRule?: string | null;
+  deletedAt?: string | null;
   sortOrder?: number;
 }): Promise<TaskDTO> {
   const res = await apiFetch('/tasks', {
@@ -181,6 +191,9 @@ export async function apiUpdateTask(id: string, data: Partial<{
   tag: string;
   progress: number;
   dueDate: string | null;
+  reminderAt: string | null;
+  repeatRule: string | null;
+  deletedAt: string | null;
   sortOrder: number;
 }>): Promise<TaskDTO> {
   const res = await apiFetch(`/tasks/${encodeURIComponent(id)}`, {

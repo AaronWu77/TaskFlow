@@ -35,6 +35,17 @@ export function storageSet(key: string, value: string): void {
   }
 }
 
+/** Remove from localStorage and Capacitor Preferences. */
+export function storageRemove(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch { /**/ }
+
+  if (IS_NATIVE) {
+    Preferences.remove({ key }).catch(() => { /**/ });
+  }
+}
+
 /**
  * On native app cold-start, localStorage may have been cleared by iOS.
  * Call this once at startup to restore data from Capacitor Preferences → localStorage.

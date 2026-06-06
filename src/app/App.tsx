@@ -4,13 +4,14 @@ import {
   Check, X, Clock, Plus, Flame, CheckCircle2,
   Calendar, Tag, XCircle, ChevronLeft, ChevronRight,
   ListTodo, SkipForward, AlarmClock, RotateCcw,
-  GripVertical, ArrowUpDown, Globe
+  GripVertical, ArrowUpDown, Globe, Edit3, Trash2,
+  Search, Bell, RotateCw, ArchiveRestore
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
-import { storageGet, storageSet, restoreFromNativeStorage } from './storage';
+import { storageGet, storageSet, storageRemove, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { apiLogout, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiDeleteTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiLogin } from './api';
+import { apiLogout, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiDeleteTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefresh } from './api';
 import { toast, Toaster } from 'sonner';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 
@@ -29,6 +30,9 @@ interface Task {
   tag?: string;
   progress: number;
   dueDate?: string | null;
+  reminderAt?: string | null;
+  repeatRule?: 'none' | 'daily' | 'weekly' | 'monthly' | null;
+  deletedAt?: string | null;
   sortOrder: number;
   _dirty?: boolean; // local-only: true if pending sync to server
 }
@@ -74,6 +78,7 @@ async function flushDirtyTasks(tasks: Task[]): Promise<Task[]> {
           title: t.title, priority: t.priority,
           estimateMinutes: t.estimateMinutes, status: t.status,
           tag: t.tag, progress: t.progress, dueDate: t.dueDate,
+          reminderAt: t.reminderAt, repeatRule: t.repeatRule, deletedAt: t.deletedAt,
           sortOrder: t.sortOrder,
         });
       } else {
@@ -81,9 +86,11 @@ async function flushDirtyTasks(tasks: Task[]): Promise<Task[]> {
           title: t.title, priority: t.priority,
           estimateMinutes: t.estimateMinutes, status: t.status,
           tag: t.tag, progress: t.progress, dueDate: t.dueDate,
+          reminderAt: t.reminderAt, repeatRule: t.repeatRule, deletedAt: t.deletedAt,
           sortOrder: t.sortOrder,
         });
-        updated = updated.map(x => x.id === t.id ? { ...x, id: created.id } : x);
+        updated = updated.map(x => x.id === t.id ? { ...x, id: created.id, _dirty: false } : x);
+        continue;
       }
       updated = markClean(updated, t.id);
     } catch {
@@ -176,15 +183,27 @@ function fmtDate(y: number, m: number, d: number) {
   return `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 }
 
+function nextRepeatDate(dueDate: string | null | undefined, rule: Task['repeatRule']): string | null {
+  if (!dueDate || !rule || rule === 'none') return null;
+  const next = new Date(`${dueDate}T12:00:00`);
+  if (Number.isNaN(next.getTime())) return null;
+  if (rule === 'daily') next.setDate(next.getDate() + 1);
+  if (rule === 'weekly') next.setDate(next.getDate() + 7);
+  if (rule === 'monthly') next.setMonth(next.getMonth() + 1);
+  return fmtDate(next.getFullYear(), next.getMonth(), next.getDate());
+}
+
 // --- Add Task Form state ---
 interface AddTaskState {
   title: string;
   minutes: string;
   priority: Priority;
   dueDate: string;
+  reminderAt: string;
+  repeatRule: 'none' | 'daily' | 'weekly' | 'monthly';
   tag: string;
 }
-const DEFAULT_FORM: AddTaskState = { title: '', minutes: '25', priority: 'P2', dueDate: '', tag: PRESET_TAGS[0] };
+const DEFAULT_FORM: AddTaskState = { title: '', minutes: '25', priority: 'P2', dueDate: '', reminderAt: '', repeatRule: 'none', tag: PRESET_TAGS[0] };
 
 // Returns index at which newTask should be inserted among existing tasks.
 // Only compares against 'todo' tasks; preserves manual ordering otherwise.
@@ -354,11 +373,14 @@ function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
 }
 
 // --- Task Detail Modal (Calendar) ---
-function TaskDetailModal({ task, onClose, onAction, onProgressChange }: {
+function TaskDetailModal({ task, onClose, onAction, onProgressChange, onEdit, onDelete }: {
   task: Task | null; onClose: () => void;
   onAction: (id: string, action: ExitAction) => void;
   onProgressChange: (id: string, progress: number) => void;
+  onEdit: (task: Task) => void;
+  onDelete: (task: Task) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <Dialog.Root open={!!task} onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
@@ -367,12 +389,28 @@ function TaskDetailModal({ task, onClose, onAction, onProgressChange }: {
           <Dialog.Title className="sr-only">{task?.title}</Dialog.Title>
           <Dialog.Description className="sr-only">Task actions</Dialog.Description>
           {task && (
-            <TaskCard
-              task={task}
-              onAction={(id, action) => { onAction(id, action); onClose(); }}
-              onProgressChange={onProgressChange}
-              exitAction={null}
-            />
+            <>
+              <TaskCard
+                task={task}
+                onAction={(id, action) => { onAction(id, action); onClose(); }}
+                onProgressChange={onProgressChange}
+                exitAction={null}
+              />
+              <div className="absolute left-4 right-4 bottom-4 z-20 grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => { onEdit(task); onClose(); }}
+                  className="flex items-center justify-center gap-1.5 rounded-xl bg-card/95 border border-border py-2.5 text-sm font-semibold text-foreground shadow-sm"
+                >
+                  <Edit3 className="w-4 h-4" />{t('task.edit')}
+                </button>
+                <button
+                  onClick={() => { onDelete(task); onClose(); }}
+                  className="flex items-center justify-center gap-1.5 rounded-xl bg-destructive/95 py-2.5 text-sm font-semibold text-destructive-foreground shadow-sm"
+                >
+                  <Trash2 className="w-4 h-4" />{t('task.delete')}
+                </button>
+              </div>
+            </>
           )}
           <Dialog.Close asChild>
             <button className="absolute -top-1 -right-1 z-20 w-9 h-9 flex items-center justify-center rounded-full bg-card border border-border shadow-sm text-muted-foreground hover:text-foreground transition-colors">
@@ -543,14 +581,16 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
 }
 
 // --- Calendar View ---
-function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTask }: {
+function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTask, onEditTask, onDeleteTask }: {
   tasks: Task[];
   onAction: (id: string, action: ExitAction) => void;
   onProgressChange: (id: string, progress: number) => void;
   onAddTask: () => void;
   onRepeatTask: (task: Task) => void;
+  onEditTask: (task: Task) => void;
+  onDeleteTask: (task: Task) => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const today = new Date();
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth());
@@ -560,6 +600,9 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
   const detailTask = detailTaskId ? tasks.find(t => t.id === detailTaskId) ?? null : null;
   const [repeatTask, setRepeatTask] = useState<Task | null>(null);
+  const [query, setQuery] = useState('');
+  const [priorityFilter, setPriorityFilter] = useState<'all' | Priority>('all');
+  const [statusFilter, setStatusFilter] = useState<'active' | 'done' | 'skipped' | 'all'>('active');
 
   const translatedWeekdays = t('calendar.weekdays', { returnObjects: true }) as unknown as string[];
   const translatedMonths = t('calendar.months', { returnObjects: true }) as unknown as string[];
@@ -568,11 +611,23 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const todayFmt = fmtDate(today.getFullYear(), today.getMonth(), today.getDate());
 
+  const visibleTasks = tasks.filter(task => {
+    if (task.deletedAt) return false;
+    const normalizedQuery = query.trim().toLowerCase();
+    const matchesQuery = !normalizedQuery
+      || task.title.toLowerCase().includes(normalizedQuery)
+      || (task.tag ?? '').toLowerCase().includes(normalizedQuery);
+    const matchesPriority = priorityFilter === 'all' || task.priority === priorityFilter;
+    const matchesStatus = statusFilter === 'all'
+      || (statusFilter === 'active' ? task.status === 'todo' : task.status === statusFilter);
+    return matchesQuery && matchesPriority && matchesStatus;
+  });
+
   const pendingByDate: Record<string, Task[]> = {};
-  tasks.forEach(t => { if (t.dueDate && t.status === 'todo') (pendingByDate[t.dueDate] ??= []).push(t); });
+  visibleTasks.forEach(t => { if (t.dueDate && t.status === 'todo') (pendingByDate[t.dueDate] ??= []).push(t); });
 
   const allByDate: Record<string, Task[]> = {};
-  tasks.forEach(t => { if (t.dueDate) (allByDate[t.dueDate] ??= []).push(t); });
+  visibleTasks.forEach(t => { if (t.dueDate) (allByDate[t.dueDate] ??= []).push(t); });
 
   const prevMonth = () => { month === 0 ? (setYear(y => y - 1), setMonth(11)) : setMonth(m => m - 1); setSelectedDate(null); };
   const nextMonth = () => { month === 11 ? (setYear(y => y + 1), setMonth(0)) : setMonth(m => m + 1); setSelectedDate(null); };
@@ -588,10 +643,43 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 
   return (
     <>
-      <TaskDetailModal task={detailTask} onClose={() => setDetailTaskId(null)} onAction={onAction} onProgressChange={onProgressChange} />
+      <TaskDetailModal task={detailTask} onClose={() => setDetailTaskId(null)} onAction={onAction} onProgressChange={onProgressChange} onEdit={onEditTask} onDelete={onDeleteTask} />
       <RepeatTaskModal task={repeatTask} onClose={() => setRepeatTask(null)} onRepeat={onRepeatTask} />
 
       <div className="w-full max-w-md space-y-4">
+        <div className="bg-card border border-border rounded-2xl p-3 shadow-sm space-y-3">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={t('task.searchPlaceholder')}
+              className="h-10 w-full rounded-xl border border-input bg-input-background pl-9 pr-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <select
+              value={priorityFilter}
+              onChange={(e) => setPriorityFilter(e.target.value as 'all' | Priority)}
+              className="h-9 rounded-xl border border-input bg-input-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <option value="all">{t('task.allPriorities')}</option>
+              <option value="P1">{t('priority.P1')}</option>
+              <option value="P2">{t('priority.P2')}</option>
+              <option value="P3">{t('priority.P3')}</option>
+            </select>
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as 'active' | 'done' | 'skipped' | 'all')}
+              className="h-9 rounded-xl border border-input bg-input-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <option value="active">{t('view.toDo')}</option>
+              <option value="done">{t('view.completed')}</option>
+              <option value="skipped">{t('task.skipped')}</option>
+              <option value="all">{t('task.allStatuses')}</option>
+            </select>
+          </div>
+        </div>
         <div className="flex items-center justify-between px-1">
           <button onClick={prevMonth} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"><ChevronLeft className="w-5 h-5" /></button>
           <h2 className="text-base font-bold tracking-tight">{translatedMonths[month]} {year}</h2>
@@ -646,7 +734,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
             >
               <div className="flex items-center justify-between px-1">
                 <h3 className="text-sm font-bold text-foreground">
-                  {new Date(selectedDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+                  {new Date(selectedDate + 'T12:00:00').toLocaleDateString(i18n.language === 'zh' ? 'zh-CN' : 'en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
                 </h3>
                 <span className="text-xs text-muted-foreground">{dayTasks.length} {dayTasks.length === 1 ? 'task' : 'tasks'}</span>
               </div>
@@ -815,6 +903,8 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
 
   const [isAddingTask, setIsAddingTask] = useState(false);
   const [isRepeatMode, setIsRepeatMode] = useState(false);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'offline' | 'error'>('idle');
   const [form, setForm] = useState<AddTaskState>(DEFAULT_FORM);
 
   // On mount: pull all tasks from cloud (cloud-primary), fall back to cache
@@ -830,7 +920,8 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
             id: t.id, title: t.title, priority: t.priority as Priority,
             estimateMinutes: t.estimateMinutes, status: t.status as TaskStatus,
             tag: t.tag ?? undefined, progress: t.progress, dueDate: t.dueDate,
-            sortOrder: t.sortOrder, _dirty: false,
+            reminderAt: t.reminderAt, repeatRule: (t.repeatRule as Task['repeatRule']) ?? 'none',
+            deletedAt: t.deletedAt, sortOrder: t.sortOrder, _dirty: false,
           }));
 
           // Preserve dirty tasks from cache that haven't reached the server yet
@@ -900,7 +991,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
   useEffect(() => {
     if (!isAddingTask) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); setIsAddingTask(false); setIsRepeatMode(false); setForm(DEFAULT_FORM); }
+      if (e.key === 'Escape') { e.preventDefault(); setIsAddingTask(false); setIsRepeatMode(false); setEditingTaskId(null); setForm(DEFAULT_FORM); }
     };
     document.addEventListener('keydown', handleKey);
     return () => document.removeEventListener('keydown', handleKey);
@@ -909,7 +1000,40 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
   // Cache tasks to localStorage whenever they change
   useEffect(() => { saveTasksToCache(tasks); }, [tasks]);
 
-  const pendingTasks = tasks.filter(t => t.status === 'todo');
+  const retryDirtyTasks = React.useCallback(async () => {
+    const dirty = loadTasks().filter(t => t._dirty);
+    if (dirty.length === 0) {
+      setSyncStatus(navigator.onLine ? 'idle' : 'offline');
+      return;
+    }
+    if (!navigator.onLine) {
+      setSyncStatus('offline');
+      return;
+    }
+    setSyncStatus('syncing');
+    const flushed = await flushDirtyTasks(loadTasks());
+    setTasks(flushed);
+    const stillDirty = flushed.some(t => t._dirty);
+    setSyncStatus(stillDirty ? 'error' : 'idle');
+  }, []);
+
+  useEffect(() => {
+    retryDirtyTasks();
+    const handleOnline = () => retryDirtyTasks();
+    const handleOffline = () => setSyncStatus('offline');
+    const handleFocus = () => retryDirtyTasks();
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [retryDirtyTasks]);
+
+  const activeTasks = tasks.filter(t => !t.deletedAt);
+  const pendingTasks = activeTasks.filter(t => t.status === 'todo');
 
   const handleProgressChange = (id: string, newProgress: number) => {
     setTasks(prev => {
@@ -919,7 +1043,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
     // Background push
     apiUpdateTask(id, { progress: newProgress })
       .then(() => setTasks(prev => markClean(prev, id)))
-      .catch(() => toast.error('Sync failed — retrying on next action'));
+      .catch(() => toast.error(t('sync.error')));
   };
 
   const handleAction = (id: string, action: ExitAction) => {
@@ -935,19 +1059,34 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
         setExitAction(null);
         apiUpdateTask(id, { status: 'snoozed' })
           .then(() => setTasks(prev => markClean(prev, id)))
-          .catch(() => toast.error('Sync failed — retrying on next action'));
+          .catch(() => toast.error(t('sync.error')));
       }, 320);
     } else {
       setExitAction(action);
       const newStatus = action === 'complete' ? 'done' : 'skipped';
       setTimeout(() => {
         setTasks(prev => {
+          const task = prev.find(t => t.id === id);
           const updated = prev.map(t => t.id !== id ? t : { ...t, status: newStatus as TaskStatus });
-          return markDirty(updated, id);
+          if (action !== 'complete' || !task) return markDirty(updated, id);
+          const nextDueDate = nextRepeatDate(task.dueDate, task.repeatRule);
+          if (!nextDueDate) return markDirty(updated, id);
+          const nextTask: Task = {
+            ...task,
+            id: Math.random().toString(36).substring(7),
+            status: 'todo',
+            progress: 0,
+            dueDate: nextDueDate,
+            reminderAt: null,
+            deletedAt: null,
+            sortOrder: updated.filter(t => t.status === 'todo' && !t.deletedAt).length,
+            _dirty: true,
+          };
+          return markDirty([...updated, nextTask], id);
         });
         apiUpdateTask(id, { status: newStatus })
           .then(() => setTasks(prev => markClean(prev, id)))
-          .catch(() => toast.error('Sync failed — retrying on next action'));
+          .catch(() => toast.error(t('sync.error')));
         if (action === 'complete') {
           // Haptic feedback (silently ignored in browser)
           Haptics.impact({ style: ImpactStyle.Medium }).catch(() => {});
@@ -1001,20 +1140,99 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
       .catch(() => toast.error('Reorder sync failed — retrying'));
   };
 
-  const handleRepeatTask = (task: Task) => {
-    setForm({ title: task.title, minutes: String(task.estimateMinutes), priority: task.priority, dueDate: '', tag: task.tag || PRESET_TAGS[0] });
-    setIsRepeatMode(true);
+  const persistTaskUpdate = (id: string, data: Partial<Task>) => {
+    setSyncStatus(navigator.onLine ? 'syncing' : 'offline');
+    apiUpdateTask(id, {
+      title: data.title,
+      priority: data.priority,
+      estimateMinutes: data.estimateMinutes,
+      status: data.status,
+      tag: data.tag,
+      progress: data.progress,
+      dueDate: data.dueDate,
+      reminderAt: data.reminderAt,
+      repeatRule: data.repeatRule,
+      deletedAt: data.deletedAt,
+      sortOrder: data.sortOrder,
+    }).then(() => {
+      setTasks(prev => markClean(prev, id));
+      setSyncStatus('idle');
+    }).catch(() => {
+      setSyncStatus(navigator.onLine ? 'error' : 'offline');
+      toast.error(t('sync.error'));
+    });
+  };
+
+  const openEditTask = (task: Task) => {
+    setForm({
+      title: task.title,
+      minutes: String(task.estimateMinutes),
+      priority: task.priority,
+      dueDate: task.dueDate || '',
+      reminderAt: task.reminderAt || '',
+      repeatRule: task.repeatRule || 'none',
+      tag: task.tag || PRESET_TAGS[0],
+    });
+    setEditingTaskId(task.id);
+    setIsRepeatMode(false);
     setIsAddingTask(true);
   };
 
-  const openAddTask = () => { setForm(DEFAULT_FORM); setIsRepeatMode(false); setIsAddingTask(true); };
+  const handleDeleteTask = (task: Task) => {
+    const deletedAt = new Date().toISOString();
+    setTasks(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt } : t), task.id));
+    persistTaskUpdate(task.id, { deletedAt });
+    toast(t('task.deleted'), {
+      action: {
+        label: t('task.undo'),
+        onClick: () => {
+          setTasks(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt: null } : t), task.id));
+          persistTaskUpdate(task.id, { deletedAt: null });
+        },
+      },
+    });
+  };
+
+  const handleRepeatTask = (task: Task) => {
+    setForm({
+      title: task.title,
+      minutes: String(task.estimateMinutes),
+      priority: task.priority,
+      dueDate: '',
+      reminderAt: '',
+      repeatRule: task.repeatRule || 'none',
+      tag: task.tag || PRESET_TAGS[0],
+    });
+    setIsRepeatMode(true);
+    setEditingTaskId(null);
+    setIsAddingTask(true);
+  };
+
+  const openAddTask = () => { setForm(DEFAULT_FORM); setIsRepeatMode(false); setEditingTaskId(null); setIsAddingTask(true); };
 
   const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.title.trim()) return;
+    if (editingTaskId) {
+      const patch: Partial<Task> = {
+        title: form.title.trim(),
+        priority: form.priority,
+        estimateMinutes: parseInt(form.minutes) || 15,
+        dueDate: form.dueDate || null,
+        reminderAt: form.reminderAt || null,
+        repeatRule: form.repeatRule,
+        tag: form.tag,
+      };
+      setTasks(prev => markDirty(prev.map(t => t.id === editingTaskId ? { ...t, ...patch } : t), editingTaskId));
+      persistTaskUpdate(editingTaskId, patch);
+      setIsAddingTask(false);
+      setIsRepeatMode(false);
+      setEditingTaskId(null);
+      setForm(DEFAULT_FORM);
+      return;
+    }
     const tempId = Math.random().toString(36).substring(7);
 
-    const pending = tasks.filter(t => t.status === 'todo');
     const idx = insertIndex(tasks, { id: tempId, title: '', priority: form.priority, estimateMinutes: 0, status: 'todo', progress: 0, dueDate: form.dueDate || null, sortOrder: 0 } as Task);
 
     const optimisticTask: Task = {
@@ -1022,7 +1240,8 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
       title: form.title, priority: form.priority,
       estimateMinutes: parseInt(form.minutes) || 15,
       status: 'todo', progress: 0,
-      dueDate: form.dueDate || null, tag: form.tag,
+      dueDate: form.dueDate || null, reminderAt: form.reminderAt || null,
+      repeatRule: form.repeatRule, deletedAt: null, tag: form.tag,
       sortOrder: idx,
     };
     setTasks(prev => {
@@ -1038,11 +1257,14 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
       estimateMinutes: optimisticTask.estimateMinutes,
       status: optimisticTask.status, tag: optimisticTask.tag,
       progress: optimisticTask.progress, dueDate: optimisticTask.dueDate,
+      reminderAt: optimisticTask.reminderAt, repeatRule: optimisticTask.repeatRule,
       sortOrder: optimisticTask.sortOrder,
     }).then(created => {
       setTasks(prev => markClean(prev.map(t => t.id === tempId ? { ...t, id: created.id } : t), created.id));
+      setSyncStatus('idle');
     }).catch((e) => {
-      toast.error('New task sync failed — will retry on next action');
+      setSyncStatus(navigator.onLine ? 'error' : 'offline');
+      toast.error(t('sync.error'));
     });
   };
   
@@ -1068,7 +1290,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-2 bg-card border border-border px-3 py-1.5 rounded-full shadow-sm">
             <Flame className="w-4 h-4 text-orange-500" fill="currentColor" />
-            <span className="text-sm font-semibold">{streak} Day{streak !== 1 ? 's' : ''}</span>
+            <span className="text-sm font-semibold">{t('stats.streakDays', { count: streak })}</span>
           </div>
           <button
             onClick={() => setAccountOpen(true)}
@@ -1080,6 +1302,22 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
           </button>
         </div>
       </header>
+
+      {syncStatus !== 'idle' && (
+        <div className="w-full max-w-md px-4 sm:px-6 mb-3">
+          <button
+            onClick={retryDirtyTasks}
+            className={`w-full flex items-center justify-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold ${
+              syncStatus === 'error'
+                ? 'border-destructive/30 bg-destructive/10 text-destructive'
+                : 'border-border bg-card text-muted-foreground'
+            }`}
+          >
+            <RotateCw className={`w-3.5 h-3.5 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
+            {t(`sync.${syncStatus}`)}
+          </button>
+        </div>
+      )}
 
       {/* Toast notifications */}
       <Toaster />
@@ -1172,7 +1410,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
             ) : (
               <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
                 className="flex flex-col items-center justify-center h-full w-full max-w-sm text-center px-6">
-                <div className="w-24 h-24 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-500 rounded-full flex items-center justify-center mb-6">
+                <div className="w-24 h-24 bg-emerald-100 text-emerald-500 rounded-full flex items-center justify-center mb-6">
                   <CheckCircle2 className="w-12 h-12" />
                 </div>
                 <h2 className="text-2xl font-bold mb-2">{t('task.allCaughtUp')}</h2>
@@ -1185,11 +1423,13 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
           {/* ── Calendar panel ── */}
           <div className="flex flex-col items-center px-4 sm:px-6 pb-4 h-full overflow-y-auto" style={{ width: '50%' }}>
             <CalendarView
-              tasks={tasks}
+              tasks={activeTasks}
               onAction={handleAction}
               onProgressChange={handleProgressChange}
               onAddTask={openAddTask}
               onRepeatTask={handleRepeatTask}
+              onEditTask={openEditTask}
+              onDeleteTask={handleDeleteTask}
             />
           </div>
         </motion.div>
@@ -1225,7 +1465,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
               exit={{ opacity: 0 }}
               transition={{ duration: 0.18 }}
               className="fixed inset-0 bg-black/50 z-50"
-              onClick={() => { setIsAddingTask(false); setIsRepeatMode(false); setForm(DEFAULT_FORM); }}
+              onClick={() => { setIsAddingTask(false); setIsRepeatMode(false); setEditingTaskId(null); setForm(DEFAULT_FORM); }}
             />
             {/* Card */}
             <motion.div
@@ -1244,14 +1484,14 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
               {/* Header */}
               <div className="flex items-start justify-between px-6 pt-6 pb-4">
                 <div>
-                  <h2 id="add-task-title" className="text-lg font-bold">{isRepeatMode ? t('task.repeatModeTitle') : t('task.addToFlow')}</h2>
+                  <h2 id="add-task-title" className="text-lg font-bold">{editingTaskId ? t('task.editTask') : isRepeatMode ? t('task.repeatModeTitle') : t('task.addToFlow')}</h2>
                   <p className="text-sm text-muted-foreground mt-0.5">
                     {form.title ? t('task.editPrompt') : t('task.addPrompt')}
                   </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => { setIsAddingTask(false); setIsRepeatMode(false); setForm(DEFAULT_FORM); }}
+                  onClick={() => { setIsAddingTask(false); setIsRepeatMode(false); setEditingTaskId(null); setForm(DEFAULT_FORM); }}
                   className="w-8 h-8 flex items-center justify-center rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors flex-shrink-0 ml-3 mt-0.5"
                 >
                   <X className="w-4 h-4" />
@@ -1278,15 +1518,57 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
                     <select id="priority"
                       className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                       value={form.priority} onChange={(e) => setForm(f => ({ ...f, priority: e.target.value as Priority }))}>
-                      <option value="P1">High (P1)</option><option value="P2">Medium (P2)</option><option value="P3">Low (P3)</option>
+                      <option value="P1">{t('priority.P1')}</option><option value="P2">{t('priority.P2')}</option><option value="P3">{t('priority.P3')}</option>
                     </select>
                   </div>
                 </div>
                 <div className="space-y-2">
                   <label htmlFor="dueDate" className="text-sm font-medium leading-none">{t('task.deadline')}</label>
+                  <div className="grid grid-cols-4 gap-2">
+                    {[
+                      { key: 'today', offset: 0 },
+                      { key: 'tomorrow', offset: 1 },
+                      { key: 'week', offset: 7 },
+                      { key: 'none', offset: null },
+                    ].map(item => (
+                      <button
+                        key={item.key}
+                        type="button"
+                        onClick={() => {
+                          if (item.offset === null) {
+                            setForm(f => ({ ...f, dueDate: '' }));
+                            return;
+                          }
+                          const next = new Date();
+                          next.setDate(next.getDate() + item.offset);
+                          setForm(f => ({ ...f, dueDate: fmtDate(next.getFullYear(), next.getMonth(), next.getDate()) }));
+                        }}
+                        className="rounded-lg bg-muted px-2 py-1.5 text-xs font-semibold text-muted-foreground active:scale-95"
+                      >
+                        {t(`task.quickDate.${item.key}`)}
+                      </button>
+                    ))}
+                  </div>
                   <input id="dueDate" type="date"
                     className="flex h-10 w-full appearance-none rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                     value={form.dueDate} onChange={(e) => setForm(f => ({ ...f, dueDate: e.target.value }))} />
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="reminderAt" className="text-sm font-medium leading-none flex items-center gap-1.5"><Bell className="w-4 h-4" />{t('task.reminderAt')}</label>
+                  <input id="reminderAt" type="datetime-local"
+                    className="flex h-10 w-full appearance-none rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    value={form.reminderAt} onChange={(e) => setForm(f => ({ ...f, reminderAt: e.target.value }))} />
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="repeatRule" className="text-sm font-medium leading-none">{t('task.repeatRule')}</label>
+                  <select id="repeatRule"
+                    className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    value={form.repeatRule} onChange={(e) => setForm(f => ({ ...f, repeatRule: e.target.value as AddTaskState['repeatRule'] }))}>
+                    <option value="none">{t('task.repeatRules.none')}</option>
+                    <option value="daily">{t('task.repeatRules.daily')}</option>
+                    <option value="weekly">{t('task.repeatRules.weekly')}</option>
+                    <option value="monthly">{t('task.repeatRules.monthly')}</option>
+                  </select>
                 </div>
                 <div className="space-y-2">
                   <label htmlFor="tag" className="text-sm font-medium leading-none">{t('task.categoryTag')}</label>
@@ -1299,9 +1581,9 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
                 {/* Actions */}
                 <div className="flex flex-col gap-3 pt-1">
                   <button type="submit" className="w-full py-3.5 bg-primary text-primary-foreground rounded-xl font-semibold text-base hover:bg-primary/90 transition-colors active:scale-95">
-                    {isRepeatMode ? t('task.addRepeatedTask') : t('task.addTask')}
+                    {editingTaskId ? t('task.saveChanges') : isRepeatMode ? t('task.addRepeatedTask') : t('task.addTask')}
                   </button>
-                  <button type="button" onClick={() => { setIsAddingTask(false); setIsRepeatMode(false); setForm(DEFAULT_FORM); }}
+                  <button type="button" onClick={() => { setIsAddingTask(false); setIsRepeatMode(false); setEditingTaskId(null); setForm(DEFAULT_FORM); }}
                     className="w-full py-3 bg-muted text-muted-foreground rounded-xl text-sm font-medium hover:bg-muted/80 transition-colors active:scale-95">
                     {t('task.cancel')}
                   </button>
@@ -1318,12 +1600,8 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
 // App handles auth state only; AppShell holds all hooks (Rules of Hooks compliance)
 export default function App() {
   // 'loading' = checking refresh cookie, 'auth' = not logged in, 'app' = logged in
-  const [appState, setAppState] = useState<'loading' | 'auth' | 'app'>(() =>
-    localStorage.getItem('taskflow_logged_in') ? 'loading' : 'auth'
-  );
-  const [userEmail, setUserEmail] = useState(() =>
-    localStorage.getItem('taskflow_user_email') || ''
-  );
+  const [appState, setAppState] = useState<'loading' | 'auth' | 'app'>('loading');
+  const [userEmail, setUserEmail] = useState(() => storageGet('taskflow_user_email') || '');
 
   // Keep a stable app viewport height across iOS toolbar/safe-area changes.
   useEffect(() => {
@@ -1369,43 +1647,55 @@ export default function App() {
   // Register a global auth-failure callback so apiFetch can trigger logout
   useEffect(() => {
     setAuthFailureHandler(() => {
-      localStorage.removeItem('taskflow_logged_in');
-      localStorage.removeItem('taskflow_user_pwd');
-      localStorage.removeItem('taskflow_refresh_token');
+      storageRemove('taskflow_logged_in');
       // Keep taskflow_user_email so login form is pre-filled
       setAppState('auth');
     });
     return () => setAuthFailureHandler(null);
   }, []);
 
-  // On mount: if user didn't logout, auto-login with stored credentials
+  // On mount: restore native storage, then restore the access token using the refresh cookie/token.
   useEffect(() => {
     if (appState !== 'loading') return;
-    const email = localStorage.getItem('taskflow_user_email');
-    const pwd = localStorage.getItem('taskflow_user_pwd');
-    if (email && pwd) {
-      apiLogin(email, pwd)
-        .then(result => {
-          setUserEmail(result.user.email);
+    let cancelled = false;
+    async function restoreSession() {
+      await restoreFromNativeStorage(['taskflow_logged_in', 'taskflow_user_email']);
+      if (cancelled) return;
+
+      const shouldRestore = storageGet('taskflow_logged_in');
+      const email = storageGet('taskflow_user_email');
+      if (!shouldRestore || !email) {
+        setAppState('auth');
+        return;
+      }
+
+      try {
+        const ok = await apiRefresh();
+        if (!cancelled) {
+          if (!ok) {
+            setAppState('auth');
+            return;
+          }
+          setUserEmail(email);
           setAppState('app');
-        })
-        .catch(() => {
-          // Credentials invalid, show login form
+        }
+      } catch {
+        if (!cancelled) {
           setAppState('auth');
-        });
-    } else {
-      setAppState('auth');
+        }
+      }
     }
+    restoreSession();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function handleAuth(email: string, password: string) {
+  function handleAuth(email: string) {
     (document.activeElement as HTMLElement | null)?.blur();
     syncAppViewportHeight(true);
     setUserEmail(email);
-    localStorage.setItem('taskflow_logged_in', '1');
-    localStorage.setItem('taskflow_user_email', email);
-    localStorage.setItem('taskflow_user_pwd', password);
+    storageSet('taskflow_logged_in', '1');
+    storageSet('taskflow_user_email', email);
     setAppState('app');
   }
 
@@ -1428,10 +1718,8 @@ export default function App() {
     storageSet('taskflow_streak', '');
     storageSet('taskflow_completed_today', '');
     storageSet(SYNC_META_KEY, '');
-    localStorage.removeItem('taskflow_logged_in');
-    localStorage.removeItem('taskflow_user_email');
-    localStorage.removeItem('taskflow_user_pwd');
-    localStorage.removeItem('taskflow_refresh_token');
+    storageRemove('taskflow_logged_in');
+    storageRemove('taskflow_user_email');
     setAppState('auth');
     setUserEmail('');
   }
@@ -1445,7 +1733,7 @@ export default function App() {
   }
 
   if (appState === 'auth') {
-    return <AuthPage onAuth={handleAuth} savedEmail={localStorage.getItem('taskflow_user_email') || undefined} />;
+    return <AuthPage onAuth={handleAuth} savedEmail={storageGet('taskflow_user_email') || undefined} />;
   }
 
   return <AppShell email={userEmail} onLogout={handleLogout} />;

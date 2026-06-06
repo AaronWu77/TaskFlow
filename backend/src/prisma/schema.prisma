@@ -31,6 +31,9 @@ model Task {
   tag             String?
   progress        Int      @default(0)
   dueDate         String?  // YYYY-MM-DD
+  reminderAt      String?  // ISO datetime
+  repeatRule      String?  // none | daily | weekly | monthly
+  deletedAt       String?  // ISO datetime for soft delete / undo
   sortOrder       Int      @default(0)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -38,6 +41,7 @@ model Task {
 
   @@index([userId, status])
   @@index([userId, dueDate])
+  @@index([userId, deletedAt])
   @@index([userId, sortOrder])
 }
 

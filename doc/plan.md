@@ -1,57 +1,143 @@
-# TaskFlow Phase 9 — 前后端分离 + 删除深色模式 + README 重构
+# TaskFlow Phase 10 — App Store 竞争力提升计划
 
 ## 1. 功能目的
 
-- 删除深色模式全部代码（CSS 变量、ThemeProvider、UI 控件、meta 标签）
-- 清理前后端代码结构，明确前端/后端边界
-- 重写 README 仓库结构图反映新架构
-- **严格保证所有现有功能不变**
+### 1.1 问题
+
+TaskFlow 当前已经具备任务流、日历、任务排序、进度追踪、账号登录、云端同步、iOS Capacitor 包装和基础 PWA 资产，但距离 App Store 中有竞争力的生产级应用仍有明显差距：
+
+- 核心任务管理能力偏薄：缺少编辑、删除、恢复、搜索、筛选、重复规则、提醒通知等用户会自然期待的能力。
+- 移动端质感还不够原生：部分 UI 文案未完全国际化，卡片和弹窗仍偏 Web 体验，缺少系统级手势、触感、空状态、错误状态和可访问性打磨。
+- 同步可靠性不足：当前存在明文保存密码、刷新令牌混合存储、脏数据重试不完整、客户端与服务端冲突策略不清晰等问题。
+- 上架准备不完整：缺少隐私政策、App Store 隐私标签依据、截图素材、版本说明、崩溃/错误观测、审核前测试清单。
+- 质量保障不足：仓库没有成体系的自动化测试、端到端验收、构建检查和移动端回归清单。
+
+### 1.2 目标
+
+Phase10 的目标不是堆叠功能，而是把 TaskFlow 从“可运行的任务管理 App”推进到“可提交 App Store、可长期维护、对用户有清晰差异化价值”的版本。
+
+成功标准：
+
+- 用户能在 iPhone 上稳定完成完整闭环：注册/登录 → 添加任务 → 安排截止日期/提醒 → 聚焦执行 → 完成/延后/跳过 → 查看日历与历史 → 跨设备同步。
+- 不再把用户密码存入 `localStorage`，登录持久化改为安全的刷新令牌/原生安全存储方案。
+- 离线或弱网下不会丢任务；同步失败能被明确标记、重试和恢复。
+- UI 在常见 iPhone 尺寸、中文/英文、键盘弹出、横竖屏、动态字体、VoiceOver 基础场景下可用。
+- App Store 审核需要的隐私、账号、截图、图标、版本说明、测试账号和审核说明有明确产物。
+- `pnpm run build`、后端 TypeScript 构建、关键单元测试、关键 E2E 流程都能通过。
+
+### 1.3 范围边界
+
+本阶段聚焦 iOS App Store 竞争力，不做以下事项：
+
+- 不重写为原生 Swift/SwiftUI，继续基于 React + Vite + Capacitor。
+- 不引入团队协作、聊天、看板、AI 助手等偏离个人任务流定位的大功能。
+- 不做复杂订阅付费系统，除非核心体验稳定后单独开新阶段。
+- 不做大规模目录重构；只有在测试、同步、认证或可维护性确实需要时，才从 `src/app/App.tsx` 拆分模块。
+- 不改 shadcn/ui 基础组件库，除非发现明确的兼容性或可访问性缺陷。
+
+### 1.4 外部规范依据
+
+- Apple App Review Guidelines：重点关注稳定性、账号、隐私、数据收集披露、用户生成数据和误导性行为，官方页面显示最近更新为 2026-02-06。
+- Apple Human Interface Guidelines：重点关注层级、和谐、一致性、可访问性、平台适配和系统能力使用。
+- App Store App Privacy Details：需要按实际数据收集、用途、是否关联用户、是否追踪用户准备隐私标签。
 
 ---
 
 ## 2. TodoList
 
-| ID | 任务 | 描述 |
-|----|------|------|
-| `remove-dark-mode` | 删除深色模式 | theme.css 删 .dark + @custom-variant; main.tsx 删 ThemeProvider; App.tsx 删 useTheme + 主题切换 UI + dark: 类; index.html 删 dark meta/body; sonner.tsx 删 useTheme; package.json 删 next-themes |
-| `restructure-code` | 前后端代码分离整理 | 明确 src/ = 前端, backend/ = 后端; 清理根目录无关注释 |
-| `rewrite-readme` | 重写 README 结构图 | 中英文 README 用新结构替换旧结构图，附前后端边界说明 |
+| ID | 任务 | 描述 | 验收标准 |
+|----|------|------|----------|
+| `phase10-product-audit` | 产品竞争力审计 | 基于现有代码、README、`.codex/AGENTS.md` 和 App Store/HIG 要求梳理差距 | 形成 Phase10 范围，不引入偏离个人任务流定位的功能 |
+| `security-auth-hardening` | 认证与安全加固 | 移除 `localStorage['taskflow_user_pwd']`，修正自动登录流程，统一 refresh token 策略，补齐登出与失效处理 | 本地不保存明文密码；刷新失败能回到登录页；登出清理本地敏感数据 |
+| `sync-reliability` | 同步可靠性提升 | 建立离线队列、失败重试、脏数据状态、冲突策略和同步状态 UI | 弱网/离线新增、编辑、完成任务不会丢；恢复网络后自动同步 |
+| `task-core-upgrade` | 核心任务能力补齐 | 增加任务编辑、删除确认、恢复/归档、搜索筛选、批量清理、截止日期快捷项 | 用户无需绕路即可管理任务全生命周期 |
+| `reminders-notifications` | 提醒与通知 | 增加 Capacitor 本地通知能力，支持任务截止前提醒、当天提醒、通知权限引导 | iOS 真机可收到本地提醒；未授权时有清晰降级体验 |
+| `mobile-native-polish` | iOS 原生质感打磨 | 优化安全区、键盘、触感、滑动手势、空状态、加载状态、错误状态、动态字体和 VoiceOver | iPhone 常见尺寸无遮挡、无溢出、关键按钮可读可点 |
+| `i18n-copy-polish` | 国际化与文案统一 | AuthPage、Toast、日期、优先级、标签、错误信息全部进入 i18n；清理中英混杂 | 中文/英文切换后主流程无硬编码英文残留 |
+| `design-system-refresh` | 视觉系统升级 | 调整颜色、间距、圆角、卡片层级、按钮状态、图标语义，减少 Web 感 | UI 在浅色主题下更接近高质量 iOS 工具应用，保持 TaskFlow 任务流识别度 |
+| `analytics-observability` | 观测与诊断 | 增加非侵入式错误日志、构建版本展示、同步错误可诊断信息；明确不做用户追踪 | 开发者能定位线上同步/认证/崩溃问题；隐私标签可清晰说明 |
+| `testing-quality-gate` | 测试与质量门禁 | 增加前端单元测试、后端路由测试、同步逻辑测试、Playwright 主流程测试、构建检查 | 每次提交前有可运行的质量检查命令 |
+| `app-store-readiness` | App Store 上架准备 | 准备隐私政策、审核说明、测试账号、截图清单、App Store 文案、版本号策略、图标检查 | 具备提交 App Store Connect 的材料清单和缺口列表 |
+| `docs-maintenance` | 文档同步维护 | 更新 README、README.zh、DEVELOPER、VERSIONING、部署说明和本计划 | 文档与最终实现一致，不出现过期架构或错误命令 |
 
 ---
 
 ## 3. 具体执行方案
 
-### 3.1 删除深色模式
+### 3.1 阶段 A：安全、认证与同步先行
 
-| 文件 | 删除内容 |
-|------|----------|
-| `src/styles/theme.css` | `@custom-variant dark` 行; `.dark { ... }` 整个块; `html` 中 `color-scheme: dark light` |
-| `src/main.tsx` | `import { ThemeProvider }` + `<ThemeProvider>` 包裹 |
-| `src/app/App.tsx` | `import { useTheme }`;  `const { theme, setTheme }`; AccountPage 中主题切换 UI 三段选择器; PRIORITY_BADGE 中 `dark:` 类; 其他 `dark:` 类（App.tsx 内约 4 处） |
-| `index.html` | `body.dark` 规则; dark `theme-color` meta; `color-scheme` meta |
-| `src/app/components/ui/sonner.tsx` | `import { useTheme }` + `const { theme } = useTheme()` → 改用固定 `theme="light"` |
-| `package.json` | 删除 `"next-themes"` 依赖 |
+优先处理会直接影响用户信任和 App Store 审核的问题。
 
-### 3.2 前后端分离
+| 子任务 | 涉及模块 | 落地方式 | 验证 |
+|--------|----------|----------|------|
+| 移除明文密码持久化 | `src/app/App.tsx`, `src/app/api.ts`, `src/app/storage.ts` | 删除 `taskflow_user_pwd` 自动登录方案；优先使用 refresh token 静默刷新；iOS 端评估 Capacitor 安全存储插件或 Keychain 方案 | 重新打开 App 可保持登录；本地存储中无明文密码 |
+| 统一 token 策略 | `src/app/api.ts`, `backend/src/routes/auth.ts` | 明确 refresh token 只走 httpOnly cookie 或原生安全存储，不再混用不清晰的存储路径 | access token 过期后自动刷新；refresh 过期后清晰登出 |
+| 同步队列 | `src/app/App.tsx`, `src/app/storage.ts`, `backend/src/routes/tasks.ts` | 将新增、编辑、完成、删除、排序都抽象为可重试操作；本地保存 pending operation，而不是仅保存 `_dirty` | 断网新增/完成任务后刷新页面不丢失 |
+| 冲突策略 | `Task` 模型、Prisma schema、API DTO | 使用 `updatedAt` 或本地操作时间判断；先采用 last-write-wins，并在 UI 标记同步失败 | 同一账号两端编辑后结果可预测 |
 
-当前已是分离结构：`src/` 前端 + `backend/` 后端。本次仅做代码清理：
-- 前端：`src/app/`（React 组件）+ `src/styles/`（样式）+ `src/i18n/`（国际化）
-- 后端：`backend/src/`（Express API）+ `backend/src/prisma/`（数据库）
+### 3.2 阶段 B：任务管理主流程补齐
 
-无需移动文件。
+围绕“用户每天真实使用”补足能力，不扩张到团队协作。
 
-### 3.3 README 结构图
+| 子任务 | 涉及模块 | 落地方式 | 验证 |
+|--------|----------|----------|------|
+| 编辑任务 | `TaskDetailModal`, Add/Edit 表单 | 日历和任务流都能进入编辑；复用表单但区分新增/编辑/重复 | 修改标题、时间、优先级、截止日期、标签后云端同步 |
+| 删除与恢复 | `TaskDetailModal`, `tasks` API | 删除前确认；短时间内 toast 可撤销；服务端支持软删除或归档状态 | 误删可恢复；历史不污染任务流 |
+| 搜索与筛选 | `CalendarView`, 新的列表/搜索入口 | 支持按标题、标签、优先级、状态、日期范围查找 | 超过 50 个任务时仍能快速定位 |
+| 重复规则 | `Task` 模型、表单、后端 schema | 支持每天/每周/每月基础重复；完成后自动生成下一次任务 | 重复任务不会无限生成或丢失排序 |
+| 截止日期快捷项 | Add/Edit 表单 | 增加今天、明天、本周、无日期等快捷按钮 | 移动端添加任务步骤减少 |
 
-用清晰的前后端分界替换旧结构图，标注每个目录的职责。
+### 3.3 阶段 C：iOS 原生体验和提醒
 
-### 3.4 影响范围
+让 Capacitor 包装的 Web App 在 iPhone 上接近原生工具应用。
 
-| 文件 | 改动类型 |
-|------|----------|
-| `src/styles/theme.css` | 删除 `.dark` 块 + `@custom-variant dark` |
-| `src/main.tsx` | 删 ThemeProvider |
-| `src/app/App.tsx` | 删 useTheme + 主题切换 + dark: 类 |
-| `index.html` | 删 dark meta/styles |
-| `src/app/components/ui/sonner.tsx` | 改固定 light 主题 |
-| `package.json` | 删 next-themes |
-| `README.md` + `README.zh.md` | 重写结构图 |
+| 子任务 | 涉及模块 | 落地方式 | 验证 |
+|--------|----------|----------|------|
+| 本地通知 | Capacitor 配置、任务表单、通知权限 UI | 使用 Capacitor Local Notifications；任务可设置提醒时间；权限被拒绝时不阻塞任务创建 | 真机收到提醒；权限状态显示准确 |
+| 手势与触感 | `TaskCard`, `ReorderSheet`, 操作按钮 | 完成/跳过/延后增加可控滑动手势；关键成功动作触发 haptics | 手势不误触进度滑块；触感只在真机触发 |
+| 键盘与安全区 | `AuthPage`, Add/Edit 表单, 全局样式 | 检查 iPhone SE、标准、Pro Max 尺寸；优化表单滚动和底部按钮位置 | 键盘弹出后输入框和提交按钮不被遮挡 |
+| 可访问性 | 所有交互按钮、Dialog、表单 | 补齐 `aria-label`、Dialog 标题描述、焦点管理、按钮可点击区域 | VoiceOver 能读出主要操作；键盘可关闭弹窗 |
+| 空/错/加载状态 | Flow、Calendar、同步、登录 | 为空任务、同步失败、服务不可达、请求中、登出中增加明确状态 | 用户知道当前发生了什么以及下一步能做什么 |
+
+### 3.4 阶段 D：视觉、文案与差异化
+
+强化“任务流优先，不被清单压垮”的产品记忆点。
+
+| 子任务 | 涉及模块 | 落地方式 | 验证 |
+|--------|----------|----------|------|
+| 视觉系统刷新 | `src/styles/theme.css`, `src/app/App.tsx` | 统一卡片半径、阴影、边框、按钮状态；避免页面读起来像普通 Web 表单 | 截图在 App Store 页面上有清晰识别度 |
+| Flow 卡片升级 | `TaskCard` | 增加更清晰的焦点层级、进度反馈、截止日期紧迫感、下一任务预告 | 首屏能解释 TaskFlow 的核心价值 |
+| 文案统一 | `src/i18n/locales/*.json`, `AuthPage` | 清理硬编码英文；错误提示改为可行动语言；日期本地化 | 中文用户不看到英文残留，英文用户不看到中文残留 |
+| Onboarding | 新增轻量首次使用引导 | 首次启动解释任务流、日历、同步与隐私；允许跳过 | 新用户 30 秒内理解怎么开始 |
+
+### 3.5 阶段 E：测试、质量与上架材料
+
+把“能跑”提升为“能发布、能回归、能解释”。
+
+| 子任务 | 涉及模块 | 落地方式 | 验证 |
+|--------|----------|----------|------|
+| 前端测试 | `src/app` | 为排序、插入、状态流转、同步队列、i18n fallback 增加单元测试 | 测试覆盖关键纯逻辑 |
+| 后端测试 | `backend/src/routes` | 为 auth、tasks、user stats 增加路由测试；覆盖越权、无效输入、过期 token | API 行为稳定 |
+| E2E 测试 | Playwright | 覆盖登录、添加、完成、延后、日历查看、编辑、删除、离线恢复 | 主流程自动化通过 |
+| 构建检查 | 根目录脚本、后端脚本 | 增加统一 `check` 命令：前端 build、后端 typecheck/test、E2E smoke | 发布前只需执行一组命令 |
+| 隐私与审核材料 | `doc/`, App Store Connect 素材 | 写隐私政策、数据收集说明、测试账号、审核说明、截图清单、版本说明 | 可直接用于 App Store 提交 |
+
+### 3.6 建议实施顺序
+
+1. `security-auth-hardening` → 先移除明文密码和不可靠自动登录。
+2. `sync-reliability` → 再保证任务不会丢，避免后续功能建立在不稳定数据层上。
+3. `task-core-upgrade` → 补足用户每天会用到的任务管理闭环。
+4. `reminders-notifications` + `mobile-native-polish` → 提升 iOS 原生价值。
+5. `i18n-copy-polish` + `design-system-refresh` → 做 App Store 截图级质感。
+6. `testing-quality-gate` → 将核心流程固化成可回归检查。
+7. `app-store-readiness` + `docs-maintenance` → 准备提交与维护材料。
+
+### 3.7 Phase10 完成定义
+
+Phase10 完成时，必须同时满足：
+
+- 代码层面：核心功能实现，关键质量检查通过，无明文密码存储，无明显同步丢失路径。
+- 产品层面：任务创建、执行、提醒、查看、编辑、删除、恢复、同步形成闭环。
+- 体验层面：iOS 真机主流程顺畅，中文/英文体验完整，关键可访问性问题已处理。
+- 上架层面：隐私政策、隐私标签依据、截图清单、审核说明、测试账号、版本说明准备完毕。
+- 文档层面：README、README.zh、DEVELOPER、VERSIONING 与实际实现一致。
