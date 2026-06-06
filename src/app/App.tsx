@@ -4,7 +4,7 @@ import {
   Check, X, Clock, Plus, Flame, CheckCircle2,
   Calendar, Tag, XCircle, ChevronLeft, ChevronRight,
   ListTodo, SkipForward, AlarmClock, RotateCcw,
-  GripVertical, ArrowUpDown, Globe, Edit3, Trash2,
+  GripVertical, ArrowUpDown, Globe,
   Search, Bell, RotateCw, ArchiveRestore
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
@@ -373,14 +373,11 @@ function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
 }
 
 // --- Task Detail Modal (Calendar) ---
-function TaskDetailModal({ task, onClose, onAction, onProgressChange, onEdit, onDelete }: {
+function TaskDetailModal({ task, onClose, onAction, onProgressChange }: {
   task: Task | null; onClose: () => void;
   onAction: (id: string, action: ExitAction) => void;
   onProgressChange: (id: string, progress: number) => void;
-  onEdit: (task: Task) => void;
-  onDelete: (task: Task) => void;
 }) {
-  const { t } = useTranslation();
   return (
     <Dialog.Root open={!!task} onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
@@ -389,28 +386,12 @@ function TaskDetailModal({ task, onClose, onAction, onProgressChange, onEdit, on
           <Dialog.Title className="sr-only">{task?.title}</Dialog.Title>
           <Dialog.Description className="sr-only">Task actions</Dialog.Description>
           {task && (
-            <>
-              <TaskCard
-                task={task}
-                onAction={(id, action) => { onAction(id, action); onClose(); }}
-                onProgressChange={onProgressChange}
-                exitAction={null}
-              />
-              <div className="absolute left-4 right-4 bottom-4 z-20 grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => { onEdit(task); onClose(); }}
-                  className="flex items-center justify-center gap-1.5 rounded-xl bg-card/95 border border-border py-2.5 text-sm font-semibold text-foreground shadow-sm"
-                >
-                  <Edit3 className="w-4 h-4" />{t('task.edit')}
-                </button>
-                <button
-                  onClick={() => { onDelete(task); onClose(); }}
-                  className="flex items-center justify-center gap-1.5 rounded-xl bg-destructive/95 py-2.5 text-sm font-semibold text-destructive-foreground shadow-sm"
-                >
-                  <Trash2 className="w-4 h-4" />{t('task.delete')}
-                </button>
-              </div>
-            </>
+            <TaskCard
+              task={task}
+              onAction={(id, action) => { onAction(id, action); onClose(); }}
+              onProgressChange={onProgressChange}
+              exitAction={null}
+            />
           )}
           <Dialog.Close asChild>
             <button className="absolute -top-1 -right-1 z-20 w-9 h-9 flex items-center justify-center rounded-full bg-card border border-border shadow-sm text-muted-foreground hover:text-foreground transition-colors">
@@ -581,14 +562,12 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
 }
 
 // --- Calendar View ---
-function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTask, onEditTask, onDeleteTask }: {
+function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTask }: {
   tasks: Task[];
   onAction: (id: string, action: ExitAction) => void;
   onProgressChange: (id: string, progress: number) => void;
   onAddTask: () => void;
   onRepeatTask: (task: Task) => void;
-  onEditTask: (task: Task) => void;
-  onDeleteTask: (task: Task) => void;
 }) {
   const { t, i18n } = useTranslation();
   const today = new Date();
@@ -643,7 +622,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 
   return (
     <>
-      <TaskDetailModal task={detailTask} onClose={() => setDetailTaskId(null)} onAction={onAction} onProgressChange={onProgressChange} onEdit={onEditTask} onDelete={onDeleteTask} />
+      <TaskDetailModal task={detailTask} onClose={() => setDetailTaskId(null)} onAction={onAction} onProgressChange={onProgressChange} />
       <RepeatTaskModal task={repeatTask} onClose={() => setRepeatTask(null)} onRepeat={onRepeatTask} />
 
       <div className="w-full max-w-md space-y-4">
@@ -1428,8 +1407,6 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
               onProgressChange={handleProgressChange}
               onAddTask={openAddTask}
               onRepeatTask={handleRepeatTask}
-              onEditTask={openEditTask}
-              onDeleteTask={handleDeleteTask}
             />
           </div>
         </motion.div>
