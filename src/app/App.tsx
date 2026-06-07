@@ -11,7 +11,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
 import { storageGet, storageSet, storageRemove, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefresh } from './api';
+import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed } from './api';
 import { toast, Toaster } from 'sonner';
 import { cn } from './components/ui/utils';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
@@ -55,6 +55,14 @@ function loadSession(): SessionMeta | null {
     const raw = storageGet(SESSION_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<SessionMeta>;
+      // Accept session even with empty email if signedOut flag is present
+      if (parsed.signedOut === true) {
+        return {
+          email: parsed.email || '',
+          signedOut: true,
+          lastAuthenticatedAt: parsed.lastAuthenticatedAt || new Date().toISOString(),
+        };
+      }
       if (parsed.email && parsed.lastAuthenticatedAt) {
         return {
           email: parsed.email,
@@ -88,7 +96,11 @@ function saveSession(email: string): void {
 }
 
 function clearSession(): void {
-  storageRemove(SESSION_KEY);
+  storageSet(SESSION_KEY, JSON.stringify({
+    email: '',
+    signedOut: true,
+    lastAuthenticatedAt: new Date().toISOString(),
+  } satisfies SessionMeta));
   storageRemove('taskflow_logged_in');
   storageRemove('taskflow_user_email');
 }
@@ -170,6 +182,70 @@ const PRIORITY_BADGE = {
 const PRIORITY_LABEL = { P1: 'High Priority', P2: 'Medium Priority', P3: 'Low Priority' };
 const PRIORITY_LABEL_KEY: Record<Priority, string> = { P1: 'priority.P1', P2: 'priority.P2', P3: 'priority.P3' };
 const DOT_COLOR = { P1: 'bg-rose-500', P2: 'bg-amber-400', P3: 'bg-emerald-500' };
+const ACCENT_THEME_KEY = 'taskflow_accent_theme';
+
+type AccentTheme = 'lavender' | 'ocean' | 'forest' | 'sunset' | 'rose';
+
+const ACCENT_THEME_PRESETS: Record<AccentTheme, {
+  primary: string;
+  primaryForeground: string;
+  secondary: string;
+  secondaryForeground: string;
+  ring: string;
+}> = {
+  lavender: {
+    primary: '#a78bfa',
+    primaryForeground: '#ffffff',
+    secondary: '#f1eaff',
+    secondaryForeground: '#6d4cc2',
+    ring: '#a78bfa',
+  },
+  ocean: {
+    primary: '#3b82f6',
+    primaryForeground: '#ffffff',
+    secondary: '#eaf3ff',
+    secondaryForeground: '#1d4ed8',
+    ring: '#3b82f6',
+  },
+  forest: {
+    primary: '#16a34a',
+    primaryForeground: '#ffffff',
+    secondary: '#e9f9ef',
+    secondaryForeground: '#166534',
+    ring: '#16a34a',
+  },
+  sunset: {
+    primary: '#f97316',
+    primaryForeground: '#ffffff',
+    secondary: '#fff1e7',
+    secondaryForeground: '#c2410c',
+    ring: '#f97316',
+  },
+  rose: {
+    primary: '#e11d48',
+    primaryForeground: '#ffffff',
+    secondary: '#ffe9f0',
+    secondaryForeground: '#be123c',
+    ring: '#e11d48',
+  },
+};
+
+function loadAccentTheme(): AccentTheme {
+  const raw = storageGet(ACCENT_THEME_KEY);
+  if (!raw) return 'lavender';
+  if (raw in ACCENT_THEME_PRESETS) return raw as AccentTheme;
+  return 'lavender';
+}
+
+function applyAccentTheme(theme: AccentTheme): void {
+  const preset = ACCENT_THEME_PRESETS[theme] ?? ACCENT_THEME_PRESETS.lavender;
+  const root = document.documentElement;
+  root.style.setProperty('--primary', preset.primary);
+  root.style.setProperty('--primary-foreground', preset.primaryForeground);
+  root.style.setProperty('--secondary', preset.secondary);
+  root.style.setProperty('--secondary-foreground', preset.secondaryForeground);
+  root.style.setProperty('--ring', preset.ring);
+}
 
 // --- Translation-aware helpers ---
 const PRIORITY_TAGS = ['P1', 'P2', 'P3'] as const;
@@ -324,153 +400,132 @@ interface TaskCardProps {
 }
 
 
-function ProgressScrubber({ value, onPreview, onCommit, onSlidingChange }: {
-  value: number;
-  onPreview: (value: number) => void;
-  onCommit: (value: number) => void;
-  onSlidingChange?: (sliding: boolean) => void;
-}) {
-  const trackRef = React.useRef<HTMLDivElement | null>(null);
-  const latestValueRef = React.useRef(value);
-  const isActiveRef = React.useRef(false);
-
-  React.useEffect(() => { latestValueRef.current = value; }, [value]);
-
-  const valueFromClientX = React.useCallback((clientX: number) => {
-    const rect = trackRef.current?.getBoundingClientRect();
-    if (!rect || rect.width === 0) return latestValueRef.current;
-    const raw = ((clientX - rect.left) / rect.width) * 100;
-    return Math.round(Math.min(100, Math.max(0, raw)) / 5) * 5;
-  }, []);
-
-  const previewAt = React.useCallback((clientX: number) => {
-    const next = valueFromClientX(clientX);
-    latestValueRef.current = next;
-    onPreview(next);
-    return next;
-  }, [onPreview, valueFromClientX]);
-
-  return (
-    <div
-      ref={trackRef}
-      role="slider"
-      tabIndex={0}
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={value}
-      onPointerDown={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        isActiveRef.current = true;
-        onSlidingChange?.(true);
-        try {
-          (e.currentTarget as HTMLDivElement).setPointerCapture?.(e.pointerId);
-        } catch { /** Pointer capture is best-effort on older WebViews. */ }
-        previewAt(e.clientX);
-      }}
-      onPointerMove={(e) => {
-        if (!isActiveRef.current) return;
-        e.preventDefault();
-        e.stopPropagation();
-        previewAt(e.clientX);
-      }}
-      onPointerUp={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const next = previewAt(e.clientX);
-        isActiveRef.current = false;
-        onSlidingChange?.(false);
-        onCommit(next);
-      }}
-      onPointerCancel={() => {
-        isActiveRef.current = false;
-        onSlidingChange?.(false);
-      }}
-      onKeyDown={(e) => {
-        const delta = e.key === 'ArrowRight' || e.key === 'ArrowUp' ? 5 : e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? -5 : 0;
-        if (!delta) return;
-        e.preventDefault();
-        const next = Math.min(100, Math.max(0, value + delta));
-        latestValueRef.current = next;
-        onPreview(next);
-        onCommit(next);
-      }}
-      className="relative flex h-7 flex-1 cursor-grab touch-none items-center active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-      style={{ WebkitTapHighlightColor: 'transparent' }}
-    >
-      <div className="relative h-3 w-full overflow-hidden rounded-full bg-muted shadow-inner">
-        <div
-          className="absolute inset-y-0 left-0 overflow-hidden rounded-full bg-primary transition-[width] duration-75"
-          style={{ width: `${value}%` }}
-        />
-      </div>
-      <span
-        className="absolute top-1/2 size-5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-primary bg-background shadow-sm transition-[left] duration-75"
-        style={{ left: `${value}%` }}
-      />
-    </div>
-  );
-}
-
 function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
   const { t } = useTranslation();
   const [localProgress, setLocalProgress] = React.useState(task.progress);
   const [isSlidingProgress, setIsSlidingProgress] = React.useState(false);
+  const blockActionUntilRef = React.useRef(0);
   React.useEffect(() => { setLocalProgress(task.progress); }, [task.progress]);
 
   const commitProgress = (value: number) => {
     if (value !== task.progress) onProgressChange(task.id, value);
   };
 
+  const releaseSlidingGuard = () => {
+    setIsSlidingProgress(false);
+    // Guard against ghost click after touch/pointer release on mobile.
+    blockActionUntilRef.current = Date.now() + 220;
+  };
+
+  const canTriggerAction = () => !isSlidingProgress && Date.now() > blockActionUntilRef.current;
+
+  const handleAction = (e: React.MouseEvent<HTMLButtonElement>, action: ExitAction) => {
+    e.stopPropagation();
+    if (!canTriggerAction()) return;
+    onAction(task.id, action);
+  };
+
   return (
-    <div className="relative w-full h-full bg-card rounded-2xl border border-border flex flex-col overflow-hidden shadow-sm">
+    <div className="relative w-full h-full bg-card rounded-3xl border border-border flex flex-col overflow-hidden">
       <div
-        className="absolute bottom-0 left-0 w-full bg-primary/10 transition-all duration-500 ease-out z-0"
+        className="pointer-events-none absolute bottom-0 left-0 w-full bg-primary/10 transition-all duration-500 ease-out z-0"
         style={{ height: `${localProgress}%` }}
-      />
-      <div className="relative z-10 flex flex-col h-full p-5">
-        <div className="flex items-center justify-between mb-5">
+      >
+        {localProgress > 0 && localProgress < 100 && (
+          <div className="absolute top-[-20px] left-0 w-[200%] h-[20px] overflow-hidden z-0">
+            <svg viewBox="0 0 800 50" preserveAspectRatio="none" className="w-full h-full fill-primary/10 animate-wave">
+              <path d="M 0 25 Q 100 50 200 25 T 400 25 Q 500 50 600 25 T 800 25 L 800 50 L 0 50 Z" />
+            </svg>
+          </div>
+        )}
+      </div>
+      <div className="relative z-10 flex flex-col h-full p-6">
+        <div className="flex items-center justify-between mb-6">
           <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${PRIORITY_BADGE[task.priority]}`}>{t(PRIORITY_LABEL_KEY[task.priority])}</span>
           {task.tag && (
-            <span className="text-xs font-medium text-muted-foreground bg-muted px-2.5 py-1 rounded-full flex items-center gap-1">
+            <span className="text-xs font-medium text-muted-foreground bg-muted/80 backdrop-blur-sm px-2.5 py-1 rounded-full flex items-center gap-1">
               <Tag className="w-3 h-3" />{task.tag}
             </span>
           )}
         </div>
-        <h2 className="text-2xl font-semibold leading-snug flex-1 tracking-normal">{task.title}</h2>
-        <div className="mt-auto flex flex-col gap-3">
+        <h2 className="text-3xl font-bold leading-tight flex-1">{task.title}</h2>
+        <div className="mt-auto flex flex-col gap-4">
           <div className="flex flex-col gap-3">
             <div className="flex flex-wrap items-center gap-2">
-              <div className="flex items-center text-muted-foreground text-sm gap-1.5 bg-muted px-3 py-1.5 rounded-lg">
+              <div className="flex items-center text-muted-foreground text-sm gap-1.5 bg-muted/50 backdrop-blur-sm px-3 py-1.5 rounded-lg">
                 <Clock className="w-4 h-4" /><span>{task.estimateMinutes}m</span>
               </div>
               {task.dueDate && (
-                <div className="flex items-center text-muted-foreground text-sm gap-1.5 bg-muted px-3 py-1.5 rounded-lg">
+                <div className="flex items-center text-muted-foreground text-sm gap-1.5 bg-muted/50 backdrop-blur-sm px-3 py-1.5 rounded-lg">
                   <Calendar className="w-4 h-4" /><span>{task.dueDate}</span>
                 </div>
               )}
             </div>
-            <div className="flex items-center gap-3 bg-muted/50 px-3 py-2 rounded-lg">
+            <div className="flex items-center gap-3 bg-muted/30 backdrop-blur-sm px-3 py-2 rounded-lg">
               <span className="text-sm font-medium text-muted-foreground whitespace-nowrap">{t('task.progress')}</span>
-              <ProgressScrubber
-                value={localProgress}
-                onPreview={setLocalProgress}
-                onCommit={commitProgress}
-                onSlidingChange={setIsSlidingProgress}
-              />
+              <div
+                onClick={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
+                onPointerMove={(e) => e.stopPropagation()}
+                className="flex-1"
+              >
+                <input
+                  type="range" min="0" max="100" step="5"
+                  value={localProgress}
+                  onInput={(e) => setLocalProgress(parseInt((e.target as HTMLInputElement).value))}
+                  onChange={(e) => {
+                    const next = parseInt((e.target as HTMLInputElement).value);
+                    setLocalProgress(next);
+                    if (!isSlidingProgress) commitProgress(next);
+                  }}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    setIsSlidingProgress(true);
+                  }}
+                  onPointerUp={(e) => {
+                    e.stopPropagation();
+                    releaseSlidingGuard();
+                    commitProgress(parseInt((e.target as HTMLInputElement).value));
+                  }}
+                  onPointerCancel={() => releaseSlidingGuard()}
+                  onBlur={(e) => {
+                    if (!isSlidingProgress) return;
+                    releaseSlidingGuard();
+                    const next = parseInt((e.target as HTMLInputElement).value);
+                    commitProgress(next);
+                  }}
+                  className="w-full h-6 bg-transparent appearance-none cursor-pointer outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
+                  style={{ accentColor: 'var(--primary)', WebkitTapHighlightColor: 'transparent' }}
+                />
+              </div>
               <span className="text-sm font-medium text-muted-foreground w-9 text-right">{localProgress}%</span>
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <button onClick={() => { if (!isSlidingProgress) onAction(task.id, 'snooze'); }} className="flex items-center justify-center gap-2 bg-secondary text-secondary-foreground py-3 rounded-xl text-sm font-semibold transition-transform active:scale-95">
-              <AlarmClock className="w-4 h-4" />{t('task.snooze')}
+          <div className="relative z-20 grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={(e) => handleAction(e, 'snooze')}
+              className="flex items-center justify-center gap-2 py-3.5 rounded-xl font-semibold transition-transform active:scale-95 touch-manipulation select-none bg-secondary/80 backdrop-blur-sm text-secondary-foreground"
+              style={{ WebkitTapHighlightColor: 'transparent' }}
+            >
+              <AlarmClock className="w-5 h-5" />{t('task.snooze')}
             </button>
-            <button onClick={() => { if (!isSlidingProgress) onAction(task.id, 'skip'); }} className="flex items-center justify-center gap-2 bg-muted text-muted-foreground py-3 rounded-xl text-sm font-semibold transition-transform active:scale-95 hover:bg-muted/80">
-              <SkipForward className="w-4 h-4" />{t('task.skip')}
+            <button
+              type="button"
+              onClick={(e) => handleAction(e, 'skip')}
+              className="flex items-center justify-center gap-2 py-3.5 rounded-xl font-semibold transition-transform active:scale-95 touch-manipulation select-none bg-muted/80 backdrop-blur-sm text-muted-foreground"
+              style={{ WebkitTapHighlightColor: 'transparent' }}
+            >
+              <SkipForward className="w-5 h-5" />{t('task.skip')}
             </button>
           </div>
-          <button onClick={() => { if (!isSlidingProgress) onAction(task.id, 'complete'); }} className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground py-3.5 rounded-xl font-semibold text-base transition-transform active:scale-95 hover:bg-primary/90">
-            <Check className="w-5 h-5" />{t('task.complete')}
+          <button
+            type="button"
+            onClick={(e) => handleAction(e, 'complete')}
+            className="relative z-20 w-full flex items-center justify-center gap-2 py-4 rounded-xl font-bold text-lg shadow-lg shadow-primary/25 transition-transform active:scale-95 touch-manipulation select-none bg-primary text-primary-foreground"
+            style={{ WebkitTapHighlightColor: 'transparent' }}
+          >
+            <Check className="w-6 h-6" />{t('task.complete')}
           </button>
         </div>
       </div>
@@ -488,7 +543,7 @@ function TaskDetailModal({ task, onClose, onAction, onProgressChange }: {
     <Dialog.Root open={!!task} onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 backdrop-blur-md z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-        <Dialog.Content className="fixed left-[50%] top-[50%] z-50 w-full max-w-[350px] h-[460px] translate-x-[-50%] translate-y-[-50%] duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 rounded-3xl focus:outline-none shadow-2xl">
+        <Dialog.Content className="fixed left-[50%] top-[50%] z-50 w-full max-w-[360px] h-[520px] translate-x-[-50%] translate-y-[-50%] duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 rounded-3xl focus:outline-none shadow-2xl">
           <Dialog.Title className="sr-only">{task?.title}</Dialog.Title>
           <Dialog.Description className="sr-only">Task actions</Dialog.Description>
           {task && (
@@ -918,8 +973,12 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 
 // --- Account Page ---
 
-function AccountPage({ email, onClose, onLogout }: {
-  email: string; onClose: () => void; onLogout: () => void;
+function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogout }: {
+  email: string;
+  accentTheme: AccentTheme;
+  onAccentThemeChange: (theme: AccentTheme) => void;
+  onClose: () => void;
+  onLogout: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const displayName = email.split('@')[0];
@@ -955,6 +1014,27 @@ function AccountPage({ email, onClose, onLogout }: {
 
         {/* Settings */}
         <div className="w-full space-y-5 mb-6">
+          {/* Accent color */}
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.accentColor')}</p>
+            <div className="grid grid-cols-5 gap-2">
+              {(Object.keys(ACCENT_THEME_PRESETS) as AccentTheme[]).map((theme) => (
+                <button
+                  key={theme}
+                  type="button"
+                  onClick={() => onAccentThemeChange(theme)}
+                  className={cn(
+                    'h-10 rounded-xl border transition-all',
+                    accentTheme === theme ? 'border-foreground/40 shadow-sm scale-[1.02]' : 'border-border'
+                  )}
+                  style={{ backgroundColor: ACCENT_THEME_PRESETS[theme].primary }}
+                  aria-label={t(`account.accent.${theme}`)}
+                  title={t(`account.accent.${theme}`)}
+                />
+              ))}
+            </div>
+          </div>
+
           {/* Language */}
           <div className="space-y-2">
             <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.language')}</p>
@@ -996,7 +1076,17 @@ function AccountPage({ email, onClose, onLogout }: {
 // --- Main App ---
 
 // AppShell contains all hooks — must never be rendered conditionally to satisfy Rules of Hooks
-function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) {
+function AppShell({
+  email,
+  accentTheme,
+  onAccentThemeChange,
+  onLogout,
+}: {
+  email: string;
+  accentTheme: AccentTheme;
+  onAccentThemeChange: (theme: AccentTheme) => void;
+  onLogout: () => void;
+}) {
   const { t } = useTranslation();
   const [tasks, setTasks] = useState<Task[]>(() => loadTasks());
   const [streak, setStreak] = useState(() => loadStatsFromCache().streak);
@@ -1391,7 +1481,13 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
       {/* Account Page */}
       <AnimatePresence>
         {accountOpen && (
-          <AccountPage email={email} onClose={() => setAccountOpen(false)} onLogout={onLogout} />
+          <AccountPage
+            email={email}
+            accentTheme={accentTheme}
+            onAccentThemeChange={onAccentThemeChange}
+            onClose={() => setAccountOpen(false)}
+            onLogout={onLogout}
+          />
         )}
       </AnimatePresence>
 
@@ -1468,30 +1564,31 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
           <div className="flex flex-col items-center px-4 sm:px-6 pb-4 h-full" style={{ width: '50%' }}>
             {pendingTasks.length > 0 ? (
               <>
-                <div className="relative w-full aspect-[1/1] max-w-[360px] mt-1">
+                <div className="relative w-full aspect-[4/5] max-w-[360px] mt-2">
                   <AnimatePresence custom={exitAction} mode="popLayout">
-                    {pendingTasks.slice(0, 2).map((task, index) => {
+                    {pendingTasks.slice(0, 3).map((task, index) => {
                       const isTop = index === 0;
                       return (
                         <motion.div
                           key={task.id}
                           layout
                           custom={exitAction}
-                          initial={{ opacity: 0, y: 16, scale: 0.98 }}
+                          initial={{ opacity: 0, y: 50, scale: 0.9 }}
                           animate={{
-                            opacity: 1 - index * 0.18,
-                            y: index * 10,
-                            scale: 1 - index * 0.025,
+                            opacity: index > 1 ? 0 : 1 - index * 0.15,
+                            y: index * 16,
+                            scale: 1 - index * 0.04,
                             zIndex: 10 - index,
                           }}
                           exit={(custom) => ({
                             opacity: 0,
-                            y: custom === 'complete' ? -40 : custom === 'skip' ? 40 : 24,
-                            x: custom === 'skip' ? -24 : custom === 'snooze' ? 24 : 0,
-                            scale: 0.98,
-                            transition: { duration: 0.22, ease: 'easeOut' }
+                            y: custom === 'complete' ? -150 : custom === 'skip' ? 150 : 50,
+                            x: custom === 'skip' ? -100 : custom === 'snooze' ? 100 : 0,
+                            rotate: custom === 'complete' ? 5 : custom === 'skip' ? -8 : 8,
+                            scale: 0.9,
+                            transition: { duration: 0.3, ease: 'easeOut' }
                           })}
-                          transition={{ type: 'spring', stiffness: 360, damping: 34, mass: 0.8 }}
+                          transition={{ type: 'spring', stiffness: 300, damping: 25, mass: 0.8 }}
                           className={`absolute inset-0 w-full h-full ${!isTop ? 'pointer-events-none' : ''}`}
                         >
                           <TaskCard task={task} onAction={handleAction} onProgressChange={handleProgressChange} exitAction={exitAction} />
@@ -1767,6 +1864,26 @@ export default function App() {
   // 'loading' = checking refresh cookie, 'auth' = not logged in, 'app' = logged in
   const [appState, setAppState] = useState<'loading' | 'auth' | 'app'>('loading');
   const [userEmail, setUserEmail] = useState(() => loadSession()?.email || '');
+  const [accentTheme, setAccentTheme] = useState<AccentTheme>('lavender');
+  const [accentThemeReady, setAccentThemeReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function initAccentTheme() {
+      await restoreFromNativeStorage([ACCENT_THEME_KEY]);
+      if (cancelled) return;
+      setAccentTheme(loadAccentTheme());
+      setAccentThemeReady(true);
+    }
+    initAccentTheme();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!accentThemeReady) return;
+    applyAccentTheme(accentTheme);
+    storageSet(ACCENT_THEME_KEY, accentTheme);
+  }, [accentTheme, accentThemeReady]);
 
   // Keep a stable app viewport height across iOS toolbar/safe-area changes.
   useEffect(() => {
@@ -1825,37 +1942,37 @@ export default function App() {
     if (appState !== 'loading') return;
     let cancelled = false;
     async function restoreSession() {
-      await restoreFromNativeStorage([SESSION_KEY, 'taskflow_logged_in', 'taskflow_user_email']);
+      await restoreFromNativeStorage([SESSION_KEY, 'taskflow_logged_in', 'taskflow_user_email', 'taskflow_refresh_token', ACCENT_THEME_KEY]);
       if (cancelled) return;
 
       const session = loadSession();
-      if (!session || session.signedOut || isSessionExpired(session)) {
+      const legacyEmail = storageGet('taskflow_user_email') || '';
+      const canUseSession = !!session && !session.signedOut && !isSessionExpired(session);
+      const emailForRestore = session?.email || legacyEmail;
+
+      // If user explicitly logged out or session is invalid, skip refresh and go to auth
+      if (!canUseSession && session?.signedOut) {
         clearLocalAuthTokens();
-        clearSession();
         setAppState('auth');
         return;
       }
 
-      try {
-        const ok = await apiRefresh();
-        if (!cancelled) {
-          if (!ok) {
-            clearLocalAuthTokens();
-            clearSession();
-            setAppState('auth');
-            return;
-          }
-          saveSession(session.email);
-          setUserEmail(session.email);
-          setAppState('app');
-        }
-      } catch {
-        if (!cancelled) {
-          clearLocalAuthTokens();
-          clearSession();
-          setAppState('auth');
-        }
+      const refreshResult = await apiRefreshDetailed();
+      if (cancelled) return;
+      if (refreshResult === 'ok') {
+        if (emailForRestore) saveSession(emailForRestore);
+        setUserEmail(emailForRestore);
+        setAppState('app');
+        return;
       }
+      if (refreshResult === 'network' && canUseSession) {
+        setUserEmail(emailForRestore);
+        setAppState('app');
+        return;
+      }
+      clearLocalAuthTokens();
+      clearSession();
+      setAppState('auth');
     }
     restoreSession();
     return () => { cancelled = true; };
@@ -1907,5 +2024,12 @@ export default function App() {
     return <AuthPage onAuth={handleAuth} />;
   }
 
-  return <AppShell email={userEmail} onLogout={handleLogout} />;
+  return (
+    <AppShell
+      email={userEmail}
+      accentTheme={accentTheme}
+      onAccentThemeChange={setAccentTheme}
+      onLogout={handleLogout}
+    />
+  );
 }

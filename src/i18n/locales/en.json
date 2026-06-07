@@ -111,6 +111,14 @@
   },
   "account": {
     "signOut": "Sign Out",
+    "accentColor": "Accent Color",
+    "accent": {
+      "lavender": "Lavender",
+      "ocean": "Ocean",
+      "forest": "Forest",
+      "sunset": "Sunset",
+      "rose": "Rose"
+    },
     "theme": "Theme",
     "light": "Light",
     "dark": "Dark",

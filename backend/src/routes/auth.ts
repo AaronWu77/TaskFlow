@@ -25,10 +25,12 @@ function signRefresh(userId: string) {
 
 const REFRESH_COOKIE = 'taskflow_refresh';
 // Use COOKIE_SECURE=true only when serving over HTTPS; keep false for plain HTTP deployments
+// sameSite 'lax' allows the cookie to persist across top-level navigations (browser restart)
+// while still protecting against CSRF from cross-origin POST requests.
 const COOKIE_OPTS = {
   httpOnly: true,
   secure: process.env.COOKIE_SECURE === 'true',
-  sameSite: 'strict' as const,
+  sameSite: 'lax' as const,
   maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in ms
 };
 // Matching options for clearCookie (without maxAge)

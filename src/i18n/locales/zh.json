@@ -111,6 +111,14 @@
   },
   "account": {
     "signOut": "退出登录",
+    "accentColor": "主色调",
+    "accent": {
+      "lavender": "薰衣草紫",
+      "ocean": "海洋蓝",
+      "forest": "森林绿",
+      "sunset": "日落橙",
+      "rose": "玫瑰红"
+    },
     "theme": "主题",
     "light": "浅色",
     "dark": "深色",

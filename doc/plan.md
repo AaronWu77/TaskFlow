@@ -1,143 +1,134 @@
-# TaskFlow Phase 10 — App Store 竞争力提升计划
+# TaskFlow 问题修复实施计划（第二轮）
 
 ## 1. 功能目的
 
 ### 1.1 问题
 
-TaskFlow 当前已经具备任务流、日历、任务排序、进度追踪、账号登录、云端同步、iOS Capacitor 包装和基础 PWA 资产，但距离 App Store 中有竞争力的生产级应用仍有明显差距：
+用户报告当前版本存在三类可感知问题：
 
-- 核心任务管理能力偏薄：缺少编辑、删除、恢复、搜索、筛选、重复规则、提醒通知等用户会自然期待的能力。
-- 移动端质感还不够原生：部分 UI 文案未完全国际化，卡片和弹窗仍偏 Web 体验，缺少系统级手势、触感、空状态、错误状态和可访问性打磨。
-- 同步可靠性不足：当前存在明文保存密码、刷新令牌混合存储、脏数据重试不完整、客户端与服务端冲突策略不清晰等问题。
-- 上架准备不完整：缺少隐私政策、App Store 隐私标签依据、截图素材、版本说明、崩溃/错误观测、审核前测试清单。
-- 质量保障不足：仓库没有成体系的自动化测试、端到端验收、构建检查和移动端回归清单。
+1. **自动登录失效**：退出 App 并关闭后台后再次进入，未能自动恢复登录状态，需要重新输入邮箱和密码。
+2. **任务卡片交互异常**：在 Flow 与 Calendar 界面中，进度条只能点击不能滑动（滑动触发 Snooze），且点击 Snooze/Skip 按钮实际触发的是 Complete 动作。
+3. **主色调切换**：账户页需要提供主色调切换功能（经代码审查发现此功能已实现，需验证是否正常工作）。
 
 ### 1.2 目标
 
-Phase10 的目标不是堆叠功能，而是把 TaskFlow 从“可运行的任务管理 App”推进到“可提交 App Store、可长期维护、对用户有清晰差异化价值”的版本。
-
-成功标准：
-
-- 用户能在 iPhone 上稳定完成完整闭环：注册/登录 → 添加任务 → 安排截止日期/提醒 → 聚焦执行 → 完成/延后/跳过 → 查看日历与历史 → 跨设备同步。
-- 不再把用户密码存入 `localStorage`，登录持久化改为安全的刷新令牌/原生安全存储方案。
-- 离线或弱网下不会丢任务；同步失败能被明确标记、重试和恢复。
-- UI 在常见 iPhone 尺寸、中文/英文、键盘弹出、横竖屏、动态字体、VoiceOver 基础场景下可用。
-- App Store 审核需要的隐私、账号、截图、图标、版本说明、测试账号和审核说明有明确产物。
-- `pnpm run build`、后端 TypeScript 构建、关键单元测试、关键 E2E 流程都能通过。
+1. 自动登录在冷启动后稳定恢复，refresh token 机制在 Web 和 iOS 两端均可靠工作。
+2. 进度条可正常拖动滑动；Snooze/Skip/Complete 三个按钮各自触发正确动作，互不干扰。
+3. 确认主色调切换功能正常工作，如有问题则修复。
+4. Web 与 iOS（Capacitor）两端行为一致。
 
 ### 1.3 范围边界
 
-本阶段聚焦 iOS App Store 竞争力，不做以下事项：
-
-- 不重写为原生 Swift/SwiftUI，继续基于 React + Vite + Capacitor。
-- 不引入团队协作、聊天、看板、AI 助手等偏离个人任务流定位的大功能。
-- 不做复杂订阅付费系统，除非核心体验稳定后单独开新阶段。
-- 不做大规模目录重构；只有在测试、同步、认证或可维护性确实需要时，才从 `src/app/App.tsx` 拆分模块。
-- 不改 shadcn/ui 基础组件库，除非发现明确的兼容性或可访问性缺陷。
-
-### 1.4 外部规范依据
-
-- Apple App Review Guidelines：重点关注稳定性、账号、隐私、数据收集披露、用户生成数据和误导性行为，官方页面显示最近更新为 2026-02-06。
-- Apple Human Interface Guidelines：重点关注层级、和谐、一致性、可访问性、平台适配和系统能力使用。
-- App Store App Privacy Details：需要按实际数据收集、用途、是否关联用户、是否追踪用户准备隐私标签。
+1. 本次不重构整体架构，不拆分 `src/app/App.tsx`。
+2. 不修改 shadcn/ui 组件库源码，仅在业务层修复。
+3. 不引入新的依赖。
 
 ---
 
-## 2. TodoList
+## 2. 根因分析
+
+### 2.1 自动登录失效
+
+**当前架构**：
+- Access token 仅存内存（`api.ts:10`），页面刷新即丢失
+- Web 端 refresh token 仅依赖 httpOnly cookie `taskflow_refresh`（`api.ts:34-36` 返回 null）
+- iOS 端 refresh token 存 Capacitor Preferences（`api.ts:38-43`）
+- 启动时 `restoreSession()` 调用 `apiRefreshDetailed()` 尝试刷新（`App.tsx:1980`）
+
+**可能根因**：
+1. **Web 端 cookie 丢失**：`SameSite: 'strict'`（`backend/src/routes/auth.ts:31`）在某些场景下阻止 cookie 发送；浏览器可能在关闭后清除 cookie
+2. **iOS 端 Capacitor Preferences 不可靠**：WKWebView 的 httpOnly cookie 不保证跨重启持久化；Preferences 存储可能被 iOS 清理
+3. **后端 JWT secret 变更**：如果后端重启导致 `JWT_REFRESH_SECRET` 变化，所有已签发的 refresh token 失效
+4. **`canUseSession` 逻辑缺陷**：`isSessionExpired` 基于客户端时间戳（7天TTL），但 `clearSession()` 直接删除 session 而非设置 `signedOut: true`，导致 `signedOut` 守卫形同虚设（`App.tsx:90-94`）
+
+### 2.2 任务卡片交互异常
+
+**2.0.0 版本（正常）**：
+- 按钮使用简单 `onClick` + `isSlidingProgress` 守卫
+- 进度条有完整的 `onPointerDown/Up/Cancel` + `onMouseUp` + `onTouchStart/End` 处理
+
+**当前版本（异常）**：
+- 按钮增加了 `onPointerDown`/`onPointerUp` 用于视觉反馈（`pressedAction`），但 **未调用 `e.stopPropagation()`**
+- 进度条移除了 `onMouseUp` 和 `onTouchStart/End`，仅保留 pointer 事件
+- 新增 `runAction()` 包装函数，引入 `canTriggerAction()` 检查和 `blockActionUntilRef` 防抖
+
+**可能根因**：
+1. **Pointer 事件冒泡**：按钮的 `onPointerDown` 未 `stopPropagation()`，事件可能冒泡到父容器干扰其他组件
+2. **`isSlidingProgress` 状态竞争**：React state 异步更新，`runAction` 中检查的 `isSlidingProgress` 可能是过期值
+3. **CSS 层叠问题**：Complete 按钮 `z-20` 与 Snooze/Skip 容器 `z-20` 相同，Complete 按钮可能在视觉上覆盖了 Snooze/Skip 的点击区域
+
+### 2.3 主色调切换
+
+**现状**：代码中已实现 5 套预设主色调（lavender/ocean/forest/sunset/rose），AccountPage 中已有色块选择 UI，且有 `accentThemeReady` 门控防止 iOS 冷启动覆盖。**此功能可能已正常工作**，需用户确认。
+
+---
+
+## 3. TodoList
 
 | ID | 任务 | 描述 | 验收标准 |
-|----|------|------|----------|
-| `phase10-product-audit` | 产品竞争力审计 | 基于现有代码、README、`.codex/AGENTS.md` 和 App Store/HIG 要求梳理差距 | 形成 Phase10 范围，不引入偏离个人任务流定位的功能 |
-| `security-auth-hardening` | 认证与安全加固 | 移除 `localStorage['taskflow_user_pwd']`，修正自动登录流程，统一 refresh token 策略，补齐登出与失效处理 | 本地不保存明文密码；刷新失败能回到登录页；登出清理本地敏感数据 |
-| `sync-reliability` | 同步可靠性提升 | 建立离线队列、失败重试、脏数据状态、冲突策略和同步状态 UI | 弱网/离线新增、编辑、完成任务不会丢；恢复网络后自动同步 |
-| `task-core-upgrade` | 核心任务能力补齐 | 增加任务编辑、删除确认、恢复/归档、搜索筛选、批量清理、截止日期快捷项 | 用户无需绕路即可管理任务全生命周期 |
-| `reminders-notifications` | 提醒与通知 | 增加 Capacitor 本地通知能力，支持任务截止前提醒、当天提醒、通知权限引导 | iOS 真机可收到本地提醒；未授权时有清晰降级体验 |
-| `mobile-native-polish` | iOS 原生质感打磨 | 优化安全区、键盘、触感、滑动手势、空状态、加载状态、错误状态、动态字体和 VoiceOver | iPhone 常见尺寸无遮挡、无溢出、关键按钮可读可点 |
-| `i18n-copy-polish` | 国际化与文案统一 | AuthPage、Toast、日期、优先级、标签、错误信息全部进入 i18n；清理中英混杂 | 中文/英文切换后主流程无硬编码英文残留 |
-| `design-system-refresh` | 视觉系统升级 | 调整颜色、间距、圆角、卡片层级、按钮状态、图标语义，减少 Web 感 | UI 在浅色主题下更接近高质量 iOS 工具应用，保持 TaskFlow 任务流识别度 |
-| `analytics-observability` | 观测与诊断 | 增加非侵入式错误日志、构建版本展示、同步错误可诊断信息；明确不做用户追踪 | 开发者能定位线上同步/认证/崩溃问题；隐私标签可清晰说明 |
-| `testing-quality-gate` | 测试与质量门禁 | 增加前端单元测试、后端路由测试、同步逻辑测试、Playwright 主流程测试、构建检查 | 每次提交前有可运行的质量检查命令 |
-| `app-store-readiness` | App Store 上架准备 | 准备隐私政策、审核说明、测试账号、截图清单、App Store 文案、版本号策略、图标检查 | 具备提交 App Store Connect 的材料清单和缺口列表 |
-| `docs-maintenance` | 文档同步维护 | 更新 README、README.zh、DEVELOPER、VERSIONING、部署说明和本计划 | 文档与最终实现一致，不出现过期架构或错误命令 |
+|---|---|---|---|
+| `fix-auto-login` | 修复自动登录 | 诊断并修复 refresh token 在冷启动时不可用的问题 | 退出 App 关闭后台后重新进入，自动恢复登录状态 |
+| `fix-card-interaction` | 修复任务卡片交互 | 恢复进度条滑动能力，修复按钮误触问题 | 进度条可拖动；Snooze/Skip/Complete 各自触发正确动作 |
+| `verify-accent-theme` | 验证主色调切换 | 确认现有主色调切换功能是否正常工作 | 切换后全局主色实时变化；重启后保持 |
+| `regression-test` | 回归测试 | 在 Web 和 iOS 上验证所有修复 | 三个问题均稳定修复，无新回归 |
 
 ---
 
-## 3. 具体执行方案
+## 4. 具体执行方案
 
-### 3.1 阶段 A：安全、认证与同步先行
+### 阶段 A：修复自动登录
 
-优先处理会直接影响用户信任和 App Store 审核的问题。
+**涉及模块**：
+- `src/app/api.ts`（refresh token 读取逻辑）
+- `src/app/App.tsx`（`restoreSession` 函数）
+- `backend/src/routes/auth.ts`（cookie 配置）
 
-| 子任务 | 涉及模块 | 落地方式 | 验证 |
-|--------|----------|----------|------|
-| 移除明文密码持久化 | `src/app/App.tsx`, `src/app/api.ts`, `src/app/storage.ts` | 删除 `taskflow_user_pwd` 自动登录方案；优先使用 refresh token 静默刷新；iOS 端评估 Capacitor 安全存储插件或 Keychain 方案 | 重新打开 App 可保持登录；本地存储中无明文密码 |
-| 统一 token 策略 | `src/app/api.ts`, `backend/src/routes/auth.ts` | 明确 refresh token 只走 httpOnly cookie 或原生安全存储，不再混用不清晰的存储路径 | access token 过期后自动刷新；refresh 过期后清晰登出 |
-| 同步队列 | `src/app/App.tsx`, `src/app/storage.ts`, `backend/src/routes/tasks.ts` | 将新增、编辑、完成、删除、排序都抽象为可重试操作；本地保存 pending operation，而不是仅保存 `_dirty` | 断网新增/完成任务后刷新页面不丢失 |
-| 冲突策略 | `Task` 模型、Prisma schema、API DTO | 使用 `updatedAt` 或本地操作时间判断；先采用 last-write-wins，并在 UI 标记同步失败 | 同一账号两端编辑后结果可预测 |
+**执行步骤**：
 
-### 3.2 阶段 B：任务管理主流程补齐
+1. **诊断 cookie 持久性**：检查 `COOKIE_OPTS` 配置（`auth.ts:28-33`），确认 `sameSite`/`secure`/`maxAge` 设置是否导致 cookie 在重启后丢失
+2. **增加 Web 端 refresh token fallback**：在 `api.ts` 的 `getStoredRefreshToken()` 中，为 web 端增加 localStorage fallback（存储加密或混淆后的 token），作为 httpOnly cookie 的后备
+3. **修复 `clearSession` 逻辑**：`clearSession()` 应设置 `signedOut: true` 而非直接删除，使 `canUseSession` 守卫生效
+4. **增加诊断日志**：在 `restoreSession` 中增加关键节点日志（开发模式），帮助定位 refresh 失败的具体原因
+5. **统一清理策略**：`handleLogout`、`onAuthFailure`、session 过期三条路径使用统一的清理函数
 
-围绕“用户每天真实使用”补足能力，不扩张到团队协作。
+### 阶段 B：修复任务卡片交互
 
-| 子任务 | 涉及模块 | 落地方式 | 验证 |
-|--------|----------|----------|------|
-| 编辑任务 | `TaskDetailModal`, Add/Edit 表单 | 日历和任务流都能进入编辑；复用表单但区分新增/编辑/重复 | 修改标题、时间、优先级、截止日期、标签后云端同步 |
-| 删除与恢复 | `TaskDetailModal`, `tasks` API | 删除前确认；短时间内 toast 可撤销；服务端支持软删除或归档状态 | 误删可恢复；历史不污染任务流 |
-| 搜索与筛选 | `CalendarView`, 新的列表/搜索入口 | 支持按标题、标签、优先级、状态、日期范围查找 | 超过 50 个任务时仍能快速定位 |
-| 重复规则 | `Task` 模型、表单、后端 schema | 支持每天/每周/每月基础重复；完成后自动生成下一次任务 | 重复任务不会无限生成或丢失排序 |
-| 截止日期快捷项 | Add/Edit 表单 | 增加今天、明天、本周、无日期等快捷按钮 | 移动端添加任务步骤减少 |
+**涉及模块**：
+- `src/app/App.tsx`（`TaskCard` 组件，约 391-560 行）
 
-### 3.3 阶段 C：iOS 原生体验和提醒
+**执行步骤**：
 
-让 Capacitor 包装的 Web App 在 iPhone 上接近原生工具应用。
+1. **恢复按钮的 `stopPropagation`**：所有按钮的 `onPointerDown` 处理器增加 `e.stopPropagation()`，防止事件冒泡干扰
+2. **简化 `runAction` 逻辑**：移除 `canTriggerAction()` 中的时间戳防抖（`blockActionUntilRef`），仅保留 `isSlidingProgress` 守卫，与 2.0.0 版本行为一致
+3. **恢复进度条的多路径事件处理**：在 `onPointerUp` 基础上，增加 `onBlur` 兜底（已有），确保滑动结束时 `isSlidingProgress` 被正确重置
+4. **修复 CSS 层叠**：确保 Complete 按钮的 `z-index` 不覆盖 Snooze/Skip 区域，或将按钮容器的 `z-index` 提高
+5. **统一 Flow 与 Calendar 行为**：两处复用同一 `TaskCard`，确保 `TaskDetailModal` 中的交互一致
 
-| 子任务 | 涉及模块 | 落地方式 | 验证 |
-|--------|----------|----------|------|
-| 本地通知 | Capacitor 配置、任务表单、通知权限 UI | 使用 Capacitor Local Notifications；任务可设置提醒时间；权限被拒绝时不阻塞任务创建 | 真机收到提醒；权限状态显示准确 |
-| 手势与触感 | `TaskCard`, `ReorderSheet`, 操作按钮 | 完成/跳过/延后增加可控滑动手势；关键成功动作触发 haptics | 手势不误触进度滑块；触感只在真机触发 |
-| 键盘与安全区 | `AuthPage`, Add/Edit 表单, 全局样式 | 检查 iPhone SE、标准、Pro Max 尺寸；优化表单滚动和底部按钮位置 | 键盘弹出后输入框和提交按钮不被遮挡 |
-| 可访问性 | 所有交互按钮、Dialog、表单 | 补齐 `aria-label`、Dialog 标题描述、焦点管理、按钮可点击区域 | VoiceOver 能读出主要操作；键盘可关闭弹窗 |
-| 空/错/加载状态 | Flow、Calendar、同步、登录 | 为空任务、同步失败、服务不可达、请求中、登出中增加明确状态 | 用户知道当前发生了什么以及下一步能做什么 |
+### 阶段 C：验证主色调切换
 
-### 3.4 阶段 D：视觉、文案与差异化
+**涉及模块**：
+- `src/app/App.tsx`（`AccountPage` + `applyAccentTheme`）
 
-强化“任务流优先，不被清单压垮”的产品记忆点。
+**执行步骤**：
 
-| 子任务 | 涉及模块 | 落地方式 | 验证 |
-|--------|----------|----------|------|
-| 视觉系统刷新 | `src/styles/theme.css`, `src/app/App.tsx` | 统一卡片半径、阴影、边框、按钮状态；避免页面读起来像普通 Web 表单 | 截图在 App Store 页面上有清晰识别度 |
-| Flow 卡片升级 | `TaskCard` | 增加更清晰的焦点层级、进度反馈、截止日期紧迫感、下一任务预告 | 首屏能解释 TaskFlow 的核心价值 |
-| 文案统一 | `src/i18n/locales/*.json`, `AuthPage` | 清理硬编码英文；错误提示改为可行动语言；日期本地化 | 中文用户不看到英文残留，英文用户不看到中文残留 |
-| Onboarding | 新增轻量首次使用引导 | 首次启动解释任务流、日历、同步与隐私；允许跳过 | 新用户 30 秒内理解怎么开始 |
+1. **功能验证**：确认 5 个色块点击后 CSS 变量正确更新
+2. **持久化验证**：确认重启后主题保持
+3. **iOS 冷启动验证**：确认 `accentThemeReady` 门控正常工作
+4. 如发现问题，按现有模式修复
 
-### 3.5 阶段 E：测试、质量与上架材料
+### 阶段 D：回归测试
 
-把“能跑”提升为“能发布、能回归、能解释”。
+**执行步骤**：
 
-| 子任务 | 涉及模块 | 落地方式 | 验证 |
-|--------|----------|----------|------|
-| 前端测试 | `src/app` | 为排序、插入、状态流转、同步队列、i18n fallback 增加单元测试 | 测试覆盖关键纯逻辑 |
-| 后端测试 | `backend/src/routes` | 为 auth、tasks、user stats 增加路由测试；覆盖越权、无效输入、过期 token | API 行为稳定 |
-| E2E 测试 | Playwright | 覆盖登录、添加、完成、延后、日历查看、编辑、删除、离线恢复 | 主流程自动化通过 |
-| 构建检查 | 根目录脚本、后端脚本 | 增加统一 `check` 命令：前端 build、后端 typecheck/test、E2E smoke | 发布前只需执行一组命令 |
-| 隐私与审核材料 | `doc/`, App Store Connect 素材 | 写隐私政策、数据收集说明、测试账号、审核说明、截图清单、版本说明 | 可直接用于 App Store 提交 |
+1. Web 端全流程：登录 → 退出 → 关闭浏览器 → 重新打开 → 确认自动登录
+2. Web 端 Flow 卡片：进度条滑动 → Snooze → Skip → Complete，确认各动作正确
+3. Web 端 Calendar 详情卡：同上测试
+4. 账户页：切换 5 种主色调，确认实时生效和持久化
+5. 如有 iOS 环境，重复以上测试
 
-### 3.6 建议实施顺序
+---
 
-1. `security-auth-hardening` → 先移除明文密码和不可靠自动登录。
-2. `sync-reliability` → 再保证任务不会丢，避免后续功能建立在不稳定数据层上。
-3. `task-core-upgrade` → 补足用户每天会用到的任务管理闭环。
-4. `reminders-notifications` + `mobile-native-polish` → 提升 iOS 原生价值。
-5. `i18n-copy-polish` + `design-system-refresh` → 做 App Store 截图级质感。
-6. `testing-quality-gate` → 将核心流程固化成可回归检查。
-7. `app-store-readiness` + `docs-maintenance` → 准备提交与维护材料。
+## 更新日志
 
-### 3.7 Phase10 完成定义
-
-Phase10 完成时，必须同时满足：
-
-- 代码层面：核心功能实现，关键质量检查通过，无明文密码存储，无明显同步丢失路径。
-- 产品层面：任务创建、执行、提醒、查看、编辑、删除、恢复、同步形成闭环。
-- 体验层面：iOS 真机主流程顺畅，中文/英文体验完整，关键可访问性问题已处理。
-- 上架层面：隐私政策、隐私标签依据、截图清单、审核说明、测试账号、版本说明准备完毕。
-- 文档层面：README、README.zh、DEVELOPER、VERSIONING 与实际实现一致。
+- 2026-06-07：第一轮计划与审查完成（主题持久化、任务卡交互、防泄漏 token、存储恢复健壮性）。
+- 2026-06-07：用户报告问题仍存在，启动第二轮诊断与修复计划。重点：自动登录 cookie 持久性、按钮事件冒泡、进度条滑动恢复。

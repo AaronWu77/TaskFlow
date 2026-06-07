@@ -1,6 +1,7 @@
 // API base URL — points to backend. In development use localhost:3000,
 // in production set VITE_API_URL to your server (e.g. https://yourdomain.com/api)
 import { Preferences } from '@capacitor/preferences';
+import { Capacitor } from '@capacitor/core';
 
 const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || 'http://localhost:3000';
 
@@ -9,8 +10,8 @@ const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || 'http:/
 let accessToken: string | null = null;
 
 const REFRESH_TOKEN_KEY = 'taskflow_refresh_token';
-const IS_NATIVE = typeof (window as unknown as { Capacitor?: { isNativePlatform: () => boolean } }).Capacitor !== 'undefined'
-  && (window as unknown as { Capacitor: { isNativePlatform: () => boolean } }).Capacitor.isNativePlatform();
+export type RefreshResult = 'ok' | 'unauthorized' | 'network';
+const IS_NATIVE_PLATFORM = Capacitor.isNativePlatform();
 
 // Callback invoked when both the access token and refresh cookie are expired.
 // The App component registers this to transition back to the login screen.
@@ -21,50 +22,67 @@ function setAccessToken(token: string | null) {
   accessToken = token;
 }
 
-async function getNativeRefreshToken(): Promise<string | null> {
-  if (!IS_NATIVE) return null;
+async function getStoredRefreshToken(): Promise<string | null> {
+  if (IS_NATIVE_PLATFORM) {
+    try {
+      const { value } = await Preferences.get({ key: REFRESH_TOKEN_KEY });
+      return value;
+    } catch {
+      return null;
+    }
+  }
+  // Web: localStorage fallback (httpOnly cookie is the primary mechanism,
+  // but localStorage provides persistence across browser restarts)
   try {
-    const { value } = await Preferences.get({ key: REFRESH_TOKEN_KEY });
-    return value;
+    return localStorage.getItem(REFRESH_TOKEN_KEY);
   } catch {
     return null;
   }
 }
 
-function setNativeRefreshToken(token: string | null): void {
-  if (!IS_NATIVE) return;
-  if (token) Preferences.set({ key: REFRESH_TOKEN_KEY, value: token }).catch(() => { /**/ });
-  else Preferences.remove({ key: REFRESH_TOKEN_KEY }).catch(() => { /**/ });
+function setStoredRefreshToken(token: string | null): void {
+  if (IS_NATIVE_PLATFORM) {
+    if (token) Preferences.set({ key: REFRESH_TOKEN_KEY, value: token }).catch(() => { /**/ });
+    else Preferences.remove({ key: REFRESH_TOKEN_KEY }).catch(() => { /**/ });
+  } else {
+    // Web: persist in localStorage as fallback for httpOnly cookie
+    try {
+      if (token) localStorage.setItem(REFRESH_TOKEN_KEY, token);
+      else localStorage.removeItem(REFRESH_TOKEN_KEY);
+    } catch { /**/ }
+  }
 }
 
-/** Attempt a silent token refresh using the httpOnly refresh cookie.
- *  Native Capacitor builds also send a Preferences-backed refresh token because
- *  WKWebView cookie persistence is not reliable across all iOS app restarts.
- *  Returns true if a new access token was obtained, false otherwise. */
-export async function apiRefresh(): Promise<boolean> {
+/** Attempt a silent token refresh using the httpOnly refresh cookie plus a stored fallback token.
+ *  The fallback keeps dev web and Capacitor sessions alive when cookies are not persisted. */
+export async function apiRefreshDetailed(): Promise<RefreshResult> {
   try {
-    const nativeRefreshToken = await getNativeRefreshToken();
+    const storedRefreshToken = await getStoredRefreshToken();
     const headers: Record<string, string> = {};
-    if (nativeRefreshToken) headers.Authorization = `Bearer ${nativeRefreshToken}`;
+    if (storedRefreshToken) headers.Authorization = `Bearer ${storedRefreshToken}`;
 
     const res = await fetch(`${BASE_URL}/auth/refresh`, {
       method: 'POST',
       credentials: 'include',
       headers,
     });
-    if (!res.ok) return false;
+    if (!res.ok) return res.status === 401 ? 'unauthorized' : 'network';
     const data = await res.json() as { accessToken: string; refreshToken?: string };
     setAccessToken(data.accessToken);
-    if (data.refreshToken) setNativeRefreshToken(data.refreshToken);
-    return true;
+    if (data.refreshToken) setStoredRefreshToken(data.refreshToken);
+    return 'ok';
   } catch {
-    return false;
+    return 'network';
   }
+}
+
+export async function apiRefresh(): Promise<boolean> {
+  return (await apiRefreshDetailed()) === 'ok';
 }
 
 export function clearLocalAuthTokens(): void {
   setAccessToken(null);
-  setNativeRefreshToken(null);
+  setStoredRefreshToken(null);
 }
 
 export async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
@@ -109,7 +127,7 @@ export async function apiLogin(email: string, password: string): Promise<{ user:
   }
   const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken?: string };
   setAccessToken(data.accessToken);
-  setNativeRefreshToken(data.refreshToken ?? null);
+  setStoredRefreshToken(data.refreshToken ?? null);
   return data;
 }
 
@@ -126,14 +144,14 @@ export async function apiRegister(email: string, password: string): Promise<{ us
   }
   const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken?: string };
   setAccessToken(data.accessToken);
-  setNativeRefreshToken(data.refreshToken ?? null);
+  setStoredRefreshToken(data.refreshToken ?? null);
   return data;
 }
 
 export async function apiLogout(): Promise<void> {
   try { await fetch(`${BASE_URL}/auth/logout`, { method: 'POST', credentials: 'include' }); } catch { /* */ }
   setAccessToken(null);
-  setNativeRefreshToken(null);
+  setStoredRefreshToken(null);
 }
 
 // ── Task CRUD ──

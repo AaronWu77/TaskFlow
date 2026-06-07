@@ -12,9 +12,6 @@
 
 import { Preferences } from '@capacitor/preferences';
 
-const IS_NATIVE = typeof (window as unknown as { Capacitor?: { isNativePlatform: () => boolean } }).Capacitor !== 'undefined'
-  && (window as unknown as { Capacitor: { isNativePlatform: () => boolean } }).Capacitor.isNativePlatform();
-
 /** Synchronous read — always returns immediately (used in React useState initializers). */
 export function storageGet(key: string): string | null {
   try {
@@ -30,9 +27,7 @@ export function storageSet(key: string, value: string): void {
     localStorage.setItem(key, value);
   } catch { /**/ }
 
-  if (IS_NATIVE) {
-    Preferences.set({ key, value }).catch(() => { /**/ });
-  }
+  Preferences.set({ key, value }).catch(() => { /**/ });
 }
 
 /** Remove from localStorage and Capacitor Preferences. */
@@ -41,9 +36,7 @@ export function storageRemove(key: string): void {
     localStorage.removeItem(key);
   } catch { /**/ }
 
-  if (IS_NATIVE) {
-    Preferences.remove({ key }).catch(() => { /**/ });
-  }
+  Preferences.remove({ key }).catch(() => { /**/ });
 }
 
 /**
@@ -52,12 +45,19 @@ export function storageRemove(key: string): void {
  * Returns a promise; call it in a useEffect before rendering any persisted state.
  */
 export async function restoreFromNativeStorage(keys: string[]): Promise<void> {
-  if (!IS_NATIVE) return;
   for (const key of keys) {
-    if (localStorage.getItem(key) !== null) continue; // already populated
+    try {
+      if (localStorage.getItem(key) !== null) continue; // already populated
+    } catch {
+      // Fall through to Preferences restore path.
+    }
     try {
       const { value } = await Preferences.get({ key });
-      if (value !== null) localStorage.setItem(key, value);
+      if (value !== null) {
+        try {
+          localStorage.setItem(key, value);
+        } catch { /**/ }
+      }
     } catch { /**/ }
   }
 }
