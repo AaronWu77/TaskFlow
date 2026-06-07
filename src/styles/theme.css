@@ -1,29 +1,29 @@
 :root {
   --font-size: 16px;
   --app-vh: 100dvh;
-  --background: #f4f5f7;
-  --foreground: #111827;
+  --background: #f7f8fa;
+  --foreground: #15171a;
   --card: #ffffff;
   --card-foreground: #111827;
   --popover: #ffffff;
   --popover-foreground: #111827;
-  --primary: #4f46e5;
+  --primary: #a78bfa;
   --primary-foreground: #ffffff;
-  --secondary: #e0e7ff;
-  --secondary-foreground: #4338ca;
-  --muted: #f3f4f6;
-  --muted-foreground: #6b7280;
-  --accent: #f3f4f6;
+  --secondary: #f1eaff;
+  --secondary-foreground: #6d4cc2;
+  --muted: #eef1f5;
+  --muted-foreground: #667085;
+  --accent: #eef1f5;
   --accent-foreground: #111827;
   --destructive: #ef4444;
   --destructive-foreground: #ffffff;
-  --border: #e5e7eb;
-  --input: #e5e7eb;
+  --border: #dfe3ea;
+  --input: #dfe3ea;
   --input-background: #ffffff;
   --switch-background: #d1d5db;
   --font-weight-medium: 500;
   --font-weight-normal: 400;
-  --ring: #4f46e5;
+  --ring: #a78bfa;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
@@ -170,14 +170,6 @@
   .app-safe-y {
     padding-top: max(1.25rem, calc(0.5rem + env(safe-area-inset-top, 0px)));
     padding-bottom: max(1rem, calc(0.5rem + env(safe-area-inset-bottom, 0px)));
-  }
-
-  @keyframes waveMove {
-    0% { transform: translateX(0); }
-    100% { transform: translateX(-50%); }
-  }
-  .animate-wave {
-    animation: waveMove 3s linear infinite;
   }
 
   /* Safe area helpers — respect iPhone notch / Dynamic Island / Home Indicator */

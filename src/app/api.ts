@@ -53,12 +53,18 @@ export async function apiRefresh(): Promise<boolean> {
       headers,
     });
     if (!res.ok) return false;
-    const data = await res.json() as { accessToken: string };
+    const data = await res.json() as { accessToken: string; refreshToken?: string };
     setAccessToken(data.accessToken);
+    if (data.refreshToken) setNativeRefreshToken(data.refreshToken);
     return true;
   } catch {
     return false;
   }
+}
+
+export function clearLocalAuthTokens(): void {
+  setAccessToken(null);
+  setNativeRefreshToken(null);
 }
 
 export async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {

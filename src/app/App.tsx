@@ -5,14 +5,15 @@ import {
   Calendar, Tag, XCircle, ChevronLeft, ChevronRight,
   ListTodo, SkipForward, AlarmClock, RotateCcw,
   GripVertical, ArrowUpDown, Globe,
-  Search, Bell, RotateCw, ArchiveRestore
+  Search, Bell, RotateCw
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
 import { storageGet, storageSet, storageRemove, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { apiLogout, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiDeleteTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefresh } from './api';
+import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefresh } from './api';
 import { toast, Toaster } from 'sonner';
+import { cn } from './components/ui/utils';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 
 // --- Types ---
@@ -40,6 +41,62 @@ interface Task {
 // Sync metadata
 type SyncMeta = { lastSync: string };
 const SYNC_META_KEY = 'taskflow_sync_meta';
+const SESSION_KEY = 'taskflow_session';
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+type SessionMeta = {
+  email: string;
+  signedOut: boolean;
+  lastAuthenticatedAt: string;
+};
+
+function loadSession(): SessionMeta | null {
+  try {
+    const raw = storageGet(SESSION_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<SessionMeta>;
+      if (parsed.email && parsed.lastAuthenticatedAt) {
+        return {
+          email: parsed.email,
+          signedOut: parsed.signedOut === true,
+          lastAuthenticatedAt: parsed.lastAuthenticatedAt,
+        };
+      }
+    }
+
+    const legacyLoggedIn = storageGet('taskflow_logged_in');
+    const legacyEmail = storageGet('taskflow_user_email');
+    if (legacyLoggedIn && legacyEmail) {
+      return {
+        email: legacyEmail,
+        signedOut: false,
+        lastAuthenticatedAt: new Date().toISOString(),
+      };
+    }
+  } catch { /**/ }
+  return null;
+}
+
+function saveSession(email: string): void {
+  storageSet(SESSION_KEY, JSON.stringify({
+    email,
+    signedOut: false,
+    lastAuthenticatedAt: new Date().toISOString(),
+  } satisfies SessionMeta));
+  storageSet('taskflow_logged_in', '1');
+  storageSet('taskflow_user_email', email);
+}
+
+function clearSession(): void {
+  storageRemove(SESSION_KEY);
+  storageRemove('taskflow_logged_in');
+  storageRemove('taskflow_user_email');
+}
+
+function isSessionExpired(session: SessionMeta): boolean {
+  const last = new Date(session.lastAuthenticatedAt).getTime();
+  return Number.isNaN(last) || Date.now() - last > SESSION_TTL_MS;
+}
 
 function loadSyncMeta(): SyncMeta {
   try {
@@ -266,6 +323,95 @@ interface TaskCardProps {
   exitAction: ExitAction | null;
 }
 
+
+function ProgressScrubber({ value, onPreview, onCommit, onSlidingChange }: {
+  value: number;
+  onPreview: (value: number) => void;
+  onCommit: (value: number) => void;
+  onSlidingChange?: (sliding: boolean) => void;
+}) {
+  const trackRef = React.useRef<HTMLDivElement | null>(null);
+  const latestValueRef = React.useRef(value);
+  const isActiveRef = React.useRef(false);
+
+  React.useEffect(() => { latestValueRef.current = value; }, [value]);
+
+  const valueFromClientX = React.useCallback((clientX: number) => {
+    const rect = trackRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0) return latestValueRef.current;
+    const raw = ((clientX - rect.left) / rect.width) * 100;
+    return Math.round(Math.min(100, Math.max(0, raw)) / 5) * 5;
+  }, []);
+
+  const previewAt = React.useCallback((clientX: number) => {
+    const next = valueFromClientX(clientX);
+    latestValueRef.current = next;
+    onPreview(next);
+    return next;
+  }, [onPreview, valueFromClientX]);
+
+  return (
+    <div
+      ref={trackRef}
+      role="slider"
+      tabIndex={0}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={value}
+      onPointerDown={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        isActiveRef.current = true;
+        onSlidingChange?.(true);
+        try {
+          (e.currentTarget as HTMLDivElement).setPointerCapture?.(e.pointerId);
+        } catch { /** Pointer capture is best-effort on older WebViews. */ }
+        previewAt(e.clientX);
+      }}
+      onPointerMove={(e) => {
+        if (!isActiveRef.current) return;
+        e.preventDefault();
+        e.stopPropagation();
+        previewAt(e.clientX);
+      }}
+      onPointerUp={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const next = previewAt(e.clientX);
+        isActiveRef.current = false;
+        onSlidingChange?.(false);
+        onCommit(next);
+      }}
+      onPointerCancel={() => {
+        isActiveRef.current = false;
+        onSlidingChange?.(false);
+      }}
+      onKeyDown={(e) => {
+        const delta = e.key === 'ArrowRight' || e.key === 'ArrowUp' ? 5 : e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? -5 : 0;
+        if (!delta) return;
+        e.preventDefault();
+        const next = Math.min(100, Math.max(0, value + delta));
+        latestValueRef.current = next;
+        onPreview(next);
+        onCommit(next);
+      }}
+      className="relative flex h-7 flex-1 cursor-grab touch-none items-center active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+      style={{ WebkitTapHighlightColor: 'transparent' }}
+    >
+      <div className="relative h-3 w-full overflow-hidden rounded-full bg-muted shadow-inner">
+        <div
+          className="absolute inset-y-0 left-0 overflow-hidden rounded-full bg-primary transition-[width] duration-75"
+          style={{ width: `${value}%` }}
+        />
+      </div>
+      <span
+        className="absolute top-1/2 size-5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-primary bg-background shadow-sm transition-[left] duration-75"
+        style={{ left: `${value}%` }}
+      />
+    </div>
+  );
+}
+
 function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
   const { t } = useTranslation();
   const [localProgress, setLocalProgress] = React.useState(task.progress);
@@ -277,94 +423,54 @@ function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
   };
 
   return (
-    <div className="relative w-full h-full bg-card rounded-3xl border border-border flex flex-col overflow-hidden">
+    <div className="relative w-full h-full bg-card rounded-2xl border border-border flex flex-col overflow-hidden shadow-sm">
       <div
         className="absolute bottom-0 left-0 w-full bg-primary/10 transition-all duration-500 ease-out z-0"
         style={{ height: `${localProgress}%` }}
-      >
-        {localProgress > 0 && localProgress < 100 && (
-          <div className="absolute top-[-20px] left-0 w-[200%] h-[20px] overflow-hidden z-0">
-            <svg viewBox="0 0 800 50" preserveAspectRatio="none" className="w-full h-full fill-primary/10 animate-wave">
-              <path d="M 0 25 Q 100 50 200 25 T 400 25 Q 500 50 600 25 T 800 25 L 800 50 L 0 50 Z" />
-            </svg>
-          </div>
-        )}
-      </div>
-      <div className="relative z-10 flex flex-col h-full p-6">
-        <div className="flex items-center justify-between mb-6">
+      />
+      <div className="relative z-10 flex flex-col h-full p-5">
+        <div className="flex items-center justify-between mb-5">
           <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${PRIORITY_BADGE[task.priority]}`}>{t(PRIORITY_LABEL_KEY[task.priority])}</span>
           {task.tag && (
-            <span className="text-xs font-medium text-muted-foreground bg-muted/80 backdrop-blur-sm px-2.5 py-1 rounded-full flex items-center gap-1">
+            <span className="text-xs font-medium text-muted-foreground bg-muted px-2.5 py-1 rounded-full flex items-center gap-1">
               <Tag className="w-3 h-3" />{task.tag}
             </span>
           )}
         </div>
-        <h2 className="text-3xl font-bold leading-tight flex-1">{task.title}</h2>
-        <div className="mt-auto flex flex-col gap-4">
+        <h2 className="text-2xl font-semibold leading-snug flex-1 tracking-normal">{task.title}</h2>
+        <div className="mt-auto flex flex-col gap-3">
           <div className="flex flex-col gap-3">
             <div className="flex flex-wrap items-center gap-2">
-              <div className="flex items-center text-muted-foreground text-sm gap-1.5 bg-muted/50 backdrop-blur-sm px-3 py-1.5 rounded-lg">
+              <div className="flex items-center text-muted-foreground text-sm gap-1.5 bg-muted px-3 py-1.5 rounded-lg">
                 <Clock className="w-4 h-4" /><span>{task.estimateMinutes}m</span>
               </div>
               {task.dueDate && (
-                <div className="flex items-center text-muted-foreground text-sm gap-1.5 bg-muted/50 backdrop-blur-sm px-3 py-1.5 rounded-lg">
+                <div className="flex items-center text-muted-foreground text-sm gap-1.5 bg-muted px-3 py-1.5 rounded-lg">
                   <Calendar className="w-4 h-4" /><span>{task.dueDate}</span>
                 </div>
               )}
             </div>
-            <div className="flex items-center gap-3 bg-muted/30 backdrop-blur-sm px-3 py-2 rounded-lg">
+            <div className="flex items-center gap-3 bg-muted/50 px-3 py-2 rounded-lg">
               <span className="text-sm font-medium text-muted-foreground whitespace-nowrap">{t('task.progress')}</span>
-              <div
-                onClick={(e) => e.stopPropagation()}
-                className="flex-1"
-              >
-                <input
-                  type="range" min="0" max="100" step="5"
-                  value={localProgress}
-                  onInput={(e) => setLocalProgress(parseInt((e.target as HTMLInputElement).value))}
-                  onChange={(e) => setLocalProgress(parseInt((e.target as HTMLInputElement).value))}
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                    setIsSlidingProgress(true);
-                  }}
-                  onPointerUp={(e) => {
-                    e.stopPropagation();
-                    setIsSlidingProgress(false);
-                    commitProgress(parseInt((e.target as HTMLInputElement).value));
-                  }}
-                  onPointerCancel={() => setIsSlidingProgress(false)}
-                  onMouseUp={(e) => {
-                    e.stopPropagation();
-                    setIsSlidingProgress(false);
-                    commitProgress(parseInt((e.target as HTMLInputElement).value));
-                  }}
-                  onTouchStart={(e) => {
-                    e.stopPropagation();
-                    setIsSlidingProgress(true);
-                  }}
-                  onTouchEnd={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setIsSlidingProgress(false);
-                    commitProgress(parseInt((e.target as HTMLInputElement).value));
-                  }}
-                  className="w-full h-6 bg-transparent appearance-none cursor-pointer outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
-                  style={{ accentColor: 'var(--primary)', WebkitTapHighlightColor: 'transparent' }}
-                />
-              </div>
+              <ProgressScrubber
+                value={localProgress}
+                onPreview={setLocalProgress}
+                onCommit={commitProgress}
+                onSlidingChange={setIsSlidingProgress}
+              />
               <span className="text-sm font-medium text-muted-foreground w-9 text-right">{localProgress}%</span>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <button onClick={() => { if (!isSlidingProgress) onAction(task.id, 'snooze'); }} className="flex items-center justify-center gap-2 bg-secondary/80 backdrop-blur-sm text-secondary-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95">
-              <AlarmClock className="w-5 h-5" />{t('task.snooze')}
+            <button onClick={() => { if (!isSlidingProgress) onAction(task.id, 'snooze'); }} className="flex items-center justify-center gap-2 bg-secondary text-secondary-foreground py-3 rounded-xl text-sm font-semibold transition-transform active:scale-95">
+              <AlarmClock className="w-4 h-4" />{t('task.snooze')}
             </button>
-            <button onClick={() => { if (!isSlidingProgress) onAction(task.id, 'skip'); }} className="flex items-center justify-center gap-2 bg-muted/80 backdrop-blur-sm text-muted-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95 hover:bg-muted">
-              <SkipForward className="w-5 h-5" />{t('task.skip')}
+            <button onClick={() => { if (!isSlidingProgress) onAction(task.id, 'skip'); }} className="flex items-center justify-center gap-2 bg-muted text-muted-foreground py-3 rounded-xl text-sm font-semibold transition-transform active:scale-95 hover:bg-muted/80">
+              <SkipForward className="w-4 h-4" />{t('task.skip')}
             </button>
           </div>
-          <button onClick={() => { if (!isSlidingProgress) onAction(task.id, 'complete'); }} className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground py-4 rounded-xl font-bold text-lg shadow-lg shadow-primary/25 transition-transform active:scale-95 hover:bg-primary/90">
-            <Check className="w-6 h-6" />{t('task.complete')}
+          <button onClick={() => { if (!isSlidingProgress) onAction(task.id, 'complete'); }} className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground py-3.5 rounded-xl font-semibold text-base transition-transform active:scale-95 hover:bg-primary/90">
+            <Check className="w-5 h-5" />{t('task.complete')}
           </button>
         </div>
       </div>
@@ -382,7 +488,7 @@ function TaskDetailModal({ task, onClose, onAction, onProgressChange }: {
     <Dialog.Root open={!!task} onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 backdrop-blur-md z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-        <Dialog.Content className="fixed left-[50%] top-[50%] z-50 w-full max-w-[360px] h-[520px] translate-x-[-50%] translate-y-[-50%] duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 rounded-3xl focus:outline-none shadow-2xl">
+        <Dialog.Content className="fixed left-[50%] top-[50%] z-50 w-full max-w-[350px] h-[460px] translate-x-[-50%] translate-y-[-50%] duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 rounded-3xl focus:outline-none shadow-2xl">
           <Dialog.Title className="sr-only">{task?.title}</Dialog.Title>
           <Dialog.Description className="sr-only">Task actions</Dialog.Description>
           {task && (
@@ -580,6 +686,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
   const detailTask = detailTaskId ? tasks.find(t => t.id === detailTaskId) ?? null : null;
   const [repeatTask, setRepeatTask] = useState<Task | null>(null);
   const [query, setQuery] = useState('');
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [priorityFilter, setPriorityFilter] = useState<'all' | Priority>('all');
   const [statusFilter, setStatusFilter] = useState<'active' | 'done' | 'skipped' | 'all'>('active');
 
@@ -625,39 +732,63 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
       <TaskDetailModal task={detailTask} onClose={() => setDetailTaskId(null)} onAction={onAction} onProgressChange={onProgressChange} />
       <RepeatTaskModal task={repeatTask} onClose={() => setRepeatTask(null)} onRepeat={onRepeatTask} />
 
-      <div className="w-full max-w-md space-y-4">
-        <div className="bg-card border border-border rounded-2xl p-3 shadow-sm space-y-3">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={t('task.searchPlaceholder')}
-              className="h-10 w-full rounded-xl border border-input bg-input-background pl-9 pr-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <select
-              value={priorityFilter}
-              onChange={(e) => setPriorityFilter(e.target.value as 'all' | Priority)}
-              className="h-9 rounded-xl border border-input bg-input-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      <div className="w-full max-w-md space-y-3">
+        <div className={cn('bg-card border border-border rounded-2xl shadow-sm overflow-hidden', isSearchOpen ? 'p-2 space-y-2' : 'p-1.5')}>
+          {!isSearchOpen ? (
+            <button
+              type="button"
+              onClick={() => setIsSearchOpen(true)}
+              className="flex h-9 w-full items-center gap-2 rounded-xl px-3 text-sm font-semibold text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
             >
-              <option value="all">{t('task.allPriorities')}</option>
-              <option value="P1">{t('priority.P1')}</option>
-              <option value="P2">{t('priority.P2')}</option>
-              <option value="P3">{t('priority.P3')}</option>
-            </select>
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as 'active' | 'done' | 'skipped' | 'all')}
-              className="h-9 rounded-xl border border-input bg-input-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <option value="active">{t('view.toDo')}</option>
-              <option value="done">{t('view.completed')}</option>
-              <option value="skipped">{t('task.skipped')}</option>
-              <option value="all">{t('task.allStatuses')}</option>
-            </select>
-          </div>
+              <Search className="w-4 h-4" />
+              <span className="flex-1 text-left">{t('task.searchPlaceholder')}</span>
+              {(query || priorityFilter !== 'all' || statusFilter !== 'active') && <span className="h-2 w-2 rounded-full bg-primary" />}
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          ) : (
+            <>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={t('task.searchPlaceholder')}
+                  className="h-9 w-full rounded-xl border border-input bg-input-background pl-9 pr-10 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={() => setIsSearchOpen(false)}
+                  className="absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+                  aria-label="Hide search"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <select
+                  value={priorityFilter}
+                  onChange={(e) => setPriorityFilter(e.target.value as 'all' | Priority)}
+                  className="h-8 rounded-lg border border-input bg-input-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <option value="all">{t('task.allPriorities')}</option>
+                  <option value="P1">{t('priority.P1')}</option>
+                  <option value="P2">{t('priority.P2')}</option>
+                  <option value="P3">{t('priority.P3')}</option>
+                </select>
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as 'active' | 'done' | 'skipped' | 'all')}
+                  className="h-8 rounded-lg border border-input bg-input-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <option value="active">{t('view.toDo')}</option>
+                  <option value="done">{t('view.completed')}</option>
+                  <option value="skipped">{t('task.skipped')}</option>
+                  <option value="all">{t('task.allStatuses')}</option>
+                </select>
+              </div>
+            </>
+          )}
         </div>
         <div className="flex items-center justify-between px-1">
           <button onClick={prevMonth} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"><ChevronLeft className="w-5 h-5" /></button>
@@ -719,20 +850,20 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
               </div>
 
               {dayTasks.length === 0 ? (
-                <div className="bg-card border border-border rounded-2xl p-6 flex flex-col items-center gap-3 text-center">
-                  <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center"><Calendar className="w-5 h-5 text-muted-foreground" /></div>
+                <div className="bg-card border border-border rounded-2xl p-5 flex flex-col items-center gap-3 text-center">
+                  <div className="w-10 h-10 rounded-xl bg-muted flex items-center justify-center"><Calendar className="w-5 h-5 text-muted-foreground" /></div>
                   <p className="text-sm text-muted-foreground">{t('task.noTasksScheduled')}</p>
                   <button onClick={onAddTask} className="text-sm font-semibold text-primary flex items-center gap-1 hover:opacity-80 transition-opacity"><Plus className="w-4 h-4" />{t('task.addTaskPrompt')}</button>
                 </div>
               ) : (
-                <div className="space-y-4">
+                <div className="space-y-3">
                   {pendingDayTasks.length > 0 && (
                     <div className="space-y-2">
                       <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground px-1">{t('view.toDo')} — {pendingDayTasks.length}</p>
                       {pendingDayTasks.map((task, i) => (
                         <motion.button key={task.id} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.04, duration: 0.2 }}
                           onClick={() => setDetailTaskId(task.id)}
-                          className="w-full text-left bg-card border border-border rounded-xl p-4 flex items-start gap-3 hover:border-primary/40 hover:shadow-sm transition-all active:scale-[0.99]">
+                          className="w-full text-left bg-card border border-border rounded-xl px-3 py-3 flex items-start gap-3 hover:border-primary/40 transition-all active:scale-[0.99]">
                           <span className={`mt-1 w-2 h-2 rounded-full flex-shrink-0 ${DOT_COLOR[task.priority]}`} />
                           <div className="flex-1 min-w-0">
                             <p className="text-sm font-semibold text-foreground leading-snug">{task.title}</p>
@@ -759,7 +890,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
                       {doneDayTasks.map((task, i) => (
                         <motion.button key={task.id} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.04, duration: 0.2 }}
                           onClick={() => setRepeatTask(task)}
-                          className="w-full text-left bg-muted/40 border border-border/60 rounded-xl p-4 flex items-start gap-3 hover:border-primary/30 hover:bg-muted/60 transition-all active:scale-[0.99] group">
+                          className="w-full text-left bg-muted/40 border border-border/60 rounded-xl px-3 py-3 flex items-start gap-3 hover:border-primary/30 hover:bg-muted/60 transition-all active:scale-[0.99] group">
                           <CheckCircle2 className="mt-0.5 w-4 h-4 text-emerald-500 flex-shrink-0" />
                           <div className="flex-1 min-w-0">
                             <p className="text-sm font-medium text-muted-foreground leading-snug line-through">{task.title}</p>
@@ -883,6 +1014,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
   const [isAddingTask, setIsAddingTask] = useState(false);
   const [isRepeatMode, setIsRepeatMode] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [showTaskOptions, setShowTaskOptions] = useState(false);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'offline' | 'error'>('idle');
   const [form, setForm] = useState<AddTaskState>(DEFAULT_FORM);
 
@@ -970,10 +1102,11 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
   useEffect(() => {
     if (!isAddingTask) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); setIsAddingTask(false); setIsRepeatMode(false); setEditingTaskId(null); setForm(DEFAULT_FORM); }
+      if (e.key === 'Escape') { e.preventDefault(); closeTaskForm(); }
     };
     document.addEventListener('keydown', handleKey);
     return () => document.removeEventListener('keydown', handleKey);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAddingTask]);
 
   // Cache tasks to localStorage whenever they change
@@ -1142,6 +1275,14 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
     });
   };
 
+  const closeTaskForm = () => {
+    setIsAddingTask(false);
+    setIsRepeatMode(false);
+    setEditingTaskId(null);
+    setShowTaskOptions(false);
+    setForm(DEFAULT_FORM);
+  };
+
   const openEditTask = (task: Task) => {
     setForm({
       title: task.title,
@@ -1154,6 +1295,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
     });
     setEditingTaskId(task.id);
     setIsRepeatMode(false);
+    setShowTaskOptions(true);
     setIsAddingTask(true);
   };
 
@@ -1184,10 +1326,11 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
     });
     setIsRepeatMode(true);
     setEditingTaskId(null);
+    setShowTaskOptions(true);
     setIsAddingTask(true);
   };
 
-  const openAddTask = () => { setForm(DEFAULT_FORM); setIsRepeatMode(false); setEditingTaskId(null); setIsAddingTask(true); };
+  const openAddTask = () => { setForm(DEFAULT_FORM); setIsRepeatMode(false); setEditingTaskId(null); setShowTaskOptions(false); setIsAddingTask(true); };
 
   const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1204,10 +1347,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
       };
       setTasks(prev => markDirty(prev.map(t => t.id === editingTaskId ? { ...t, ...patch } : t), editingTaskId));
       persistTaskUpdate(editingTaskId, patch);
-      setIsAddingTask(false);
-      setIsRepeatMode(false);
-      setEditingTaskId(null);
-      setForm(DEFAULT_FORM);
+      closeTaskForm();
       return;
     }
     const tempId = Math.random().toString(36).substring(7);
@@ -1227,9 +1367,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
       const i = insertIndex(prev, optimisticTask);
       return [...prev.slice(0, i), optimisticTask, ...prev.slice(i)];
     });
-    setIsAddingTask(false);
-    setIsRepeatMode(false);
-    setForm(DEFAULT_FORM);
+    closeTaskForm();
     // Background push
     apiCreateTask({
       title: optimisticTask.title, priority: optimisticTask.priority,
@@ -1258,9 +1396,9 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
       </AnimatePresence>
 
       {/* Header */}
-      <header className="w-full max-w-md px-4 sm:px-6 flex items-center justify-between mb-5">
+      <header className="w-full max-w-md px-4 sm:px-6 flex items-center justify-between mb-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">{greeting} 👋</h1>
+          <h1 className="text-xl font-semibold tracking-normal">{greeting}</h1>
           <p className="text-muted-foreground text-sm flex items-center gap-1.5 mt-1">
             <CheckCircle2 className="w-4 h-4 text-emerald-500" />
             <span>{t('task.tasksDoneToday', { count: completedToday })}</span>
@@ -1330,31 +1468,30 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
           <div className="flex flex-col items-center px-4 sm:px-6 pb-4 h-full" style={{ width: '50%' }}>
             {pendingTasks.length > 0 ? (
               <>
-                <div className="relative w-full aspect-[4/5] max-w-[360px] mt-2">
+                <div className="relative w-full aspect-[1/1] max-w-[360px] mt-1">
                   <AnimatePresence custom={exitAction} mode="popLayout">
-                    {pendingTasks.slice(0, 3).map((task, index) => {
+                    {pendingTasks.slice(0, 2).map((task, index) => {
                       const isTop = index === 0;
                       return (
                         <motion.div
                           key={task.id}
                           layout
                           custom={exitAction}
-                          initial={{ opacity: 0, y: 50, scale: 0.9 }}
+                          initial={{ opacity: 0, y: 16, scale: 0.98 }}
                           animate={{
-                            opacity: index > 1 ? 0 : 1 - index * 0.15,
-                            y: index * 16,
-                            scale: 1 - index * 0.04,
+                            opacity: 1 - index * 0.18,
+                            y: index * 10,
+                            scale: 1 - index * 0.025,
                             zIndex: 10 - index,
                           }}
                           exit={(custom) => ({
                             opacity: 0,
-                            y: custom === 'complete' ? -150 : custom === 'skip' ? 150 : 50,
-                            x: custom === 'skip' ? -100 : custom === 'snooze' ? 100 : 0,
-                            rotate: custom === 'complete' ? 5 : custom === 'skip' ? -8 : 8,
-                            scale: 0.9,
-                            transition: { duration: 0.3, ease: 'easeOut' }
+                            y: custom === 'complete' ? -40 : custom === 'skip' ? 40 : 24,
+                            x: custom === 'skip' ? -24 : custom === 'snooze' ? 24 : 0,
+                            scale: 0.98,
+                            transition: { duration: 0.22, ease: 'easeOut' }
                           })}
-                          transition={{ type: 'spring', stiffness: 300, damping: 25, mass: 0.8 }}
+                          transition={{ type: 'spring', stiffness: 360, damping: 34, mass: 0.8 }}
                           className={`absolute inset-0 w-full h-full ${!isTop ? 'pointer-events-none' : ''}`}
                         >
                           <TaskCard task={task} onAction={handleAction} onProgressChange={handleProgressChange} exitAction={exitAction} />
@@ -1365,36 +1502,45 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
                 </div>
 
                 {/* Up next + reorder button */}
-                <div className="w-full max-w-sm mt-10 flex items-center justify-between px-2">
-                  <div className="flex flex-col">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">{t('task.upNext')}</span>
-                    <span className="text-sm truncate max-w-[180px] font-medium text-muted-foreground">
-                      {pendingTasks.length > 1 ? pendingTasks[1].title : '—'}
-                    </span>
+                <div className="w-full max-w-sm mt-6 bg-card border border-border rounded-2xl p-3 shadow-sm">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-semibold uppercase text-muted-foreground">{t('task.upNext')}</span>
+                    <button
+                      onClick={() => setIsReordering(true)}
+                      className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors bg-muted hover:bg-muted/80 px-2.5 py-1.5 rounded-lg font-semibold"
+                    >
+                      <ArrowUpDown className="w-3.5 h-3.5" />{t('task.reorder')}
+                    </button>
                   </div>
-                  <button
-                    onClick={() => setIsReordering(true)}
-                    className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors bg-muted/60 hover:bg-muted px-3 py-2 rounded-lg font-semibold"
-                  >
-                    <ArrowUpDown className="w-3.5 h-3.5" />{t('task.reorder')}
-                  </button>
+                  <div className="space-y-1.5">
+                    {pendingTasks.slice(1, 4).map(task => (
+                      <div key={task.id} className="flex items-center gap-2 rounded-lg bg-muted/50 px-2.5 py-2">
+                        <span className={`w-2 h-2 rounded-full flex-shrink-0 ${DOT_COLOR[task.priority]}`} />
+                        <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{task.title}</span>
+                        <span className="text-xs text-muted-foreground">{task.estimateMinutes}m</span>
+                      </div>
+                    ))}
+                    {pendingTasks.length === 1 && (
+                      <p className="rounded-lg bg-muted/50 px-2.5 py-2 text-sm text-muted-foreground">{t('task.noMoreTasks')}</p>
+                    )}
+                  </div>
                 </div>
 
                 {/* Hint */}
-                <div className="w-full max-w-sm mt-4 px-2 flex gap-4 text-xs text-muted-foreground">
+                <div className="w-full max-w-sm mt-3 px-1 flex gap-4 text-xs text-muted-foreground">
                   <span className="flex items-center gap-1"><AlarmClock className="w-3 h-3" />{t('task.snoozeHint')}</span>
                   <span className="flex items-center gap-1"><SkipForward className="w-3 h-3" />{t('task.skipHint')}</span>
                 </div>
               </>
             ) : (
-              <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+              <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
                 className="flex flex-col items-center justify-center h-full w-full max-w-sm text-center px-6">
-                <div className="w-24 h-24 bg-emerald-100 text-emerald-500 rounded-full flex items-center justify-center mb-6">
-                  <CheckCircle2 className="w-12 h-12" />
+                <div className="w-16 h-16 bg-muted text-muted-foreground rounded-2xl flex items-center justify-center mb-5">
+                  <CheckCircle2 className="w-8 h-8" />
                 </div>
-                <h2 className="text-2xl font-bold mb-2">{t('task.allCaughtUp')}</h2>
-                <p className="text-muted-foreground mb-8">{t('task.allCaughtUpDesc')}</p>
-                <button onClick={openAddTask} className="w-full py-3.5 bg-secondary text-secondary-foreground font-semibold rounded-xl">{t('task.addNewTask')}</button>
+                <h2 className="text-xl font-semibold mb-2">{t('task.allCaughtUp')}</h2>
+                <p className="text-sm text-muted-foreground mb-7">{t('task.allCaughtUpDesc')}</p>
+                <button onClick={openAddTask} className="w-full py-3 bg-primary text-primary-foreground font-semibold rounded-xl">{t('task.addNewTask')}</button>
               </motion.div>
             )}
           </div>
@@ -1425,9 +1571,9 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
       {/* FAB */}
       <button
         onClick={openAddTask}
-        className="fixed bottom-safe right-6 sm:right-8 w-14 h-14 bg-primary text-primary-foreground rounded-full flex items-center justify-center shadow-xl shadow-primary/30 hover:bg-primary/90 transition-transform active:scale-90 z-40"
+        className="fixed bottom-safe right-6 sm:right-8 w-12 h-12 bg-primary text-primary-foreground rounded-full flex items-center justify-center shadow-lg shadow-primary/20 hover:bg-primary/90 transition-transform active:scale-95 z-40"
       >
-        <Plus className="w-7 h-7" />
+        <Plus className="w-6 h-6" />
       </button>
 
       {/* Add Task centered card */}
@@ -1441,8 +1587,8 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.18 }}
-              className="fixed inset-0 bg-black/50 z-50"
-              onClick={() => { setIsAddingTask(false); setIsRepeatMode(false); setEditingTaskId(null); setForm(DEFAULT_FORM); }}
+              className="fixed inset-0 backdrop-blur-md z-50"
+              onClick={closeTaskForm}
             />
             {/* Card */}
             <motion.div
@@ -1456,7 +1602,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
               exit={{ opacity: 0, scale: 0.95 }}
               transition={{ type: 'spring', stiffness: 400, damping: 30, mass: 0.8 }}
               style={{ willChange: 'transform' }}
-              className="fixed left-[50%] top-[50%] z-50 w-full max-w-[360px] translate-x-[-50%] translate-y-[-50%] bg-card rounded-3xl border border-border shadow-xl flex flex-col"
+              className="fixed left-[50%] top-[50%] z-50 w-full max-w-[360px] translate-x-[-50%] translate-y-[-50%] bg-card rounded-2xl border border-border shadow-xl flex flex-col"
             >
               {/* Header */}
               <div className="flex items-start justify-between px-6 pt-6 pb-4">
@@ -1468,7 +1614,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
                 </div>
                 <button
                   type="button"
-                  onClick={() => { setIsAddingTask(false); setIsRepeatMode(false); setEditingTaskId(null); setForm(DEFAULT_FORM); }}
+                  onClick={closeTaskForm}
                   className="w-8 h-8 flex items-center justify-center rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors flex-shrink-0 ml-3 mt-0.5"
                 >
                   <X className="w-4 h-4" />
@@ -1480,25 +1626,10 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
                 <div className="space-y-2">
                   <label htmlFor="title" className="text-sm font-medium leading-none">{t('task.taskName')}</label>
                   <input id="title" type="text" autoFocus placeholder={t('task.titlePlaceholder')}
-                    className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    className="flex h-11 w-full rounded-xl border border-input bg-input-background px-3 py-2 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     value={form.title} onChange={(e) => setForm(f => ({ ...f, title: e.target.value }))} required />
                 </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label htmlFor="minutes" className="text-sm font-medium leading-none">{t('task.estMinutes')}</label>
-                    <input id="minutes" type="number" min="1"
-                      className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                      value={form.minutes} onChange={(e) => setForm(f => ({ ...f, minutes: e.target.value }))} />
-                  </div>
-                  <div className="space-y-2">
-                    <label htmlFor="priority" className="text-sm font-medium leading-none">{t('task.priority')}</label>
-                    <select id="priority"
-                      className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                      value={form.priority} onChange={(e) => setForm(f => ({ ...f, priority: e.target.value as Priority }))}>
-                      <option value="P1">{t('priority.P1')}</option><option value="P2">{t('priority.P2')}</option><option value="P3">{t('priority.P3')}</option>
-                    </select>
-                  </div>
-                </div>
+
                 <div className="space-y-2">
                   <label htmlFor="dueDate" className="text-sm font-medium leading-none">{t('task.deadline')}</label>
                   <div className="grid grid-cols-4 gap-2">
@@ -1520,47 +1651,104 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
                           next.setDate(next.getDate() + item.offset);
                           setForm(f => ({ ...f, dueDate: fmtDate(next.getFullYear(), next.getMonth(), next.getDate()) }));
                         }}
-                        className="rounded-lg bg-muted px-2 py-1.5 text-xs font-semibold text-muted-foreground active:scale-95"
+                        className={`rounded-lg border px-2 py-1.5 text-xs font-semibold active:scale-95 ${
+                          item.offset === null
+                            ? form.dueDate === '' ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border bg-muted text-muted-foreground'
+                            : 'border-border bg-muted text-muted-foreground'
+                        }`}
                       >
                         {t(`task.quickDate.${item.key}`)}
                       </button>
                     ))}
                   </div>
                   <input id="dueDate" type="date"
-                    className="flex h-10 w-full appearance-none rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    className="flex h-10 w-full appearance-none rounded-xl border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     value={form.dueDate} onChange={(e) => setForm(f => ({ ...f, dueDate: e.target.value }))} />
                 </div>
+
                 <div className="space-y-2">
-                  <label htmlFor="reminderAt" className="text-sm font-medium leading-none flex items-center gap-1.5"><Bell className="w-4 h-4" />{t('task.reminderAt')}</label>
-                  <input id="reminderAt" type="datetime-local"
-                    className="flex h-10 w-full appearance-none rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                    value={form.reminderAt} onChange={(e) => setForm(f => ({ ...f, reminderAt: e.target.value }))} />
+                  <label htmlFor="priority" className="text-sm font-medium leading-none">{t('task.priority')}</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['P1', 'P2', 'P3'] as Priority[]).map(priority => (
+                      <button
+                        key={priority}
+                        type="button"
+                        onClick={() => setForm(f => ({ ...f, priority }))}
+                        className={`rounded-xl border px-2 py-2 text-xs font-semibold transition-colors ${
+                          form.priority === priority
+                            ? 'border-primary/40 bg-primary/10 text-primary'
+                            : 'border-border bg-muted text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {t(PRIORITY_LABEL_KEY[priority])}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <label htmlFor="repeatRule" className="text-sm font-medium leading-none">{t('task.repeatRule')}</label>
-                  <select id="repeatRule"
-                    className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                    value={form.repeatRule} onChange={(e) => setForm(f => ({ ...f, repeatRule: e.target.value as AddTaskState['repeatRule'] }))}>
-                    <option value="none">{t('task.repeatRules.none')}</option>
-                    <option value="daily">{t('task.repeatRules.daily')}</option>
-                    <option value="weekly">{t('task.repeatRules.weekly')}</option>
-                    <option value="monthly">{t('task.repeatRules.monthly')}</option>
-                  </select>
-                </div>
-                <div className="space-y-2">
-                  <label htmlFor="tag" className="text-sm font-medium leading-none">{t('task.categoryTag')}</label>
-                  <select id="tag"
-                    className="flex h-10 w-full rounded-md border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                    value={form.tag} onChange={(e) => setForm(f => ({ ...f, tag: e.target.value }))}>
-                    {PRESET_TAGS.map(tag => <option key={tag} value={tag}>{tag}</option>)}
-                  </select>
-                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowTaskOptions(v => !v)}
+                  className="flex w-full items-center justify-between rounded-xl border border-border bg-muted/50 px-3 py-2 text-sm font-semibold text-muted-foreground hover:text-foreground"
+                >
+                  <span>{t('task.moreOptions')}</span>
+                  <ChevronRight className={`w-4 h-4 transition-transform ${showTaskOptions ? 'rotate-90' : ''}`} />
+                </button>
+
+                <AnimatePresence initial={false}>
+                  {showTaskOptions && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={{ duration: 0.18, ease: 'easeOut' }}
+                      className="overflow-hidden"
+                    >
+                      <div className="space-y-4 pt-1">
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-2">
+                            <label htmlFor="minutes" className="text-sm font-medium leading-none">{t('task.estMinutes')}</label>
+                            <input id="minutes" type="number" min="1"
+                              className="flex h-10 w-full rounded-xl border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              value={form.minutes} onChange={(e) => setForm(f => ({ ...f, minutes: e.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <label htmlFor="tag" className="text-sm font-medium leading-none">{t('task.categoryTag')}</label>
+                            <select id="tag"
+                              className="flex h-10 w-full rounded-xl border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              value={form.tag} onChange={(e) => setForm(f => ({ ...f, tag: e.target.value }))}>
+                              {PRESET_TAGS.map(tag => <option key={tag} value={tag}>{tag}</option>)}
+                            </select>
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <label htmlFor="reminderAt" className="text-sm font-medium leading-none flex items-center gap-1.5"><Bell className="w-4 h-4" />{t('task.reminderAt')}</label>
+                          <input id="reminderAt" type="datetime-local"
+                            className="flex h-10 w-full appearance-none rounded-xl border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            value={form.reminderAt} onChange={(e) => setForm(f => ({ ...f, reminderAt: e.target.value }))} />
+                        </div>
+                        <div className="space-y-2">
+                          <label htmlFor="repeatRule" className="text-sm font-medium leading-none">{t('task.repeatRule')}</label>
+                          <select id="repeatRule"
+                            className="flex h-10 w-full rounded-xl border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            value={form.repeatRule} onChange={(e) => setForm(f => ({ ...f, repeatRule: e.target.value as AddTaskState['repeatRule'] }))}>
+                            <option value="none">{t('task.repeatRules.none')}</option>
+                            <option value="daily">{t('task.repeatRules.daily')}</option>
+                            <option value="weekly">{t('task.repeatRules.weekly')}</option>
+                            <option value="monthly">{t('task.repeatRules.monthly')}</option>
+                          </select>
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
                 {/* Actions */}
                 <div className="flex flex-col gap-3 pt-1">
                   <button type="submit" className="w-full py-3.5 bg-primary text-primary-foreground rounded-xl font-semibold text-base hover:bg-primary/90 transition-colors active:scale-95">
                     {editingTaskId ? t('task.saveChanges') : isRepeatMode ? t('task.addRepeatedTask') : t('task.addTask')}
                   </button>
-                  <button type="button" onClick={() => { setIsAddingTask(false); setIsRepeatMode(false); setEditingTaskId(null); setForm(DEFAULT_FORM); }}
+                  <button type="button" onClick={closeTaskForm}
                     className="w-full py-3 bg-muted text-muted-foreground rounded-xl text-sm font-medium hover:bg-muted/80 transition-colors active:scale-95">
                     {t('task.cancel')}
                   </button>
@@ -1578,7 +1766,7 @@ function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) 
 export default function App() {
   // 'loading' = checking refresh cookie, 'auth' = not logged in, 'app' = logged in
   const [appState, setAppState] = useState<'loading' | 'auth' | 'app'>('loading');
-  const [userEmail, setUserEmail] = useState(() => storageGet('taskflow_user_email') || '');
+  const [userEmail, setUserEmail] = useState(() => loadSession()?.email || '');
 
   // Keep a stable app viewport height across iOS toolbar/safe-area changes.
   useEffect(() => {
@@ -1624,8 +1812,9 @@ export default function App() {
   // Register a global auth-failure callback so apiFetch can trigger logout
   useEffect(() => {
     setAuthFailureHandler(() => {
-      storageRemove('taskflow_logged_in');
-      // Keep taskflow_user_email so login form is pre-filled
+      clearLocalAuthTokens();
+      clearSession();
+      setUserEmail('');
       setAppState('auth');
     });
     return () => setAuthFailureHandler(null);
@@ -1636,12 +1825,13 @@ export default function App() {
     if (appState !== 'loading') return;
     let cancelled = false;
     async function restoreSession() {
-      await restoreFromNativeStorage(['taskflow_logged_in', 'taskflow_user_email']);
+      await restoreFromNativeStorage([SESSION_KEY, 'taskflow_logged_in', 'taskflow_user_email']);
       if (cancelled) return;
 
-      const shouldRestore = storageGet('taskflow_logged_in');
-      const email = storageGet('taskflow_user_email');
-      if (!shouldRestore || !email) {
+      const session = loadSession();
+      if (!session || session.signedOut || isSessionExpired(session)) {
+        clearLocalAuthTokens();
+        clearSession();
         setAppState('auth');
         return;
       }
@@ -1650,14 +1840,19 @@ export default function App() {
         const ok = await apiRefresh();
         if (!cancelled) {
           if (!ok) {
+            clearLocalAuthTokens();
+            clearSession();
             setAppState('auth');
             return;
           }
-          setUserEmail(email);
+          saveSession(session.email);
+          setUserEmail(session.email);
           setAppState('app');
         }
       } catch {
         if (!cancelled) {
+          clearLocalAuthTokens();
+          clearSession();
           setAppState('auth');
         }
       }
@@ -1671,8 +1866,7 @@ export default function App() {
     (document.activeElement as HTMLElement | null)?.blur();
     syncAppViewportHeight(true);
     setUserEmail(email);
-    storageSet('taskflow_logged_in', '1');
-    storageSet('taskflow_user_email', email);
+    saveSession(email);
     setAppState('app');
   }
 
@@ -1691,12 +1885,12 @@ export default function App() {
 
     try { await apiLogout(); } catch { /* still clean up locally */ }
     // Wipe local database (always, even if network logout fails)
-    storageSet('taskflow_tasks', '');
-    storageSet('taskflow_streak', '');
-    storageSet('taskflow_completed_today', '');
-    storageSet(SYNC_META_KEY, '');
-    storageRemove('taskflow_logged_in');
-    storageRemove('taskflow_user_email');
+    storageRemove('taskflow_tasks');
+    storageRemove('taskflow_streak');
+    storageRemove('taskflow_completed_today');
+    storageRemove(SYNC_META_KEY);
+    clearSession();
+    clearLocalAuthTokens();
     setAppState('auth');
     setUserEmail('');
   }
@@ -1710,7 +1904,7 @@ export default function App() {
   }
 
   if (appState === 'auth') {
-    return <AuthPage onAuth={handleAuth} savedEmail={storageGet('taskflow_user_email') || undefined} />;
+    return <AuthPage onAuth={handleAuth} />;
   }
 
   return <AppShell email={userEmail} onLogout={handleLogout} />;

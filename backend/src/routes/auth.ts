@@ -91,7 +91,9 @@ router.post('/refresh', (req: Request, res: Response): void => {
   try {
     const payload = jwt.verify(token, process.env.JWT_REFRESH_SECRET!) as { userId: string };
     const accessToken = signAccess(payload.userId);
-    res.json({ accessToken });
+    const refreshToken = signRefresh(payload.userId);
+    res.cookie(REFRESH_COOKIE, refreshToken, COOKIE_OPTS);
+    res.json({ accessToken, refreshToken });
   } catch {
     res.status(401).json({ error: 'Invalid or expired refresh token' });
   }

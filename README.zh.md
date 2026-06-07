@@ -209,3 +209,4 @@ UI 设计与资产生成由 [Figma Make](https://www.figma.com/design/qG1eukwOvw
 ### 1.0.0 — 前后端流程测试
 ### 1.1.0 — 修复 Progress Slider 不实时更新、任务数据迁移到服务器
 ### 1.2.0 — 新增账户界面
+### 2.0.0 — 功能完善

@@ -33,4 +33,19 @@ export default defineConfig({
 
   // File types to support raw imports. Never add .css, .tsx, or .ts files to this.
   assetsInclude: ['**/*.svg', '**/*.csv'],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (id.includes('/@radix-ui/')) return 'radix';
+          if (id.includes('/@capacitor/')) return 'capacitor';
+          if (id.includes('/react/') || id.includes('/react-dom/') || id.includes('/scheduler/')) {
+            return 'react';
+          }
+          return 'vendor';
+        },
+      },
+    },
+  },
 })
