@@ -132,3 +132,7 @@
 
 - 2026-06-07：第一轮计划与审查完成（主题持久化、任务卡交互、防泄漏 token、存储恢复健壮性）。
 - 2026-06-07：用户报告问题仍存在，启动第二轮诊断与修复计划。重点：自动登录 cookie 持久性、按钮事件冒泡、进度条滑动恢复。
+- 2026-06-07：第二轮修复完成并提交（commit c035d88）。
+  - 自动登录：backend cookie SameSite 改为 lax + web 端 localStorage refresh token fallback + signedOut 守卫
+  - 任务卡片交互：移除复杂 pointer 事件处理器，恢复 v2.0.0 简单 onClick 模式
+  - 主色调切换：确认已完整实现，无需额外修改
