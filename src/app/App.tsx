@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
+import { motion, AnimatePresence } from 'motion/react';
 import {
   Check, X, Clock, Plus, Flame, CheckCircle2,
   Calendar, Tag, XCircle, ChevronLeft, ChevronRight,
@@ -605,33 +605,47 @@ function RepeatTaskModal({ task, onClose, onRepeat }: {
 }
 
 // --- Reorder Row Item (with dedicated drag handle) ---
-function ReorderRow({ task }: { task: Task }) {
-  const controls = useDragControls();
+function ReorderRow({
+  task,
+  isDragging,
+  dragOffsetY,
+  setRowRef,
+  onHandlePointerDown,
+}: {
+  task: Task;
+  isDragging: boolean;
+  dragOffsetY: number;
+  setRowRef: (node: HTMLDivElement | null) => void;
+  onHandlePointerDown: (event: React.PointerEvent<HTMLButtonElement>) => void;
+}) {
   return (
-    <Reorder.Item
-      value={task}
-      dragListener={false}
-      dragControls={controls}
-      className="list-none"
-      whileDrag={{ scale: 1.02, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 50 }}
-      transition={{ duration: 0.15 }}
+    <motion.div
+      ref={setRowRef}
+      layout
+      className={cn(
+        'bg-card border border-border rounded-xl flex items-center gap-3 px-3 py-3.5 select-none',
+        isDragging && 'relative z-10 border-primary/40 shadow-lg shadow-black/10'
+      )}
+      animate={{ y: isDragging ? dragOffsetY : 0, scale: isDragging ? 1.015 : 1 }}
+      transition={isDragging
+        ? { type: 'tween', duration: 0.02 }
+        : { type: 'spring', stiffness: 420, damping: 34, mass: 0.75 }}
     >
-      <div className="bg-card border border-border rounded-xl flex items-center gap-3 px-3 py-3.5 select-none">
-        {/* Drag handle */}
-        <button
-          onPointerDown={(e) => { e.preventDefault(); controls.start(e); }}
-          className="touch-none cursor-grab active:cursor-grabbing text-muted-foreground hover:text-foreground transition-colors flex-shrink-0 p-1 -m-1 rounded"
-        >
-          <GripVertical className="w-5 h-5" />
-        </button>
-        <span className={`w-2 h-2 rounded-full flex-shrink-0 ${DOT_COLOR[task.priority]}`} />
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-foreground leading-snug truncate">{task.title}</p>
-          {task.tag && <p className="text-xs text-muted-foreground mt-0.5">{task.tag}</p>}
-        </div>
-        <span className="text-xs text-muted-foreground bg-muted px-2 py-1 rounded-md flex-shrink-0">{task.estimateMinutes}m</span>
+      <button
+        onPointerDown={onHandlePointerDown}
+        className="touch-none cursor-grab active:cursor-grabbing text-muted-foreground hover:text-foreground transition-colors flex-shrink-0 p-1 -m-1 rounded"
+        aria-label={`Reorder ${task.title}`}
+        type="button"
+      >
+        <GripVertical className="w-5 h-5" />
+      </button>
+      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${DOT_COLOR[task.priority]}`} />
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold text-foreground leading-snug truncate">{task.title}</p>
+        {task.tag && <p className="text-xs text-muted-foreground mt-0.5">{task.tag}</p>}
       </div>
-    </Reorder.Item>
+      <span className="text-xs text-muted-foreground bg-muted px-2 py-1 rounded-md flex-shrink-0">{task.estimateMinutes}m</span>
+    </motion.div>
   );
 }
 
@@ -641,18 +655,87 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
   onClose: () => void; onSave: (ordered: Task[]) => void;
 }) {
   const { t } = useTranslation();
-  const [order, setOrder] = useState<Task[]>(pendingTasks);
+  const [orderIds, setOrderIds] = useState<string[]>(() => pendingTasks.map(task => task.id));
+  const taskById = useMemo(() => new Map(pendingTasks.map(task => [task.id, task])), [pendingTasks]);
+  const pendingTaskIds = useMemo(() => pendingTasks.map(task => task.id), [pendingTasks]);
+  const pendingTaskIdsKey = pendingTaskIds.join('\u001f');
+  const order = useMemo(
+    () => orderIds.map(id => taskById.get(id)).filter((task): task is Task => !!task),
+    [orderIds, taskById]
+  );
+  const [dragState, setDragState] = useState<{ id: string; startY: number; currentY: number } | null>(null);
+  const rowRefs = React.useRef(new Map<string, HTMLDivElement>());
+  const lastHapticIndexRef = React.useRef<number | null>(null);
 
-  // Sync when tasks change externally
-  React.useEffect(() => { setOrder(pendingTasks); }, [pendingTasks]);
+  React.useEffect(() => { setOrderIds(pendingTaskIds); }, [pendingTaskIdsKey]);
 
   const handleDone = () => { onSave(order); onClose(); };
+  const setRowRef = React.useCallback((id: string, node: HTMLDivElement | null) => {
+    if (node) rowRefs.current.set(id, node);
+    else rowRefs.current.delete(id);
+  }, []);
+
+  const moveDraggedId = React.useCallback((dragId: string, pointerY: number) => {
+    setOrderIds(prev => {
+      const currentIndex = prev.indexOf(dragId);
+      if (currentIndex < 0) return prev;
+
+      let targetIndex = currentIndex;
+      for (let i = 0; i < prev.length; i += 1) {
+        const id = prev[i];
+        const row = rowRefs.current.get(id);
+        if (!row) continue;
+        const rect = row.getBoundingClientRect();
+        const centerY = rect.top + rect.height / 2;
+        if (pointerY < centerY) {
+          targetIndex = i;
+          break;
+        }
+        targetIndex = i;
+      }
+
+      if (targetIndex === currentIndex) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(currentIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      if (lastHapticIndexRef.current !== targetIndex) {
+        lastHapticIndexRef.current = targetIndex;
+        Haptics.impact({ style: ImpactStyle.Light }).catch(() => {});
+      }
+      return next;
+    });
+  }, []);
+
+  const startDrag = React.useCallback((id: string, event: React.PointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragState({ id, startY: event.clientY, currentY: event.clientY });
+    lastHapticIndexRef.current = orderIds.indexOf(id);
+    Haptics.impact({ style: ImpactStyle.Medium }).catch(() => {});
+
+    const handleMove = (moveEvent: PointerEvent) => {
+      moveEvent.preventDefault();
+      setDragState(current => current?.id === id ? { ...current, currentY: moveEvent.clientY } : current);
+      moveDraggedId(id, moveEvent.clientY);
+    };
+    const finishDrag = () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', finishDrag);
+      window.removeEventListener('pointercancel', finishDrag);
+      setDragState(current => current?.id === id ? null : current);
+      lastHapticIndexRef.current = null;
+      Haptics.impact({ style: ImpactStyle.Light }).catch(() => {});
+    };
+
+    window.addEventListener('pointermove', handleMove, { passive: false });
+    window.addEventListener('pointerup', finishDrag);
+    window.addEventListener('pointercancel', finishDrag);
+  }, [moveDraggedId, orderIds]);
 
   return (
     <AnimatePresence>
       {isOpen && (
         <>
-          {/* Backdrop */}
           <motion.div
             key="backdrop"
             initial={{ opacity: 0 }}
@@ -662,7 +745,6 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
             className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40"
             onClick={handleDone}
           />
-          {/* Sheet */}
           <motion.div
             key="sheet"
             initial={{ y: '100%' }}
@@ -672,12 +754,10 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
             className="fixed bottom-0 left-0 right-0 z-50 bg-card rounded-t-3xl border-t border-border flex flex-col"
             style={{ maxHeight: '82vh' }}
           >
-            {/* Handle bar */}
             <div className="flex justify-center pt-3 pb-1">
               <div className="w-10 h-1 rounded-full bg-muted-foreground/30" />
             </div>
 
-            {/* Header */}
             <div className="flex items-center justify-between px-5 py-3 border-b border-border">
               <div>
                 <h2 className="text-base font-bold">{t('task.reorderTasks')}</h2>
@@ -691,7 +771,6 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
               </button>
             </div>
 
-            {/* Draggable list */}
             <div className="overflow-y-auto flex-1 px-4 py-3">
               {order.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
@@ -699,13 +778,21 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
                   <p className="text-sm text-muted-foreground">{t('task.noPendingTasks')}</p>
                 </div>
               ) : (
-                <Reorder.Group axis="y" values={order} onReorder={setOrder} className="space-y-2">
-                  {order.map(task => <ReorderRow key={task.id} task={task} />)}
-                </Reorder.Group>
+                <div className="space-y-2">
+                  {order.map(task => (
+                    <ReorderRow
+                      key={task.id}
+                      task={task}
+                      isDragging={dragState?.id === task.id}
+                      dragOffsetY={dragState?.id === task.id ? dragState.currentY - dragState.startY : 0}
+                      setRowRef={(node) => setRowRef(task.id, node)}
+                      onHandlePointerDown={(event) => startDrag(task.id, event)}
+                    />
+                  ))}
+                </div>
               )}
             </div>
 
-            {/* Footer */}
             <div className="px-5 py-3 border-t border-border">
               <p className="text-xs text-center text-muted-foreground">
                 {order.length} {t('task.tasksInFlow')}
@@ -1102,11 +1189,13 @@ function AppShell({
   accentTheme,
   onAccentThemeChange,
   onLogout,
+  cloudSyncEnabled,
 }: {
   email: string;
   accentTheme: AccentTheme;
   onAccentThemeChange: (theme: AccentTheme) => void;
   onLogout: () => void;
+  cloudSyncEnabled: boolean;
 }) {
   const { t } = useTranslation();
   const [tasks, setTasks] = useState<Task[]>(() => loadTasks());
@@ -1142,14 +1231,25 @@ function AppShell({
   }, []);
 
   const updateSyncStatusFromTasks = React.useCallback((nextTasks: Task[]) => {
+    if (!cloudSyncEnabled) {
+      setSyncStatus('idle');
+      return;
+    }
     const hasDirty = nextTasks.some(task => task._dirty);
     setSyncStatus(hasDirty ? (navigator.onLine ? 'error' : 'offline') : 'idle');
-  }, []);
+  }, [cloudSyncEnabled]);
 
   // On mount: pull all tasks from cloud (cloud-primary), fall back to cache
   useEffect(() => {
     let cancelled = false;
     async function init() {
+      if (!cloudSyncEnabled) {
+        const cached = loadTasks();
+        setTasksAndCache(cached.length > 0 ? cached : []);
+        setTasksLoading(false);
+        setSyncStatus('idle');
+        return;
+      }
       let serverReachable = false;
       try {
         const remote = await apiGetTasks();
@@ -1216,7 +1316,7 @@ function AppShell({
     init();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [cloudSyncEnabled, setTasksAndCache]);
 
   // On native cold-start, restore data from Capacitor Preferences if localStorage was cleared
   useEffect(() => {
@@ -1245,6 +1345,10 @@ function AppShell({
   useEffect(() => { saveTasksToCache(tasks); }, [tasks]);
 
   const retryDirtyTasks = React.useCallback(async () => {
+    if (!cloudSyncEnabled) {
+      setSyncStatus('idle');
+      return;
+    }
     if (syncInFlightRef.current) return;
     const dirty = loadTasks().filter(t => t._dirty);
     if (dirty.length === 0) {
@@ -1265,12 +1369,16 @@ function AppShell({
     } finally {
       syncInFlightRef.current = false;
     }
-  }, [setTasksAndCache]);
+  }, [cloudSyncEnabled, setTasksAndCache]);
 
   useEffect(() => {
     retryDirtyTasks();
     const handleOnline = () => retryDirtyTasks();
     const handleOffline = () => {
+      if (!cloudSyncEnabled) {
+        setSyncStatus('idle');
+        return;
+      }
       if (loadTasks().some(t => t._dirty)) setSyncStatus('offline');
       else setSyncStatus('idle');
     };
@@ -1283,10 +1391,10 @@ function AppShell({
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('focus', handleFocus);
     };
-  }, [retryDirtyTasks]);
+  }, [cloudSyncEnabled, retryDirtyTasks]);
 
-  const activeTasks = tasks.filter(t => !t.deletedAt);
-  const pendingTasks = activeTasks.filter(t => t.status === 'todo');
+  const activeTasks = useMemo(() => tasks.filter(t => !t.deletedAt), [tasks]);
+  const pendingTasks = useMemo(() => activeTasks.filter(t => t.status === 'todo'), [activeTasks]);
   const flowDetailTask = flowDetailTaskId ? activeTasks.find(t => t.id === flowDetailTaskId) ?? null : null;
 
   const handleProgressChange = (id: string, newProgress: number) => {
@@ -1295,7 +1403,7 @@ function AppShell({
       const updated = prev.map(t => t.id === id ? { ...t, progress: newProgress } : t);
       return markDirty(updated, id);
     });
-    if (id.startsWith('local-')) {
+    if (!cloudSyncEnabled || id.startsWith('local-')) {
       window.setTimeout(() => retryDirtyTasks(), 0);
       return;
     }
@@ -1350,6 +1458,13 @@ function AppShell({
         window.setTimeout(() => {
           setExitAction(current => current?.taskId === id && current.action === action ? null : current);
         }, 520);
+        if (!cloudSyncEnabled || id.startsWith('local-')) {
+          window.setTimeout(() => {
+            setExitAction(current => current?.taskId === id && current.action === action ? null : current);
+            unlock();
+          }, 520);
+          return;
+        }
         const syncOrder = order.length > 0 ? apiReorderTasks(order) : Promise.resolve();
         syncOrder
           .then(() => {
@@ -1388,7 +1503,7 @@ function AppShell({
           const updated = prev.map(t => t.id !== id ? t : { ...t, status: newStatus as TaskStatus });
           return markDirty(nextTask ? [...updated, nextTask] : updated, id);
         });
-        if (id.startsWith('local-')) {
+        if (!cloudSyncEnabled || id.startsWith('local-')) {
           window.setTimeout(() => { retryDirtyTasks().finally(unlock); }, 0);
         } else {
           apiUpdateTask(id, { status: newStatus })
@@ -1430,9 +1545,11 @@ function AppShell({
           }
 
           // Push to server (server stores what client computed)
-          apiUpdateUserStats({ todayCount: newCount, streak: newStreak }).catch(() =>
-            toast.error('Stats sync failed — retrying')
-          );
+          if (cloudSyncEnabled) {
+            apiUpdateUserStats({ todayCount: newCount, streak: newStreak }).catch(() =>
+              toast.error('Stats sync failed — retrying')
+            );
+          }
         }
         window.setTimeout(() => {
           setExitAction(current => current?.taskId === id && current.action === action ? null : current);
@@ -1448,6 +1565,7 @@ function AppShell({
       const remoteIds = new Set(newPendingOrder.filter(t => !t.id.startsWith('local-')).map(t => t.id));
       return [...newPendingOrder, ...nonPending].map(t => remoteIds.has(t.id) ? { ...t, _dirty: true, _syncState: 'update' } : t);
     });
+    if (!cloudSyncEnabled) return;
     const order = newPendingOrder
       .map((t, i) => ({ id: t.id, sortOrder: i }))
       .filter(t => !t.id.startsWith('local-'));
@@ -1468,7 +1586,7 @@ function AppShell({
   };
 
   const persistTaskUpdate = (id: string, data: Partial<Task>) => {
-    if (id.startsWith('local-')) {
+    if (!cloudSyncEnabled || id.startsWith('local-')) {
       window.setTimeout(() => retryDirtyTasks(), 0);
       return;
     }
@@ -1592,7 +1710,7 @@ function AppShell({
       return [...prev.slice(0, i), optimisticTask, ...prev.slice(i)];
     });
     closeTaskForm();
-    window.setTimeout(() => retryDirtyTasks(), 0);
+    if (cloudSyncEnabled) window.setTimeout(() => retryDirtyTasks(), 0);
   };
   
   return (
@@ -1995,6 +2113,7 @@ export default function App() {
   // 'loading' = checking refresh cookie, 'auth' = not logged in, 'app' = logged in
   const [appState, setAppState] = useState<'loading' | 'auth' | 'app'>('loading');
   const [userEmail, setUserEmail] = useState(() => loadSession()?.email || '');
+  const [cloudSyncEnabled, setCloudSyncEnabled] = useState(false);
   const [accentTheme, setAccentTheme] = useState<AccentTheme>('tcx111400');
   const [accentThemeReady, setAccentThemeReady] = useState(false);
 
@@ -2063,12 +2182,14 @@ export default function App() {
       const session = loadSession();
       if (session && !session.signedOut && !isSessionExpired(session)) {
         setUserEmail(session.email);
+        setCloudSyncEnabled(false);
         setAppState('app');
         return;
       }
       clearLocalAuthTokens();
       clearSession();
       setUserEmail('');
+      setCloudSyncEnabled(false);
       setAppState('auth');
     });
     return () => setAuthFailureHandler(null);
@@ -2090,13 +2211,9 @@ export default function App() {
       // If user explicitly logged out or session is invalid, skip refresh and go to auth
       if (!canUseSession && session?.signedOut) {
         clearLocalAuthTokens();
+        setCloudSyncEnabled(false);
         setAppState('auth');
         return;
-      }
-
-      if (canUseSession) {
-        setUserEmail(emailForRestore);
-        setAppState('app');
       }
 
       const refreshResult = await apiRefreshDetailed();
@@ -2106,21 +2223,25 @@ export default function App() {
         const restoredEmail = refreshedUser?.email || emailForRestore;
         if (restoredEmail) saveSession(restoredEmail);
         setUserEmail(restoredEmail);
+        setCloudSyncEnabled(true);
         setAppState('app');
         return;
       }
       if (refreshResult === 'network' && canUseSession) {
         setUserEmail(emailForRestore);
+        setCloudSyncEnabled(false);
         setAppState('app');
         return;
       }
       if (refreshResult === 'unauthorized' && canUseSession) {
         setUserEmail(emailForRestore);
+        setCloudSyncEnabled(false);
         setAppState('app');
         return;
       }
       clearLocalAuthTokens();
       clearSession();
+      setCloudSyncEnabled(false);
       setAppState('auth');
     }
     restoreSession();
@@ -2133,20 +2254,23 @@ export default function App() {
     syncAppViewportHeight(true);
     setUserEmail(email);
     saveSession(email);
+    setCloudSyncEnabled(true);
     setAppState('app');
   }
 
   async function handleLogout() {
     // Flush dirty tasks to cloud before logout
     try {
-      const raw = storageGet('taskflow_tasks');
-      if (raw) {
-        const tasks = JSON.parse(raw) as Task[];
-        await flushDirtyTasks(tasks);
+      if (cloudSyncEnabled) {
+        const raw = storageGet('taskflow_tasks');
+        if (raw) {
+          const tasks = JSON.parse(raw) as Task[];
+          await flushDirtyTasks(tasks);
+        }
+        // Push current stats
+        const stats = loadStatsFromCache();
+        try { await apiUpdateUserStats({ todayCount: stats.completedToday }); } catch { /* */ }
       }
-      // Push current stats
-      const stats = loadStatsFromCache();
-      try { await apiUpdateUserStats({ todayCount: stats.completedToday }); } catch { /* */ }
     } catch { /* non-critical */ }
 
     try { await apiLogout(); } catch { /* still clean up locally */ }
@@ -2157,6 +2281,7 @@ export default function App() {
     storageRemove(SYNC_META_KEY);
     clearSession();
     clearLocalAuthTokens();
+    setCloudSyncEnabled(false);
     setAppState('auth');
     setUserEmail('');
   }
@@ -2179,6 +2304,7 @@ export default function App() {
       accentTheme={accentTheme}
       onAccentThemeChange={setAccentTheme}
       onLogout={handleLogout}
+      cloudSyncEnabled={cloudSyncEnabled}
     />
   );
 }
