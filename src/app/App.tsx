@@ -21,6 +21,7 @@ type Priority = 'P1' | 'P2' | 'P3';
 type TaskStatus = 'todo' | 'doing' | 'done' | 'snoozed' | 'skipped';
 type ViewMode = 'flow' | 'calendar';
 type ExitAction = 'complete' | 'skip' | 'snooze';
+type TaskActionState = { taskId: string; action: ExitAction };
 
 interface Task {
   id: string;
@@ -326,6 +327,48 @@ function localTaskId(): string {
   return `local-${typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2)}`;
 }
 
+function taskExitMotion(action: ExitAction | null) {
+  if (action === 'complete') {
+    return {
+      opacity: 0,
+      y: -190,
+      x: 18,
+      rotate: 7,
+      scale: 0.88,
+      filter: 'blur(2px)',
+      transition: { duration: 0.42, ease: [0.22, 1, 0.36, 1] },
+    };
+  }
+  if (action === 'skip') {
+    return {
+      opacity: 0,
+      y: 170,
+      x: -140,
+      rotate: -13,
+      scale: 0.86,
+      filter: 'blur(1px)',
+      transition: { duration: 0.46, ease: [0.22, 1, 0.36, 1] },
+    };
+  }
+  if (action === 'snooze') {
+    return {
+      opacity: 0,
+      y: 85,
+      x: 150,
+      rotate: 11,
+      scale: 0.9,
+      filter: 'blur(1px)',
+      transition: { duration: 0.44, ease: [0.22, 1, 0.36, 1] },
+    };
+  }
+  return {
+    opacity: 0,
+    y: 60,
+    scale: 0.92,
+    transition: { duration: 0.28, ease: 'easeOut' },
+  };
+}
+
 // --- Add Task Form state ---
 interface AddTaskState {
   title: string;
@@ -396,28 +439,35 @@ interface TaskCardProps {
   task: Task;
   onAction: (id: string, action: ExitAction) => void;
   onProgressChange: (id: string, progress: number) => void;
-  exitAction: ExitAction | null;
+  pendingAction?: ExitAction | null;
   actionDisabled?: boolean;
   onOpen?: () => void;
 }
 
 
-function TaskCard({ task, onAction, onProgressChange, actionDisabled = false, onOpen }: TaskCardProps) {
+function TaskCard({ task, onAction, onProgressChange, pendingAction = null, actionDisabled = false, onOpen }: TaskCardProps) {
   const { t } = useTranslation();
   const [pressedAction, setPressedAction] = React.useState<ExitAction | null>(null);
+  const visualAction = pendingAction ?? pressedAction;
 
   const triggerAction = (e: React.MouseEvent<HTMLButtonElement>, action: ExitAction) => {
     e.preventDefault();
     e.stopPropagation();
     if (actionDisabled) return;
     setPressedAction(action);
-    window.setTimeout(() => setPressedAction(current => current === action ? null : current), 260);
     onAction(task.id, action);
   };
 
-  const actionButtonClass = (action: ExitAction, baseClass: string) => cn(
-    baseClass,
-    pressedAction === action && 'scale-95 ring-2 ring-ring ring-offset-2 ring-offset-card'
+  React.useEffect(() => {
+    if (!pressedAction) return;
+    const timer = window.setTimeout(() => setPressedAction(null), 260);
+    return () => window.clearTimeout(timer);
+  }, [pressedAction]);
+
+  const actionButtonClass = (action: ExitAction, base: string) => cn(
+    'relative overflow-hidden flex items-center justify-center gap-2 rounded-xl font-semibold transition-[background-color,opacity,transform,box-shadow] duration-150 touch-manipulation select-none',
+    base,
+    visualAction === action && 'translate-y-px scale-[0.98] shadow-inner'
   );
 
   return (
@@ -444,16 +494,19 @@ function TaskCard({ task, onAction, onProgressChange, actionDisabled = false, on
             )}
           </div>
           <div className="relative z-20 grid grid-cols-2 gap-3">
-            <button type="button" disabled={actionDisabled} onClick={(e) => triggerAction(e, 'snooze')} className={actionButtonClass('snooze', 'flex items-center justify-center gap-2 bg-secondary/80 backdrop-blur-sm text-secondary-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95 disabled:opacity-60 disabled:scale-100 touch-manipulation select-none')} style={{ WebkitTapHighlightColor: 'transparent' }}>
-              <AlarmClock className="w-5 h-5" />{t('task.snooze')}
-            </button>
-            <button type="button" disabled={actionDisabled} onClick={(e) => triggerAction(e, 'skip')} className={actionButtonClass('skip', 'flex items-center justify-center gap-2 bg-muted/80 backdrop-blur-sm text-muted-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95 hover:bg-muted disabled:opacity-60 disabled:scale-100 touch-manipulation select-none')} style={{ WebkitTapHighlightColor: 'transparent' }}>
-              <SkipForward className="w-5 h-5" />{t('task.skip')}
-            </button>
+            <motion.button type="button" aria-disabled={actionDisabled} onClick={(e) => triggerAction(e, 'snooze')} className={actionButtonClass('snooze', 'bg-secondary/80 backdrop-blur-sm text-secondary-foreground py-3.5 hover:bg-secondary shadow-sm shadow-black/5')} style={{ WebkitTapHighlightColor: 'transparent' }}>
+              <span className={cn('absolute inset-0 bg-foreground/5 opacity-0 transition-opacity duration-150', visualAction === 'snooze' && 'opacity-100')} />
+              <AlarmClock className="relative w-5 h-5" /><span className="relative">{t('task.snooze')}</span>
+            </motion.button>
+            <motion.button type="button" aria-disabled={actionDisabled} onClick={(e) => triggerAction(e, 'skip')} className={actionButtonClass('skip', 'bg-muted/80 backdrop-blur-sm text-muted-foreground py-3.5 hover:bg-muted shadow-sm shadow-black/5')} style={{ WebkitTapHighlightColor: 'transparent' }}>
+              <span className={cn('absolute inset-0 bg-foreground/5 opacity-0 transition-opacity duration-150', visualAction === 'skip' && 'opacity-100')} />
+              <SkipForward className="relative w-5 h-5" /><span className="relative">{t('task.skip')}</span>
+            </motion.button>
           </div>
-          <button type="button" disabled={actionDisabled} onClick={(e) => triggerAction(e, 'complete')} className={actionButtonClass('complete', 'relative z-20 w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground py-4 rounded-xl font-bold text-lg shadow-lg shadow-primary/25 transition-transform active:scale-95 hover:bg-primary/90 disabled:opacity-60 disabled:scale-100 touch-manipulation select-none')} style={{ WebkitTapHighlightColor: 'transparent' }}>
-            <Check className="w-6 h-6" />{t('task.complete')}
-          </button>
+          <motion.button type="button" aria-disabled={actionDisabled} onClick={(e) => triggerAction(e, 'complete')} className={actionButtonClass('complete', 'relative z-20 w-full bg-primary text-primary-foreground py-4 font-bold text-lg shadow-lg shadow-primary/25 hover:bg-primary/90')} style={{ WebkitTapHighlightColor: 'transparent' }}>
+            <span className={cn('absolute inset-0 bg-white/15 opacity-0 transition-opacity duration-150', visualAction === 'complete' && 'opacity-100')} />
+            <Check className="relative w-6 h-6" /><span className="relative">{t('task.complete')}</span>
+          </motion.button>
         </div>
       </div>
     </div>
@@ -479,7 +532,7 @@ function TaskDetailModal({ task, onClose, onAction, onProgressChange, actionDisa
               task={task}
               onAction={(id, action) => { onAction(id, action); onClose(); }}
               onProgressChange={onProgressChange}
-              exitAction={null}
+              pendingAction={actionDisabled ? null : undefined}
               actionDisabled={actionDisabled}
             />
           )}
@@ -673,7 +726,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
   const [query, setQuery] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [priorityFilter, setPriorityFilter] = useState<'all' | Priority>('all');
-  const [statusFilter, setStatusFilter] = useState<'active' | 'done' | 'skipped' | 'all'>('active');
+  const [statusFilter, setStatusFilter] = useState<'active' | 'done' | 'skipped' | 'all'>('all');
 
   const translatedWeekdays = t('calendar.weekdays', { returnObjects: true }) as unknown as string[];
   const translatedMonths = t('calendar.months', { returnObjects: true }) as unknown as string[];
@@ -693,9 +746,6 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
       || (statusFilter === 'active' ? task.status === 'todo' : task.status === statusFilter);
     return matchesQuery && matchesPriority && matchesStatus;
   });
-
-  const pendingByDate: Record<string, Task[]> = {};
-  visibleTasks.forEach(t => { if (t.dueDate && t.status === 'todo') (pendingByDate[t.dueDate] ??= []).push(t); });
 
   const allByDate: Record<string, Task[]> = {};
   visibleTasks.forEach(t => { if (t.dueDate) (allByDate[t.dueDate] ??= []).push(t); });
@@ -728,7 +778,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
             >
               <Search className="w-4 h-4" />
               <span className="flex-1 text-left">{t('task.searchPlaceholder')}</span>
-              {(query || priorityFilter !== 'all' || statusFilter !== 'active') && <span className="h-2 w-2 rounded-full bg-primary" />}
+              {(query || priorityFilter !== 'all' || statusFilter !== 'all') && <span className="h-2 w-2 rounded-full bg-primary" />}
               <ChevronRight className="w-4 h-4" />
             </button>
           ) : (
@@ -790,7 +840,9 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
             {cells.map((day, idx) => {
               if (day === null) return <div key={`e-${idx}`} className="h-14 border-b border-r border-border/40 last:border-r-0" />;
               const dateStr = fmtDate(year, month, day);
-              const dots = [...new Set((pendingByDate[dateStr] || []).map(t => t.priority))].sort() as Priority[];
+              const dateTasks = allByDate[dateStr] || [];
+              const dots = [...new Set(dateTasks.map(t => t.priority))].sort() as Priority[];
+              const hasDoneTasks = dateTasks.some(t => t.status === 'done');
               const isToday = dateStr === todayFmt;
               const isSelected = dateStr === selectedDate;
               return (
@@ -803,6 +855,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
                   {dots.length > 0 && (
                     <div className="flex items-center gap-0.5 mt-0.5">
                       {dots.map(p => <span key={p} className={`w-1.5 h-1.5 rounded-full ${DOT_COLOR[p]}`} />)}
+                      {hasDoneTasks && <CheckCircle2 className="w-2.5 h-2.5 text-emerald-500 ml-0.5" />}
                     </div>
                   )}
                 </button>
@@ -815,7 +868,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
           <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-rose-500" />{t('calendar.high')}</span>
           <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-amber-400" />{t('calendar.medium')}</span>
           <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500" />{t('calendar.low')}</span>
-          <span className="flex items-center gap-1.5 opacity-50"><span className="w-2 h-2 rounded-full bg-muted-foreground" />{t('calendar.pendingOnly')}</span>
+          <span className="flex items-center gap-1.5 opacity-70"><CheckCircle2 className="w-3 h-3 text-emerald-500" />{t('view.completed')}</span>
         </div>
 
         <AnimatePresence mode="wait">
@@ -1050,7 +1103,7 @@ function AppShell({
   const hasInteractedRef = React.useRef(false);
   const actionLocksRef = React.useRef(new Set<string>());
   const [tasksLoading, setTasksLoading] = useState(true);
-  const [exitAction, setExitAction] = useState<ExitAction | null>(null);
+  const [exitAction, setExitAction] = useState<TaskActionState | null>(null);
   const [actingTaskIds, setActingTaskIds] = useState<Set<string>>(() => new Set());
   const [viewMode, setViewMode] = useState<ViewMode>('flow');
   const greeting = useMemo(() => getGreeting(t), [t]);
@@ -1210,6 +1263,8 @@ function AppShell({
   const handleAction = (id: string, action: ExitAction) => {
     if (actionLocksRef.current.has(id)) return;
     actionLocksRef.current.add(id);
+    Haptics.impact({ style: ImpactStyle.Medium }).catch(() => {});
+    setExitAction({ taskId: id, action });
     setActingTaskIds(prev => new Set(prev).add(id));
     const unlock = () => {
       actionLocksRef.current.delete(id);
@@ -1222,7 +1277,6 @@ function AppShell({
 
     hasInteractedRef.current = true;
     if (action === 'snooze') {
-      setExitAction('snooze');
       setTimeout(() => {
         let order: Array<{ id: string; sortOrder: number }> = [];
         setTasks(prev => {
@@ -1238,7 +1292,9 @@ function AppShell({
           });
           return normalized.map(t => order.some(o => o.id === t.id) ? { ...t, _dirty: true } : t);
         });
-        setExitAction(null);
+        window.setTimeout(() => {
+          setExitAction(current => current?.taskId === id && current.action === action ? null : current);
+        }, 520);
         apiReorderTasks(order)
           .then(() => {
             const ids = new Set(order.map(o => o.id));
@@ -1246,9 +1302,8 @@ function AppShell({
           })
           .catch(() => toast.error(t('sync.error')))
           .finally(unlock);
-      }, 320);
+      }, 170);
     } else {
-      setExitAction(action);
       const newStatus = action === 'complete' ? 'done' : 'skipped';
       setTimeout(() => {
         const task = tasks.find(t => t.id === id);
@@ -1286,9 +1341,6 @@ function AppShell({
           }).catch(() => toast.error(t('sync.error')));
         }
         if (action === 'complete') {
-          // Haptic feedback (silently ignored in browser)
-          Haptics.impact({ style: ImpactStyle.Medium }).catch(() => {});
-
           const newCount = completedTodayRef.current + 1;
           setCompletedToday(newCount);
 
@@ -1318,7 +1370,10 @@ function AppShell({
             toast.error('Stats sync failed — retrying')
           );
         }
-      }, 50);
+        window.setTimeout(() => {
+          setExitAction(current => current?.taskId === id && current.action === action ? null : current);
+        }, 520);
+      }, 170);
     }
   };
 
@@ -1584,14 +1639,7 @@ function AppShell({
                             scale: 1 - index * 0.04,
                             zIndex: 10 - index,
                           }}
-                          exit={(custom) => ({
-                            opacity: 0,
-                            y: custom === 'complete' ? -150 : custom === 'skip' ? 150 : 50,
-                            x: custom === 'skip' ? -100 : custom === 'snooze' ? 100 : 0,
-                            rotate: custom === 'complete' ? 5 : custom === 'skip' ? -8 : 8,
-                            scale: 0.9,
-                            transition: { duration: 0.3, ease: 'easeOut' }
-                          })}
+                          exit={(custom: TaskActionState | null) => taskExitMotion(custom?.taskId === task.id ? custom.action : null)}
                           transition={{ type: 'spring', stiffness: 300, damping: 25, mass: 0.8 }}
                           className={`absolute inset-0 w-full h-full ${!isTop ? 'pointer-events-none' : ''}`}
                         >
@@ -1599,7 +1647,7 @@ function AppShell({
                             task={task}
                             onAction={handleAction}
                             onProgressChange={handleProgressChange}
-                            exitAction={exitAction}
+                            pendingAction={exitAction?.taskId === task.id ? exitAction.action : null}
                             actionDisabled={actingTaskIds.has(task.id)}
                             onOpen={isTop ? () => setFlowDetailTaskId(task.id) : undefined}
                           />
@@ -1937,6 +1985,12 @@ export default function App() {
   // Register a global auth-failure callback so apiFetch can trigger logout
   useEffect(() => {
     setAuthFailureHandler(() => {
+      const session = loadSession();
+      if (session && !session.signedOut && !isSessionExpired(session)) {
+        setUserEmail(session.email);
+        setAppState('app');
+        return;
+      }
       clearLocalAuthTokens();
       clearSession();
       setUserEmail('');
@@ -1965,6 +2019,11 @@ export default function App() {
         return;
       }
 
+      if (canUseSession) {
+        setUserEmail(emailForRestore);
+        setAppState('app');
+      }
+
       const refreshResult = await apiRefreshDetailed();
       if (cancelled) return;
       if (refreshResult === 'ok') {
@@ -1976,6 +2035,11 @@ export default function App() {
         return;
       }
       if (refreshResult === 'network' && canUseSession) {
+        setUserEmail(emailForRestore);
+        setAppState('app');
+        return;
+      }
+      if (refreshResult === 'unauthorized' && canUseSession) {
         setUserEmail(emailForRestore);
         setAppState('app');
         return;
