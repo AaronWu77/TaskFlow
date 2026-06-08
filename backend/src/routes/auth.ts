@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction, RequestHandler } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { PrismaClient } from '@prisma/client';
 
 const router = Router();
@@ -21,6 +22,38 @@ function signRefresh(userId: string) {
   return jwt.sign({ userId }, process.env.JWT_REFRESH_SECRET!, {
     expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   } as jwt.SignOptions);
+}
+
+function refreshTokenHash(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function refreshExpiry(): Date {
+  const raw = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
+  const match = /^(\d+)([smhd])$/.exec(raw);
+  const amount = match ? Number(match[1]) : 7;
+  const unit = match?.[2] ?? 'd';
+  const factor = unit === 's' ? 1000 : unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : 86_400_000;
+  return new Date(Date.now() + amount * factor);
+}
+
+async function createRefreshSession(userId: string): Promise<string> {
+  const refreshToken = signRefresh(userId);
+  await prisma.refreshSession.create({
+    data: {
+      userId,
+      tokenHash: refreshTokenHash(refreshToken),
+      expiresAt: refreshExpiry(),
+    },
+  });
+  return refreshToken;
+}
+
+function getRefreshToken(req: Request): string | null {
+  const bearer = req.headers.authorization?.startsWith('Bearer ')
+    ? req.headers.authorization.slice(7)
+    : null;
+  return req.cookies?.[REFRESH_COOKIE] || bearer;
 }
 
 const REFRESH_COOKIE = 'taskflow_refresh';
@@ -55,7 +88,7 @@ router.post('/register', asyncHandler(async (req, res) => {
   const hashed = await bcrypt.hash(password, 12);
   const user = await prisma.user.create({ data: { email, password: hashed } });
   const accessToken = signAccess(user.id);
-  const refreshToken = signRefresh(user.id);
+  const refreshToken = await createRefreshSession(user.id);
   res.cookie(REFRESH_COOKIE, refreshToken, COOKIE_OPTS);
   res.status(201).json({ accessToken, refreshToken, user: { id: user.id, email: user.email } });
 }));
@@ -78,33 +111,54 @@ router.post('/login', asyncHandler(async (req, res) => {
     return;
   }
   const accessToken = signAccess(user.id);
-  const refreshToken = signRefresh(user.id);
+  const refreshToken = await createRefreshSession(user.id);
   res.cookie(REFRESH_COOKIE, refreshToken, COOKIE_OPTS);
   res.json({ accessToken, refreshToken, user: { id: user.id, email: user.email } });
 }));
 
 // POST /auth/refresh
-router.post('/refresh', (req: Request, res: Response): void => {
-  const token = req.cookies?.[REFRESH_COOKIE] || req.headers.authorization?.replace('Bearer ', '');
+router.post('/refresh', asyncHandler(async (req, res) => {
+  const token = getRefreshToken(req);
   if (!token) {
     res.status(401).json({ error: 'No refresh token' });
     return;
   }
   try {
     const payload = jwt.verify(token, process.env.JWT_REFRESH_SECRET!) as { userId: string };
+    const session = await prisma.refreshSession.findUnique({
+      where: { tokenHash: refreshTokenHash(token) },
+      include: { user: true },
+    });
+    if (!session || session.userId !== payload.userId || session.revokedAt || session.expiresAt <= new Date()) {
+      res.status(401).json({ error: 'Invalid or expired refresh token' });
+      return;
+    }
+
+    await prisma.refreshSession.update({
+      where: { id: session.id },
+      data: { revokedAt: new Date(), rotatedAt: new Date() },
+    });
+
     const accessToken = signAccess(payload.userId);
-    const refreshToken = signRefresh(payload.userId);
+    const refreshToken = await createRefreshSession(payload.userId);
     res.cookie(REFRESH_COOKIE, refreshToken, COOKIE_OPTS);
-    res.json({ accessToken, refreshToken });
+    res.json({ accessToken, refreshToken, user: { id: session.user.id, email: session.user.email } });
   } catch {
     res.status(401).json({ error: 'Invalid or expired refresh token' });
   }
-});
+}));
 
 // POST /auth/logout
-router.post('/logout', (_req: Request, res: Response): void => {
+router.post('/logout', asyncHandler(async (req, res) => {
+  const token = getRefreshToken(req);
+  if (token) {
+    await prisma.refreshSession.updateMany({
+      where: { tokenHash: refreshTokenHash(token), revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+  }
   res.clearCookie(REFRESH_COOKIE, CLEAR_COOKIE_OPTS);
   res.json({ ok: true });
-});
+}));
 
 export default router;

@@ -12,6 +12,7 @@ let accessToken: string | null = null;
 const REFRESH_TOKEN_KEY = 'taskflow_refresh_token';
 export type RefreshResult = 'ok' | 'unauthorized' | 'network';
 const IS_NATIVE_PLATFORM = Capacitor.isNativePlatform();
+let refreshedUser: AuthUser | null = null;
 
 // Callback invoked when both the access token and refresh cookie are expired.
 // The App component registers this to transition back to the login screen.
@@ -31,13 +32,7 @@ async function getStoredRefreshToken(): Promise<string | null> {
       return null;
     }
   }
-  // Web: localStorage fallback (httpOnly cookie is the primary mechanism,
-  // but localStorage provides persistence across browser restarts)
-  try {
-    return localStorage.getItem(REFRESH_TOKEN_KEY);
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 function setStoredRefreshToken(token: string | null): void {
@@ -45,11 +40,7 @@ function setStoredRefreshToken(token: string | null): void {
     if (token) Preferences.set({ key: REFRESH_TOKEN_KEY, value: token }).catch(() => { /**/ });
     else Preferences.remove({ key: REFRESH_TOKEN_KEY }).catch(() => { /**/ });
   } else {
-    // Web: persist in localStorage as fallback for httpOnly cookie
-    try {
-      if (token) localStorage.setItem(REFRESH_TOKEN_KEY, token);
-      else localStorage.removeItem(REFRESH_TOKEN_KEY);
-    } catch { /**/ }
+    try { localStorage.removeItem(REFRESH_TOKEN_KEY); } catch { /**/ }
   }
 }
 
@@ -67,13 +58,19 @@ export async function apiRefreshDetailed(): Promise<RefreshResult> {
       headers,
     });
     if (!res.ok) return res.status === 401 ? 'unauthorized' : 'network';
-    const data = await res.json() as { accessToken: string; refreshToken?: string };
+    const data = await res.json() as { accessToken: string; refreshToken?: string; user?: AuthUser };
     setAccessToken(data.accessToken);
-    if (data.refreshToken) setStoredRefreshToken(data.refreshToken);
+    refreshedUser = data.user ?? null;
+    if (IS_NATIVE_PLATFORM && data.refreshToken) setStoredRefreshToken(data.refreshToken);
+    if (!IS_NATIVE_PLATFORM) setStoredRefreshToken(null);
     return 'ok';
   } catch {
     return 'network';
   }
+}
+
+export function getRefreshedUser(): AuthUser | null {
+  return refreshedUser;
 }
 
 export async function apiRefresh(): Promise<boolean> {
@@ -96,12 +93,11 @@ export async function apiFetch(path: string, options: RequestInit = {}): Promise
 
   // Auto-refresh on 401 and retry once
   if (res.status === 401) {
-    const refreshed = await apiRefresh();
-    if (refreshed && accessToken) {
+    const refreshResult = await apiRefreshDetailed();
+    if (refreshResult === 'ok' && accessToken) {
       headers['Authorization'] = `Bearer ${accessToken}`;
       res = await fetch(`${BASE_URL}${path}`, { ...options, headers, credentials: 'include' });
-    } else {
-      // Both access token and refresh cookie are expired — force logout
+    } else if (refreshResult === 'unauthorized') {
       onAuthFailure?.();
     }
   }
@@ -127,7 +123,8 @@ export async function apiLogin(email: string, password: string): Promise<{ user:
   }
   const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken?: string };
   setAccessToken(data.accessToken);
-  setStoredRefreshToken(data.refreshToken ?? null);
+  if (IS_NATIVE_PLATFORM) setStoredRefreshToken(data.refreshToken ?? null);
+  else setStoredRefreshToken(null);
   return data;
 }
 
@@ -144,7 +141,8 @@ export async function apiRegister(email: string, password: string): Promise<{ us
   }
   const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken?: string };
   setAccessToken(data.accessToken);
-  setStoredRefreshToken(data.refreshToken ?? null);
+  if (IS_NATIVE_PLATFORM) setStoredRefreshToken(data.refreshToken ?? null);
+  else setStoredRefreshToken(null);
   return data;
 }
 

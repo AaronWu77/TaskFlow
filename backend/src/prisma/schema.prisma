@@ -19,6 +19,7 @@ model User {
   updatedAt DateTime @updatedAt
   tasks     Task[]
   stats     UserStats?
+  refreshSessions RefreshSession[]
 }
 
 model Task {
@@ -55,4 +56,18 @@ model UserStats {
   user           User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+model RefreshSession {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  rotatedAt DateTime?
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }

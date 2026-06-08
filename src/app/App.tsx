@@ -11,7 +11,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
 import { storageGet, storageSet, storageRemove, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed } from './api';
+import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser } from './api';
 import { toast, Toaster } from 'sonner';
 import { cn } from './components/ui/utils';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
@@ -70,16 +70,6 @@ function loadSession(): SessionMeta | null {
           lastAuthenticatedAt: parsed.lastAuthenticatedAt,
         };
       }
-    }
-
-    const legacyLoggedIn = storageGet('taskflow_logged_in');
-    const legacyEmail = storageGet('taskflow_user_email');
-    if (legacyLoggedIn && legacyEmail) {
-      return {
-        email: legacyEmail,
-        signedOut: false,
-        lastAuthenticatedAt: new Date().toISOString(),
-      };
     }
   } catch { /**/ }
   return null;
@@ -326,6 +316,10 @@ function nextRepeatDate(dueDate: string | null | undefined, rule: Task['repeatRu
   return fmtDate(next.getFullYear(), next.getMonth(), next.getDate());
 }
 
+function localTaskId(): string {
+  return `local-${typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2)}`;
+}
+
 // --- Add Task Form state ---
 interface AddTaskState {
   title: string;
@@ -397,10 +391,12 @@ interface TaskCardProps {
   onAction: (id: string, action: ExitAction) => void;
   onProgressChange: (id: string, progress: number) => void;
   exitAction: ExitAction | null;
+  actionDisabled?: boolean;
+  onOpen?: () => void;
 }
 
 
-function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
+function TaskCard({ task, onAction, onProgressChange, actionDisabled = false, onOpen }: TaskCardProps) {
   const { t } = useTranslation();
   const [localProgress, setLocalProgress] = React.useState(task.progress);
   const [isSlidingProgress, setIsSlidingProgress] = React.useState(false);
@@ -413,20 +409,13 @@ function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
 
   const releaseSlidingGuard = () => {
     setIsSlidingProgress(false);
-    // Guard against ghost click after touch/pointer release on mobile.
     blockActionUntilRef.current = Date.now() + 220;
   };
 
-  const canTriggerAction = () => !isSlidingProgress && Date.now() > blockActionUntilRef.current;
-
-  const handleAction = (e: React.MouseEvent<HTMLButtonElement>, action: ExitAction) => {
-    e.stopPropagation();
-    if (!canTriggerAction()) return;
-    onAction(task.id, action);
-  };
+  const canTriggerAction = () => !isSlidingProgress && !actionDisabled && Date.now() > blockActionUntilRef.current;
 
   return (
-    <div className="relative w-full h-full bg-card rounded-3xl border border-border flex flex-col overflow-hidden">
+    <div onClick={onOpen} className="relative w-full h-full bg-card rounded-3xl border border-border flex flex-col overflow-hidden">
       <div
         className="pointer-events-none absolute bottom-0 left-0 w-full bg-primary/10 transition-all duration-500 ease-out z-0"
         style={{ height: `${localProgress}%` }}
@@ -473,11 +462,7 @@ function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
                   type="range" min="0" max="100" step="5"
                   value={localProgress}
                   onInput={(e) => setLocalProgress(parseInt((e.target as HTMLInputElement).value))}
-                  onChange={(e) => {
-                    const next = parseInt((e.target as HTMLInputElement).value);
-                    setLocalProgress(next);
-                    if (!isSlidingProgress) commitProgress(next);
-                  }}
+                  onChange={(e) => setLocalProgress(parseInt((e.target as HTMLInputElement).value))}
                   onPointerDown={(e) => {
                     e.stopPropagation();
                     setIsSlidingProgress(true);
@@ -487,12 +472,10 @@ function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
                     releaseSlidingGuard();
                     commitProgress(parseInt((e.target as HTMLInputElement).value));
                   }}
-                  onPointerCancel={() => releaseSlidingGuard()}
+                  onPointerCancel={releaseSlidingGuard}
                   onBlur={(e) => {
-                    if (!isSlidingProgress) return;
-                    releaseSlidingGuard();
-                    const next = parseInt((e.target as HTMLInputElement).value);
-                    commitProgress(next);
+                    if (isSlidingProgress) releaseSlidingGuard();
+                    commitProgress(parseInt((e.target as HTMLInputElement).value));
                   }}
                   className="w-full h-6 bg-transparent appearance-none cursor-pointer outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
                   style={{ accentColor: 'var(--primary)', WebkitTapHighlightColor: 'transparent' }}
@@ -502,29 +485,14 @@ function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
             </div>
           </div>
           <div className="relative z-20 grid grid-cols-2 gap-3">
-            <button
-              type="button"
-              onClick={(e) => handleAction(e, 'snooze')}
-              className="flex items-center justify-center gap-2 py-3.5 rounded-xl font-semibold transition-transform active:scale-95 touch-manipulation select-none bg-secondary/80 backdrop-blur-sm text-secondary-foreground"
-              style={{ WebkitTapHighlightColor: 'transparent' }}
-            >
+            <button type="button" disabled={actionDisabled} onClick={(e) => { e.stopPropagation(); if (canTriggerAction()) onAction(task.id, 'snooze'); }} className="flex items-center justify-center gap-2 bg-secondary/80 backdrop-blur-sm text-secondary-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95 disabled:opacity-60 disabled:scale-100 touch-manipulation select-none" style={{ WebkitTapHighlightColor: 'transparent' }}>
               <AlarmClock className="w-5 h-5" />{t('task.snooze')}
             </button>
-            <button
-              type="button"
-              onClick={(e) => handleAction(e, 'skip')}
-              className="flex items-center justify-center gap-2 py-3.5 rounded-xl font-semibold transition-transform active:scale-95 touch-manipulation select-none bg-muted/80 backdrop-blur-sm text-muted-foreground"
-              style={{ WebkitTapHighlightColor: 'transparent' }}
-            >
+            <button type="button" disabled={actionDisabled} onClick={(e) => { e.stopPropagation(); if (canTriggerAction()) onAction(task.id, 'skip'); }} className="flex items-center justify-center gap-2 bg-muted/80 backdrop-blur-sm text-muted-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95 hover:bg-muted disabled:opacity-60 disabled:scale-100 touch-manipulation select-none" style={{ WebkitTapHighlightColor: 'transparent' }}>
               <SkipForward className="w-5 h-5" />{t('task.skip')}
             </button>
           </div>
-          <button
-            type="button"
-            onClick={(e) => handleAction(e, 'complete')}
-            className="relative z-20 w-full flex items-center justify-center gap-2 py-4 rounded-xl font-bold text-lg shadow-lg shadow-primary/25 transition-transform active:scale-95 touch-manipulation select-none bg-primary text-primary-foreground"
-            style={{ WebkitTapHighlightColor: 'transparent' }}
-          >
+          <button type="button" disabled={actionDisabled} onClick={(e) => { e.stopPropagation(); if (canTriggerAction()) onAction(task.id, 'complete'); }} className="relative z-20 w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground py-4 rounded-xl font-bold text-lg shadow-lg shadow-primary/25 transition-transform active:scale-95 hover:bg-primary/90 disabled:opacity-60 disabled:scale-100 touch-manipulation select-none" style={{ WebkitTapHighlightColor: 'transparent' }}>
             <Check className="w-6 h-6" />{t('task.complete')}
           </button>
         </div>
@@ -534,10 +502,11 @@ function TaskCard({ task, onAction, onProgressChange }: TaskCardProps) {
 }
 
 // --- Task Detail Modal (Calendar) ---
-function TaskDetailModal({ task, onClose, onAction, onProgressChange }: {
+function TaskDetailModal({ task, onClose, onAction, onProgressChange, actionDisabled = false }: {
   task: Task | null; onClose: () => void;
   onAction: (id: string, action: ExitAction) => void;
   onProgressChange: (id: string, progress: number) => void;
+  actionDisabled?: boolean;
 }) {
   return (
     <Dialog.Root open={!!task} onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -552,10 +521,11 @@ function TaskDetailModal({ task, onClose, onAction, onProgressChange }: {
               onAction={(id, action) => { onAction(id, action); onClose(); }}
               onProgressChange={onProgressChange}
               exitAction={null}
+              actionDisabled={actionDisabled}
             />
           )}
           <Dialog.Close asChild>
-            <button className="absolute -top-1 -right-1 z-20 w-9 h-9 flex items-center justify-center rounded-full bg-card border border-border shadow-sm text-muted-foreground hover:text-foreground transition-colors">
+            <button aria-label="Close task details" className="absolute -top-1 -right-1 z-20 w-9 h-9 flex items-center justify-center rounded-full bg-card border border-border shadow-sm text-muted-foreground hover:text-foreground transition-colors">
               <X className="w-4 h-4" />
             </button>
           </Dialog.Close>
@@ -600,7 +570,7 @@ function RepeatTaskModal({ task, onClose, onRepeat }: {
             </>
           )}
           <Dialog.Close asChild>
-            <button className="absolute right-4 top-4 opacity-70 transition-opacity hover:opacity-100"><XCircle className="h-4 w-4" /></button>
+            <button aria-label="Close repeat task dialog" className="absolute right-4 top-4 opacity-70 transition-opacity hover:opacity-100"><XCircle className="h-4 w-4" /></button>
           </Dialog.Close>
         </Dialog.Content>
       </Dialog.Portal>
@@ -723,12 +693,13 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
 }
 
 // --- Calendar View ---
-function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTask }: {
+function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTask, actingTaskIds }: {
   tasks: Task[];
   onAction: (id: string, action: ExitAction) => void;
   onProgressChange: (id: string, progress: number) => void;
   onAddTask: () => void;
   onRepeatTask: (task: Task) => void;
+  actingTaskIds?: Set<string>;
 }) {
   const { t, i18n } = useTranslation();
   const today = new Date();
@@ -775,7 +746,8 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 
   const dayTasks = selectedDate ? (allByDate[selectedDate] || []) : [];
   const pendingDayTasks = dayTasks.filter(t => t.status === 'todo');
-  const doneDayTasks = dayTasks.filter(t => t.status === 'done' || t.status === 'skipped');
+  const doneDayTasks = dayTasks.filter(t => t.status === 'done');
+  const skippedDayTasks = dayTasks.filter(t => t.status === 'skipped');
 
   const cells: Array<number | null> = [];
   for (let i = 0; i < firstDay; i++) cells.push(null);
@@ -784,7 +756,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 
   return (
     <>
-      <TaskDetailModal task={detailTask} onClose={() => setDetailTaskId(null)} onAction={onAction} onProgressChange={onProgressChange} />
+      <TaskDetailModal task={detailTask} onClose={() => setDetailTaskId(null)} onAction={onAction} onProgressChange={onProgressChange} actionDisabled={detailTask ? actingTaskIds?.has(detailTask.id) : false} />
       <RepeatTaskModal task={repeatTask} onClose={() => setRepeatTask(null)} onRepeat={onRepeatTask} />
 
       <div className="w-full max-w-md space-y-3">
@@ -846,9 +818,9 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
           )}
         </div>
         <div className="flex items-center justify-between px-1">
-          <button onClick={prevMonth} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"><ChevronLeft className="w-5 h-5" /></button>
+          <button onClick={prevMonth} aria-label="Previous month" className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"><ChevronLeft className="w-5 h-5" /></button>
           <h2 className="text-base font-bold tracking-tight">{translatedMonths[month]} {year}</h2>
-          <button onClick={nextMonth} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"><ChevronRight className="w-5 h-5" /></button>
+          <button onClick={nextMonth} aria-label="Next month" className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"><ChevronRight className="w-5 h-5" /></button>
         </div>
 
         <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-sm">
@@ -961,6 +933,28 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
                       ))}
                     </div>
                   )}
+                  {skippedDayTasks.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground px-1">{t('task.skipped')} — {skippedDayTasks.length}</p>
+                      {skippedDayTasks.map((task, i) => (
+                        <motion.button key={task.id} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.04, duration: 0.2 }}
+                          onClick={() => setRepeatTask(task)}
+                          className="w-full text-left bg-muted/40 border border-border/60 rounded-xl px-3 py-3 flex items-start gap-3 hover:border-primary/30 hover:bg-muted/60 transition-all active:scale-[0.99] group">
+                          <SkipForward className="mt-0.5 w-4 h-4 text-muted-foreground flex-shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-muted-foreground leading-snug">{task.title}</p>
+                            <div className="flex items-center gap-2 mt-1 flex-wrap">
+                              {task.tag && <span className="text-xs text-muted-foreground flex items-center gap-1"><Tag className="w-3 h-3" />{task.tag}</span>}
+                              <span className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" />{task.estimateMinutes}m</span>
+                            </div>
+                          </div>
+                          <span className="text-xs text-primary font-semibold flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5">
+                            <RotateCcw className="w-3.5 h-3.5" />{t('task.repeat')}
+                          </span>
+                        </motion.button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </motion.div>
@@ -994,6 +988,7 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
       {/* Close button */}
       <button
         onClick={onClose}
+        aria-label="Close account settings"
         className="absolute top-0 left-4 w-9 h-9 flex items-center justify-center rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
         style={{ top: 'max(1.5rem, env(safe-area-inset-top))' }}
       >
@@ -1094,12 +1089,15 @@ function AppShell({
   const completedTodayRef = React.useRef(completedToday);
   completedTodayRef.current = completedToday;
   const hasInteractedRef = React.useRef(false);
+  const actionLocksRef = React.useRef(new Set<string>());
   const [tasksLoading, setTasksLoading] = useState(true);
   const [exitAction, setExitAction] = useState<ExitAction | null>(null);
+  const [actingTaskIds, setActingTaskIds] = useState<Set<string>>(() => new Set());
   const [viewMode, setViewMode] = useState<ViewMode>('flow');
   const greeting = useMemo(() => getGreeting(t), [t]);
   const [isReordering, setIsReordering] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [flowDetailTaskId, setFlowDetailTaskId] = useState<string | null>(null);
 
   const [isAddingTask, setIsAddingTask] = useState(false);
   const [isRepeatMode, setIsRepeatMode] = useState(false);
@@ -1236,8 +1234,10 @@ function AppShell({
 
   const activeTasks = tasks.filter(t => !t.deletedAt);
   const pendingTasks = activeTasks.filter(t => t.status === 'todo');
+  const flowDetailTask = flowDetailTaskId ? activeTasks.find(t => t.id === flowDetailTaskId) ?? null : null;
 
   const handleProgressChange = (id: string, newProgress: number) => {
+    if (actionLocksRef.current.has(id)) return;
     setTasks(prev => {
       const updated = prev.map(t => t.id === id ? { ...t, progress: newProgress } : t);
       return markDirty(updated, id);
@@ -1249,46 +1249,83 @@ function AppShell({
   };
 
   const handleAction = (id: string, action: ExitAction) => {
+    if (actionLocksRef.current.has(id)) return;
+    actionLocksRef.current.add(id);
+    setActingTaskIds(prev => new Set(prev).add(id));
+    const unlock = () => {
+      actionLocksRef.current.delete(id);
+      setActingTaskIds(prev => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    };
+
     hasInteractedRef.current = true;
     if (action === 'snooze') {
       setExitAction('snooze');
       setTimeout(() => {
+        let order: Array<{ id: string; sortOrder: number }> = [];
         setTasks(prev => {
           const task = prev.find(t => t.id === id);
           if (!task) return prev;
-          return markDirty([...prev.filter(t => t.id !== id), task], id);
+          const reordered = [...prev.filter(t => t.id !== id), task];
+          let sortOrder = 0;
+          const normalized = reordered.map(t => {
+            if (t.status !== 'todo' || t.deletedAt) return t;
+            const next = { ...t, sortOrder: sortOrder++ };
+            order.push({ id: next.id, sortOrder: next.sortOrder });
+            return next;
+          });
+          return normalized.map(t => order.some(o => o.id === t.id) ? { ...t, _dirty: true } : t);
         });
         setExitAction(null);
-        apiUpdateTask(id, { status: 'snoozed' })
-          .then(() => setTasks(prev => markClean(prev, id)))
-          .catch(() => toast.error(t('sync.error')));
+        apiReorderTasks(order)
+          .then(() => {
+            const ids = new Set(order.map(o => o.id));
+            setTasks(prev => prev.map(task => ids.has(task.id) ? { ...task, _dirty: false } : task));
+          })
+          .catch(() => toast.error(t('sync.error')))
+          .finally(unlock);
       }, 320);
     } else {
       setExitAction(action);
       const newStatus = action === 'complete' ? 'done' : 'skipped';
       setTimeout(() => {
+        const task = tasks.find(t => t.id === id);
+        const nextDueDate = action === 'complete' ? nextRepeatDate(task?.dueDate, task?.repeatRule) : null;
+        const nextTask: Task | null = task && nextDueDate ? {
+          ...task,
+          id: localTaskId(),
+          status: 'todo',
+          progress: 0,
+          dueDate: nextDueDate,
+          reminderAt: null,
+          deletedAt: null,
+          sortOrder: tasks.filter(t => t.status === 'todo' && !t.deletedAt).length,
+          _dirty: true,
+        } : null;
+
         setTasks(prev => {
-          const task = prev.find(t => t.id === id);
           const updated = prev.map(t => t.id !== id ? t : { ...t, status: newStatus as TaskStatus });
-          if (action !== 'complete' || !task) return markDirty(updated, id);
-          const nextDueDate = nextRepeatDate(task.dueDate, task.repeatRule);
-          if (!nextDueDate) return markDirty(updated, id);
-          const nextTask: Task = {
-            ...task,
-            id: Math.random().toString(36).substring(7),
-            status: 'todo',
-            progress: 0,
-            dueDate: nextDueDate,
-            reminderAt: null,
-            deletedAt: null,
-            sortOrder: updated.filter(t => t.status === 'todo' && !t.deletedAt).length,
-            _dirty: true,
-          };
-          return markDirty([...updated, nextTask], id);
+          return markDirty(nextTask ? [...updated, nextTask] : updated, id);
         });
         apiUpdateTask(id, { status: newStatus })
           .then(() => setTasks(prev => markClean(prev, id)))
-          .catch(() => toast.error(t('sync.error')));
+          .catch(() => toast.error(t('sync.error')))
+          .finally(unlock);
+        if (nextTask) {
+          apiCreateTask({
+            title: nextTask.title, priority: nextTask.priority,
+            estimateMinutes: nextTask.estimateMinutes,
+            status: nextTask.status, tag: nextTask.tag,
+            progress: nextTask.progress, dueDate: nextTask.dueDate,
+            reminderAt: nextTask.reminderAt, repeatRule: nextTask.repeatRule,
+            sortOrder: nextTask.sortOrder,
+          }).then(created => {
+            setTasks(prev => markClean(prev.map(t => t.id === nextTask.id ? { ...t, id: created.id } : t), created.id));
+          }).catch(() => toast.error(t('sync.error')));
+        }
         if (action === 'complete') {
           // Haptic feedback (silently ignored in browser)
           Haptics.impact({ style: ImpactStyle.Medium }).catch(() => {});
@@ -1440,7 +1477,7 @@ function AppShell({
       closeTaskForm();
       return;
     }
-    const tempId = Math.random().toString(36).substring(7);
+    const tempId = localTaskId();
 
     const idx = insertIndex(tasks, { id: tempId, title: '', priority: form.priority, estimateMinutes: 0, status: 'todo', progress: 0, dueDate: form.dueDate || null, sortOrder: 0 } as Task);
 
@@ -1477,6 +1514,13 @@ function AppShell({
   
   return (
     <div className="app-viewport app-safe-y bg-background text-foreground flex flex-col items-center overscroll-none selection:bg-primary/20">
+      <TaskDetailModal
+        task={flowDetailTask}
+        onClose={() => setFlowDetailTaskId(null)}
+        onAction={handleAction}
+        onProgressChange={handleProgressChange}
+        actionDisabled={flowDetailTask ? actingTaskIds.has(flowDetailTask.id) : false}
+      />
 
       {/* Account Page */}
       <AnimatePresence>
@@ -1508,6 +1552,7 @@ function AppShell({
           <button
             onClick={() => setAccountOpen(true)}
             title="Account"
+            aria-label="Open account settings"
             className="w-9 h-9 flex items-center justify-center rounded-full bg-muted hover:bg-muted/80 transition-colors overflow-hidden"
           >
             <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2'%3E%3Cpath d='M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='12' cy='7' r='4'/%3E%3C/svg%3E"
@@ -1591,7 +1636,14 @@ function AppShell({
                           transition={{ type: 'spring', stiffness: 300, damping: 25, mass: 0.8 }}
                           className={`absolute inset-0 w-full h-full ${!isTop ? 'pointer-events-none' : ''}`}
                         >
-                          <TaskCard task={task} onAction={handleAction} onProgressChange={handleProgressChange} exitAction={exitAction} />
+                          <TaskCard
+                            task={task}
+                            onAction={handleAction}
+                            onProgressChange={handleProgressChange}
+                            exitAction={exitAction}
+                            actionDisabled={actingTaskIds.has(task.id)}
+                            onOpen={isTop ? () => setFlowDetailTaskId(task.id) : undefined}
+                          />
                         </motion.div>
                       );
                     })}
@@ -1650,6 +1702,7 @@ function AppShell({
               onProgressChange={handleProgressChange}
               onAddTask={openAddTask}
               onRepeatTask={handleRepeatTask}
+              actingTaskIds={actingTaskIds}
             />
           </div>
         </motion.div>
@@ -1668,6 +1721,7 @@ function AppShell({
       {/* FAB */}
       <button
         onClick={openAddTask}
+        aria-label="Add task"
         className="fixed bottom-safe right-6 sm:right-8 w-12 h-12 bg-primary text-primary-foreground rounded-full flex items-center justify-center shadow-lg shadow-primary/20 hover:bg-primary/90 transition-transform active:scale-95 z-40"
       >
         <Plus className="w-6 h-6" />
@@ -1712,6 +1766,7 @@ function AppShell({
                 <button
                   type="button"
                   onClick={closeTaskForm}
+                  aria-label="Close task form"
                   className="w-8 h-8 flex items-center justify-center rounded-full bg-muted text-muted-foreground hover:bg-muted/80 transition-colors flex-shrink-0 ml-3 mt-0.5"
                 >
                   <X className="w-4 h-4" />
@@ -1960,8 +2015,10 @@ export default function App() {
       const refreshResult = await apiRefreshDetailed();
       if (cancelled) return;
       if (refreshResult === 'ok') {
-        if (emailForRestore) saveSession(emailForRestore);
-        setUserEmail(emailForRestore);
+        const refreshedUser = getRefreshedUser();
+        const restoredEmail = refreshedUser?.email || emailForRestore;
+        if (restoredEmail) saveSession(restoredEmail);
+        setUserEmail(restoredEmail);
         setAppState('app');
         return;
       }
