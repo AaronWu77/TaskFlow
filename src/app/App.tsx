@@ -174,7 +174,7 @@ const PRIORITY_LABEL_KEY: Record<Priority, string> = { P1: 'priority.P1', P2: 'p
 const DOT_COLOR = { P1: 'bg-rose-500', P2: 'bg-amber-400', P3: 'bg-emerald-500' };
 const ACCENT_THEME_KEY = 'taskflow_accent_theme';
 
-type AccentTheme = 'lavender' | 'ocean' | 'forest' | 'sunset' | 'rose';
+type AccentTheme = 'tcx111400' | 'tcx134306' | 'tcx133802' | 'tcx136006' | 'tcx121107';
 
 const ACCENT_THEME_PRESETS: Record<AccentTheme, {
   primary: string;
@@ -183,52 +183,52 @@ const ACCENT_THEME_PRESETS: Record<AccentTheme, {
   secondaryForeground: string;
   ring: string;
 }> = {
-  lavender: {
-    primary: '#a78bfa',
-    primaryForeground: '#ffffff',
-    secondary: '#f1eaff',
-    secondaryForeground: '#6d4cc2',
-    ring: '#a78bfa',
+  tcx111400: {
+    primary: '#F3E0D6',
+    primaryForeground: '#3f3029',
+    secondary: '#fff4ef',
+    secondaryForeground: '#6c5043',
+    ring: '#F3E0D6',
   },
-  ocean: {
-    primary: '#3b82f6',
-    primaryForeground: '#ffffff',
-    secondary: '#eaf3ff',
-    secondaryForeground: '#1d4ed8',
-    ring: '#3b82f6',
+  tcx134306: {
+    primary: '#D3E4F1',
+    primaryForeground: '#263947',
+    secondary: '#edf6fc',
+    secondaryForeground: '#3c5568',
+    ring: '#D3E4F1',
   },
-  forest: {
-    primary: '#16a34a',
-    primaryForeground: '#ffffff',
-    secondary: '#e9f9ef',
-    secondaryForeground: '#166534',
-    ring: '#16a34a',
+  tcx133802: {
+    primary: '#DBD2DB',
+    primaryForeground: '#3d3340',
+    secondary: '#f5eff5',
+    secondaryForeground: '#5b4b5f',
+    ring: '#DBD2DB',
   },
-  sunset: {
-    primary: '#f97316',
-    primaryForeground: '#ffffff',
-    secondary: '#fff1e7',
-    secondaryForeground: '#c2410c',
-    ring: '#f97316',
+  tcx136006: {
+    primary: '#CAD3C1',
+    primaryForeground: '#30392b',
+    secondary: '#eff4eb',
+    secondaryForeground: '#495640',
+    ring: '#CAD3C1',
   },
-  rose: {
-    primary: '#e11d48',
-    primaryForeground: '#ffffff',
-    secondary: '#ffe9f0',
-    secondaryForeground: '#be123c',
-    ring: '#e11d48',
+  tcx121107: {
+    primary: '#F0D8CC',
+    primaryForeground: '#3e2f28',
+    secondary: '#fff2ec',
+    secondaryForeground: '#695044',
+    ring: '#F0D8CC',
   },
 };
 
 function loadAccentTheme(): AccentTheme {
   const raw = storageGet(ACCENT_THEME_KEY);
-  if (!raw) return 'lavender';
+  if (!raw) return 'tcx111400';
   if (raw in ACCENT_THEME_PRESETS) return raw as AccentTheme;
-  return 'lavender';
+  return 'tcx111400';
 }
 
 function applyAccentTheme(theme: AccentTheme): void {
-  const preset = ACCENT_THEME_PRESETS[theme] ?? ACCENT_THEME_PRESETS.lavender;
+  const preset = ACCENT_THEME_PRESETS[theme] ?? ACCENT_THEME_PRESETS.tcx111400;
   const root = document.documentElement;
   root.style.setProperty('--primary', preset.primary);
   root.style.setProperty('--primary-foreground', preset.primaryForeground);
@@ -304,6 +304,12 @@ function saveStatsToCache(streak: number, completedToday: number, lastDate?: str
 
 function fmtDate(y: number, m: number, d: number) {
   return `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+function quickDueDate(offset: number): string {
+  const next = new Date();
+  next.setDate(next.getDate() + offset);
+  return fmtDate(next.getFullYear(), next.getMonth(), next.getDate());
 }
 
 function nextRepeatDate(dueDate: string | null | undefined, rule: Task['repeatRule']): string | null {
@@ -398,36 +404,24 @@ interface TaskCardProps {
 
 function TaskCard({ task, onAction, onProgressChange, actionDisabled = false, onOpen }: TaskCardProps) {
   const { t } = useTranslation();
-  const [localProgress, setLocalProgress] = React.useState(task.progress);
-  const [isSlidingProgress, setIsSlidingProgress] = React.useState(false);
-  const blockActionUntilRef = React.useRef(0);
-  React.useEffect(() => { setLocalProgress(task.progress); }, [task.progress]);
+  const [pressedAction, setPressedAction] = React.useState<ExitAction | null>(null);
 
-  const commitProgress = (value: number) => {
-    if (value !== task.progress) onProgressChange(task.id, value);
+  const triggerAction = (e: React.MouseEvent<HTMLButtonElement>, action: ExitAction) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (actionDisabled) return;
+    setPressedAction(action);
+    window.setTimeout(() => setPressedAction(current => current === action ? null : current), 260);
+    onAction(task.id, action);
   };
 
-  const releaseSlidingGuard = () => {
-    setIsSlidingProgress(false);
-    blockActionUntilRef.current = Date.now() + 220;
-  };
-
-  const canTriggerAction = () => !isSlidingProgress && !actionDisabled && Date.now() > blockActionUntilRef.current;
+  const actionButtonClass = (action: ExitAction, baseClass: string) => cn(
+    baseClass,
+    pressedAction === action && 'scale-95 ring-2 ring-ring ring-offset-2 ring-offset-card'
+  );
 
   return (
     <div onClick={onOpen} className="relative w-full h-full bg-card rounded-3xl border border-border flex flex-col overflow-hidden">
-      <div
-        className="pointer-events-none absolute bottom-0 left-0 w-full bg-primary/10 transition-all duration-500 ease-out z-0"
-        style={{ height: `${localProgress}%` }}
-      >
-        {localProgress > 0 && localProgress < 100 && (
-          <div className="absolute top-[-20px] left-0 w-[200%] h-[20px] overflow-hidden z-0">
-            <svg viewBox="0 0 800 50" preserveAspectRatio="none" className="w-full h-full fill-primary/10 animate-wave">
-              <path d="M 0 25 Q 100 50 200 25 T 400 25 Q 500 50 600 25 T 800 25 L 800 50 L 0 50 Z" />
-            </svg>
-          </div>
-        )}
-      </div>
       <div className="relative z-10 flex flex-col h-full p-6">
         <div className="flex items-center justify-between mb-6">
           <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${PRIORITY_BADGE[task.priority]}`}>{t(PRIORITY_LABEL_KEY[task.priority])}</span>
@@ -439,60 +433,25 @@ function TaskCard({ task, onAction, onProgressChange, actionDisabled = false, on
         </div>
         <h2 className="text-3xl font-bold leading-tight flex-1">{task.title}</h2>
         <div className="mt-auto flex flex-col gap-4">
-          <div className="flex flex-col gap-3">
-            <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center text-muted-foreground text-sm gap-1.5 bg-muted/50 backdrop-blur-sm px-3 py-1.5 rounded-lg">
+              <Clock className="w-4 h-4" /><span>{task.estimateMinutes}m</span>
+            </div>
+            {task.dueDate && (
               <div className="flex items-center text-muted-foreground text-sm gap-1.5 bg-muted/50 backdrop-blur-sm px-3 py-1.5 rounded-lg">
-                <Clock className="w-4 h-4" /><span>{task.estimateMinutes}m</span>
+                <Calendar className="w-4 h-4" /><span>{task.dueDate}</span>
               </div>
-              {task.dueDate && (
-                <div className="flex items-center text-muted-foreground text-sm gap-1.5 bg-muted/50 backdrop-blur-sm px-3 py-1.5 rounded-lg">
-                  <Calendar className="w-4 h-4" /><span>{task.dueDate}</span>
-                </div>
-              )}
-            </div>
-            <div className="flex items-center gap-3 bg-muted/30 backdrop-blur-sm px-3 py-2 rounded-lg">
-              <span className="text-sm font-medium text-muted-foreground whitespace-nowrap">{t('task.progress')}</span>
-              <div
-                onClick={(e) => e.stopPropagation()}
-                onPointerDown={(e) => e.stopPropagation()}
-                onPointerMove={(e) => e.stopPropagation()}
-                className="flex-1"
-              >
-                <input
-                  type="range" min="0" max="100" step="5"
-                  value={localProgress}
-                  onInput={(e) => setLocalProgress(parseInt((e.target as HTMLInputElement).value))}
-                  onChange={(e) => setLocalProgress(parseInt((e.target as HTMLInputElement).value))}
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                    setIsSlidingProgress(true);
-                  }}
-                  onPointerUp={(e) => {
-                    e.stopPropagation();
-                    releaseSlidingGuard();
-                    commitProgress(parseInt((e.target as HTMLInputElement).value));
-                  }}
-                  onPointerCancel={releaseSlidingGuard}
-                  onBlur={(e) => {
-                    if (isSlidingProgress) releaseSlidingGuard();
-                    commitProgress(parseInt((e.target as HTMLInputElement).value));
-                  }}
-                  className="w-full h-6 bg-transparent appearance-none cursor-pointer outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
-                  style={{ accentColor: 'var(--primary)', WebkitTapHighlightColor: 'transparent' }}
-                />
-              </div>
-              <span className="text-sm font-medium text-muted-foreground w-9 text-right">{localProgress}%</span>
-            </div>
+            )}
           </div>
           <div className="relative z-20 grid grid-cols-2 gap-3">
-            <button type="button" disabled={actionDisabled} onClick={(e) => { e.stopPropagation(); if (canTriggerAction()) onAction(task.id, 'snooze'); }} className="flex items-center justify-center gap-2 bg-secondary/80 backdrop-blur-sm text-secondary-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95 disabled:opacity-60 disabled:scale-100 touch-manipulation select-none" style={{ WebkitTapHighlightColor: 'transparent' }}>
+            <button type="button" disabled={actionDisabled} onClick={(e) => triggerAction(e, 'snooze')} className={actionButtonClass('snooze', 'flex items-center justify-center gap-2 bg-secondary/80 backdrop-blur-sm text-secondary-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95 disabled:opacity-60 disabled:scale-100 touch-manipulation select-none')} style={{ WebkitTapHighlightColor: 'transparent' }}>
               <AlarmClock className="w-5 h-5" />{t('task.snooze')}
             </button>
-            <button type="button" disabled={actionDisabled} onClick={(e) => { e.stopPropagation(); if (canTriggerAction()) onAction(task.id, 'skip'); }} className="flex items-center justify-center gap-2 bg-muted/80 backdrop-blur-sm text-muted-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95 hover:bg-muted disabled:opacity-60 disabled:scale-100 touch-manipulation select-none" style={{ WebkitTapHighlightColor: 'transparent' }}>
+            <button type="button" disabled={actionDisabled} onClick={(e) => triggerAction(e, 'skip')} className={actionButtonClass('skip', 'flex items-center justify-center gap-2 bg-muted/80 backdrop-blur-sm text-muted-foreground py-3.5 rounded-xl font-semibold transition-transform active:scale-95 hover:bg-muted disabled:opacity-60 disabled:scale-100 touch-manipulation select-none')} style={{ WebkitTapHighlightColor: 'transparent' }}>
               <SkipForward className="w-5 h-5" />{t('task.skip')}
             </button>
           </div>
-          <button type="button" disabled={actionDisabled} onClick={(e) => { e.stopPropagation(); if (canTriggerAction()) onAction(task.id, 'complete'); }} className="relative z-20 w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground py-4 rounded-xl font-bold text-lg shadow-lg shadow-primary/25 transition-transform active:scale-95 hover:bg-primary/90 disabled:opacity-60 disabled:scale-100 touch-manipulation select-none" style={{ WebkitTapHighlightColor: 'transparent' }}>
+          <button type="button" disabled={actionDisabled} onClick={(e) => triggerAction(e, 'complete')} className={actionButtonClass('complete', 'relative z-20 w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground py-4 rounded-xl font-bold text-lg shadow-lg shadow-primary/25 transition-transform active:scale-95 hover:bg-primary/90 disabled:opacity-60 disabled:scale-100 touch-manipulation select-none')} style={{ WebkitTapHighlightColor: 'transparent' }}>
             <Check className="w-6 h-6" />{t('task.complete')}
           </button>
         </div>
@@ -1790,28 +1749,22 @@ function AppShell({
                       { key: 'tomorrow', offset: 1 },
                       { key: 'week', offset: 7 },
                       { key: 'none', offset: null },
-                    ].map(item => (
-                      <button
-                        key={item.key}
-                        type="button"
-                        onClick={() => {
-                          if (item.offset === null) {
-                            setForm(f => ({ ...f, dueDate: '' }));
-                            return;
-                          }
-                          const next = new Date();
-                          next.setDate(next.getDate() + item.offset);
-                          setForm(f => ({ ...f, dueDate: fmtDate(next.getFullYear(), next.getMonth(), next.getDate()) }));
-                        }}
-                        className={`rounded-lg border px-2 py-1.5 text-xs font-semibold active:scale-95 ${
-                          item.offset === null
-                            ? form.dueDate === '' ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border bg-muted text-muted-foreground'
-                            : 'border-border bg-muted text-muted-foreground'
-                        }`}
-                      >
-                        {t(`task.quickDate.${item.key}`)}
-                      </button>
-                    ))}
+                    ].map(item => {
+                      const value = item.offset === null ? '' : quickDueDate(item.offset);
+                      const selected = form.dueDate === value;
+                      return (
+                        <button
+                          key={item.key}
+                          type="button"
+                          onClick={() => setForm(f => ({ ...f, dueDate: value }))}
+                          className={`rounded-lg border px-2 py-1.5 text-xs font-semibold active:scale-95 ${
+                            selected ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border bg-muted text-muted-foreground'
+                          }`}
+                        >
+                          {t(`task.quickDate.${item.key}`)}
+                        </button>
+                      );
+                    })}
                   </div>
                   <input id="dueDate" type="date"
                     className="flex h-10 w-full appearance-none rounded-xl border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -1919,7 +1872,7 @@ export default function App() {
   // 'loading' = checking refresh cookie, 'auth' = not logged in, 'app' = logged in
   const [appState, setAppState] = useState<'loading' | 'auth' | 'app'>('loading');
   const [userEmail, setUserEmail] = useState(() => loadSession()?.email || '');
-  const [accentTheme, setAccentTheme] = useState<AccentTheme>('lavender');
+  const [accentTheme, setAccentTheme] = useState<AccentTheme>('tcx111400');
   const [accentThemeReady, setAccentThemeReady] = useState(false);
 
   useEffect(() => {

@@ -19,7 +19,7 @@ function signAccess(userId: string) {
 }
 
 function signRefresh(userId: string) {
-  return jwt.sign({ userId }, process.env.JWT_REFRESH_SECRET!, {
+  return jwt.sign({ userId, jti: crypto.randomUUID() }, process.env.JWT_REFRESH_SECRET!, {
     expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   } as jwt.SignOptions);
 }
@@ -37,16 +37,25 @@ function refreshExpiry(): Date {
   return new Date(Date.now() + amount * factor);
 }
 
-async function createRefreshSession(userId: string): Promise<string> {
+function buildRefreshSession(userId: string): { token: string; tokenHash: string; expiresAt: Date } {
   const refreshToken = signRefresh(userId);
+  return {
+    token: refreshToken,
+    tokenHash: refreshTokenHash(refreshToken),
+    expiresAt: refreshExpiry(),
+  };
+}
+
+async function createRefreshSession(userId: string): Promise<string> {
+  const session = buildRefreshSession(userId);
   await prisma.refreshSession.create({
     data: {
       userId,
-      tokenHash: refreshTokenHash(refreshToken),
-      expiresAt: refreshExpiry(),
+      tokenHash: session.tokenHash,
+      expiresAt: session.expiresAt,
     },
   });
-  return refreshToken;
+  return session.token;
 }
 
 function getRefreshToken(req: Request): string | null {
@@ -134,13 +143,26 @@ router.post('/refresh', asyncHandler(async (req, res) => {
       return;
     }
 
-    await prisma.refreshSession.update({
-      where: { id: session.id },
-      data: { revokedAt: new Date(), rotatedAt: new Date() },
-    });
-
     const accessToken = signAccess(payload.userId);
-    const refreshToken = await createRefreshSession(payload.userId);
+    const nextSession = buildRefreshSession(payload.userId);
+    const now = new Date();
+    await prisma.$transaction(async (tx) => {
+      const revoked = await tx.refreshSession.updateMany({
+        where: { id: session.id, revokedAt: null },
+        data: { revokedAt: now, rotatedAt: now },
+      });
+      if (revoked.count !== 1) {
+        throw new Error('Refresh token already rotated');
+      }
+      await tx.refreshSession.create({
+        data: {
+          userId: payload.userId,
+          tokenHash: nextSession.tokenHash,
+          expiresAt: nextSession.expiresAt,
+        },
+      });
+    });
+    const refreshToken = nextSession.token;
     res.cookie(REFRESH_COOKIE, refreshToken, COOKIE_OPTS);
     res.json({ accessToken, refreshToken, user: { id: session.user.id, email: session.user.email } });
   } catch {

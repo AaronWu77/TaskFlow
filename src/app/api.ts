@@ -32,7 +32,11 @@ async function getStoredRefreshToken(): Promise<string | null> {
       return null;
     }
   }
-  return null;
+  try {
+    return localStorage.getItem(REFRESH_TOKEN_KEY);
+  } catch {
+    return null;
+  }
 }
 
 function setStoredRefreshToken(token: string | null): void {
@@ -40,7 +44,10 @@ function setStoredRefreshToken(token: string | null): void {
     if (token) Preferences.set({ key: REFRESH_TOKEN_KEY, value: token }).catch(() => { /**/ });
     else Preferences.remove({ key: REFRESH_TOKEN_KEY }).catch(() => { /**/ });
   } else {
-    try { localStorage.removeItem(REFRESH_TOKEN_KEY); } catch { /**/ }
+    try {
+      if (token) localStorage.setItem(REFRESH_TOKEN_KEY, token);
+      else localStorage.removeItem(REFRESH_TOKEN_KEY);
+    } catch { /**/ }
   }
 }
 
@@ -61,8 +68,7 @@ export async function apiRefreshDetailed(): Promise<RefreshResult> {
     const data = await res.json() as { accessToken: string; refreshToken?: string; user?: AuthUser };
     setAccessToken(data.accessToken);
     refreshedUser = data.user ?? null;
-    if (IS_NATIVE_PLATFORM && data.refreshToken) setStoredRefreshToken(data.refreshToken);
-    if (!IS_NATIVE_PLATFORM) setStoredRefreshToken(null);
+    if (data.refreshToken) setStoredRefreshToken(data.refreshToken);
     return 'ok';
   } catch {
     return 'network';
@@ -123,8 +129,7 @@ export async function apiLogin(email: string, password: string): Promise<{ user:
   }
   const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken?: string };
   setAccessToken(data.accessToken);
-  if (IS_NATIVE_PLATFORM) setStoredRefreshToken(data.refreshToken ?? null);
-  else setStoredRefreshToken(null);
+  setStoredRefreshToken(data.refreshToken ?? null);
   return data;
 }
 
@@ -141,8 +146,7 @@ export async function apiRegister(email: string, password: string): Promise<{ us
   }
   const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken?: string };
   setAccessToken(data.accessToken);
-  if (IS_NATIVE_PLATFORM) setStoredRefreshToken(data.refreshToken ?? null);
-  else setStoredRefreshToken(null);
+  setStoredRefreshToken(data.refreshToken ?? null);
   return data;
 }
 

@@ -113,11 +113,11 @@
     "signOut": "Sign Out",
     "accentColor": "Accent Color",
     "accent": {
-      "lavender": "Lavender",
-      "ocean": "Ocean",
-      "forest": "Forest",
-      "sunset": "Sunset",
-      "rose": "Rose"
+      "tcx111400": "11-1400 TCX",
+      "tcx134306": "13-4306 TCX",
+      "tcx133802": "13-3802 TCX",
+      "tcx136006": "13-6006 TCX",
+      "tcx121107": "12-1107 TCX"
     },
     "theme": "Theme",
     "light": "Light",

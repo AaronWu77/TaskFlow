@@ -113,11 +113,11 @@
     "signOut": "退出登录",
     "accentColor": "主色调",
     "accent": {
-      "lavender": "薰衣草紫",
-      "ocean": "海洋蓝",
-      "forest": "森林绿",
-      "sunset": "日落橙",
-      "rose": "玫瑰红"
+      "tcx111400": "11-1400 TCX",
+      "tcx134306": "13-4306 TCX",
+      "tcx133802": "13-3802 TCX",
+      "tcx136006": "13-6006 TCX",
+      "tcx121107": "12-1107 TCX"
     },
     "theme": "主题",
     "light": "浅色",
