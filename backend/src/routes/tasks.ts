@@ -59,6 +59,24 @@ router.post('/', asyncHandler(async (req, res) => {
   res.status(201).json(task);
 }));
 
+// PUT /tasks/reorder — bulk update sortOrder for drag-and-drop reordering
+router.put('/reorder', asyncHandler(async (req, res) => {
+  const { order } = req.body as { order?: Array<{ id: string; sortOrder: number }> };
+  if (!Array.isArray(order)) {
+    res.status(400).json({ error: 'order must be an array of { id, sortOrder }' });
+    return;
+  }
+  await prisma.$transaction(
+    order.map(({ id, sortOrder }) =>
+      prisma.task.updateMany({
+        where: { id, userId: req.userId! },
+        data: { sortOrder },
+      })
+    )
+  );
+  res.json({ ok: true });
+}));
+
 // PATCH /tasks/:id — update task fields (status, progress, sortOrder, etc.)
 router.patch('/:id', asyncHandler(async (req, res) => {
   const id = String(req.params.id);
@@ -109,24 +127,6 @@ router.delete('/:id', asyncHandler(async (req, res) => {
   }
   await prisma.task.delete({ where: { id } });
   res.status(204).send();
-}));
-
-// PUT /tasks/reorder — bulk update sortOrder for drag-and-drop reordering
-router.put('/reorder', asyncHandler(async (req, res) => {
-  const { order } = req.body as { order?: Array<{ id: string; sortOrder: number }> };
-  if (!Array.isArray(order)) {
-    res.status(400).json({ error: 'order must be an array of { id, sortOrder }' });
-    return;
-  }
-  await prisma.$transaction(
-    order.map(({ id, sortOrder }) =>
-      prisma.task.updateMany({
-        where: { id, userId: req.userId! },
-        data: { sortOrder },
-      })
-    )
-  );
-  res.json({ ok: true });
 }));
 
 export default router;

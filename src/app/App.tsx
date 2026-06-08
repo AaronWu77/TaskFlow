@@ -37,6 +37,7 @@ interface Task {
   deletedAt?: string | null;
   sortOrder: number;
   _dirty?: boolean; // local-only: true if pending sync to server
+  _syncState?: 'create' | 'update'; // local-only: tells sync whether to POST or PATCH
 }
 
 // Sync metadata
@@ -114,13 +115,29 @@ function saveSyncMeta(meta: SyncMeta) {
 }
 
 /** Mark a task as dirty (in-memory only — cache save via useEffect) */
-function markDirty(tasks: Task[], id: string): Task[] {
-  return tasks.map(t => t.id === id ? { ...t, _dirty: true } : t);
+function markDirty(tasks: Task[], id: string, syncState: Task['_syncState'] = 'update'): Task[] {
+  return tasks.map(t => t.id === id ? { ...t, _dirty: true, _syncState: t.id.startsWith('local-') ? 'create' : syncState } : t);
 }
 
 /** Mark a task as clean (in-memory only — cache save via useEffect) */
 function markClean(tasks: Task[], id: string): Task[] {
-  return tasks.map(t => t.id === id ? { ...t, _dirty: false } : t);
+  return tasks.map(t => t.id === id ? { ...t, _dirty: false, _syncState: undefined } : t);
+}
+
+function taskPatch(t: Task) {
+  return {
+    title: t.title,
+    priority: t.priority,
+    estimateMinutes: t.estimateMinutes,
+    status: t.status,
+    tag: t.tag,
+    progress: t.progress,
+    dueDate: t.dueDate,
+    reminderAt: t.reminderAt,
+    repeatRule: t.repeatRule,
+    deletedAt: t.deletedAt,
+    sortOrder: t.sortOrder,
+  };
 }
 
 /** Push all dirty tasks to server, returning tasks with clean flags */
@@ -129,29 +146,26 @@ async function flushDirtyTasks(tasks: Task[]): Promise<Task[]> {
   if (dirty.length === 0) return tasks;
 
   let updated = [...tasks];
+  let remoteIds: Set<string>;
+  try {
+    const remote = await apiGetTasks();
+    remoteIds = new Set(remote.map(r => r.id));
+  } catch {
+    return tasks;
+  }
+
   for (const t of dirty) {
     try {
-      const remote = await apiGetTasks().catch(() => [] as { id: string }[]);
-      const exists = remote.some((r: { id: string }) => r.id === t.id);
-      if (exists) {
-        await apiUpdateTask(t.id, {
-          title: t.title, priority: t.priority,
-          estimateMinutes: t.estimateMinutes, status: t.status,
-          tag: t.tag, progress: t.progress, dueDate: t.dueDate,
-          reminderAt: t.reminderAt, repeatRule: t.repeatRule, deletedAt: t.deletedAt,
-          sortOrder: t.sortOrder,
-        });
-      } else {
-        const created = await apiCreateTask({
-          title: t.title, priority: t.priority,
-          estimateMinutes: t.estimateMinutes, status: t.status,
-          tag: t.tag, progress: t.progress, dueDate: t.dueDate,
-          reminderAt: t.reminderAt, repeatRule: t.repeatRule, deletedAt: t.deletedAt,
-          sortOrder: t.sortOrder,
-        });
-        updated = updated.map(x => x.id === t.id ? { ...x, id: created.id, _dirty: false } : x);
+      const shouldCreate = t._syncState === 'create' || t.id.startsWith('local-');
+      if (shouldCreate) {
+        const created = await apiCreateTask(taskPatch(t));
+        updated = updated.map(x => x.id === t.id ? { ...x, id: created.id, _dirty: false, _syncState: undefined } : x);
         continue;
       }
+      if (!remoteIds.has(t.id)) {
+        continue;
+      }
+      await apiUpdateTask(t.id, taskPatch(t));
       updated = markClean(updated, t.id);
     } catch {
       // Keep dirty, will retry later
@@ -1102,6 +1116,7 @@ function AppShell({
   completedTodayRef.current = completedToday;
   const hasInteractedRef = React.useRef(false);
   const actionLocksRef = React.useRef(new Set<string>());
+  const syncInFlightRef = React.useRef(false);
   const [tasksLoading, setTasksLoading] = useState(true);
   const [exitAction, setExitAction] = useState<TaskActionState | null>(null);
   const [actingTaskIds, setActingTaskIds] = useState<Set<string>>(() => new Set());
@@ -1118,6 +1133,19 @@ function AppShell({
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'offline' | 'error'>('idle');
   const [form, setForm] = useState<AddTaskState>(DEFAULT_FORM);
 
+  const setTasksAndCache = React.useCallback((updater: React.SetStateAction<Task[]>) => {
+    setTasks(prev => {
+      const next = typeof updater === 'function' ? (updater as (prev: Task[]) => Task[])(prev) : updater;
+      saveTasksToCache(next);
+      return next;
+    });
+  }, []);
+
+  const updateSyncStatusFromTasks = React.useCallback((nextTasks: Task[]) => {
+    const hasDirty = nextTasks.some(task => task._dirty);
+    setSyncStatus(hasDirty ? (navigator.onLine ? 'error' : 'offline') : 'idle');
+  }, []);
+
   // On mount: pull all tasks from cloud (cloud-primary), fall back to cache
   useEffect(() => {
     let cancelled = false;
@@ -1127,21 +1155,25 @@ function AppShell({
         const remote = await apiGetTasks();
         if (!cancelled) {
           serverReachable = true;
-          const remoteTasks: Task[] = remote.map(t => ({
-            id: t.id, title: t.title, priority: t.priority as Priority,
-            estimateMinutes: t.estimateMinutes, status: t.status as TaskStatus,
-            tag: t.tag ?? undefined, progress: t.progress, dueDate: t.dueDate,
-            reminderAt: t.reminderAt, repeatRule: (t.repeatRule as Task['repeatRule']) ?? 'none',
-            deletedAt: t.deletedAt, sortOrder: t.sortOrder, _dirty: false,
-          }));
+          const cached = loadTasks();
+          const dirtyById = new Map(cached.filter(t => t._dirty).map(t => [t.id, t]));
+          const remoteTasks: Task[] = remote.map(t => {
+            const normalized: Task = {
+              id: t.id, title: t.title, priority: t.priority as Priority,
+              estimateMinutes: t.estimateMinutes, status: t.status as TaskStatus,
+              tag: t.tag ?? undefined, progress: t.progress, dueDate: t.dueDate,
+              reminderAt: t.reminderAt, repeatRule: (t.repeatRule as Task['repeatRule']) ?? 'none',
+              deletedAt: t.deletedAt, sortOrder: t.sortOrder, _dirty: false,
+            };
+            return dirtyById.get(t.id) ?? normalized;
+          });
 
           // Preserve dirty tasks from cache that haven't reached the server yet
-          const cached = loadTasks();
           const remoteIds = new Set(remoteTasks.map(t => t.id));
           const dirtyTasks = cached.filter(t => t._dirty && !remoteIds.has(t.id));
 
           const merged = [...remoteTasks, ...dirtyTasks];
-          setTasks(merged);
+          setTasksAndCache(merged);
           saveTasksToCache(merged);
           saveSyncMeta({ lastSync: new Date().toISOString() });
         }
@@ -1154,7 +1186,7 @@ function AppShell({
       // If offline, use cached tasks
       if (!serverReachable) {
         const cached = loadTasks();
-        setTasks(cached.length > 0 ? cached : []);
+        setTasksAndCache(cached.length > 0 ? cached : []);
       }
 
       // Stats — cache is the authority for streak; server is a mirror
@@ -1191,7 +1223,7 @@ function AppShell({
     const STORAGE_KEYS = ['taskflow_tasks', 'taskflow_streak', 'taskflow_completed_today'];
     restoreFromNativeStorage(STORAGE_KEYS).then(() => {
       // Re-read from localStorage into state; if API already loaded, don't overwrite
-      setTasks(prev => prev.length === 0 ? loadTasks() : prev);
+      setTasksAndCache(prev => prev.length === 0 ? loadTasks() : prev);
       const cached = loadStatsFromCache();
       setStreak(prev => prev === 0 ? cached.streak : prev);
       setCompletedToday(prev => prev === 0 ? cached.completedToday : prev);
@@ -1213,26 +1245,35 @@ function AppShell({
   useEffect(() => { saveTasksToCache(tasks); }, [tasks]);
 
   const retryDirtyTasks = React.useCallback(async () => {
+    if (syncInFlightRef.current) return;
     const dirty = loadTasks().filter(t => t._dirty);
     if (dirty.length === 0) {
-      setSyncStatus(navigator.onLine ? 'idle' : 'offline');
+      setSyncStatus('idle');
       return;
     }
     if (!navigator.onLine) {
       setSyncStatus('offline');
       return;
     }
+    syncInFlightRef.current = true;
     setSyncStatus('syncing');
-    const flushed = await flushDirtyTasks(loadTasks());
-    setTasks(flushed);
-    const stillDirty = flushed.some(t => t._dirty);
-    setSyncStatus(stillDirty ? 'error' : 'idle');
-  }, []);
+    try {
+      const flushed = await flushDirtyTasks(loadTasks());
+      setTasksAndCache(flushed);
+      const stillDirty = flushed.some(t => t._dirty);
+      setSyncStatus(stillDirty ? 'error' : 'idle');
+    } finally {
+      syncInFlightRef.current = false;
+    }
+  }, [setTasksAndCache]);
 
   useEffect(() => {
     retryDirtyTasks();
     const handleOnline = () => retryDirtyTasks();
-    const handleOffline = () => setSyncStatus('offline');
+    const handleOffline = () => {
+      if (loadTasks().some(t => t._dirty)) setSyncStatus('offline');
+      else setSyncStatus('idle');
+    };
     const handleFocus = () => retryDirtyTasks();
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
@@ -1250,14 +1291,25 @@ function AppShell({
 
   const handleProgressChange = (id: string, newProgress: number) => {
     if (actionLocksRef.current.has(id)) return;
-    setTasks(prev => {
+    setTasksAndCache(prev => {
       const updated = prev.map(t => t.id === id ? { ...t, progress: newProgress } : t);
       return markDirty(updated, id);
     });
+    if (id.startsWith('local-')) {
+      window.setTimeout(() => retryDirtyTasks(), 0);
+      return;
+    }
     // Background push
     apiUpdateTask(id, { progress: newProgress })
-      .then(() => setTasks(prev => markClean(prev, id)))
-      .catch(() => toast.error(t('sync.error')));
+      .then(() => setTasksAndCache(prev => {
+        const next = markClean(prev, id);
+        updateSyncStatusFromTasks(next);
+        return next;
+      }))
+      .catch(() => setTasksAndCache(prev => {
+        updateSyncStatusFromTasks(prev);
+        return prev;
+      }));
   };
 
   const handleAction = (id: string, action: ExitAction) => {
@@ -1279,7 +1331,7 @@ function AppShell({
     if (action === 'snooze') {
       setTimeout(() => {
         let order: Array<{ id: string; sortOrder: number }> = [];
-        setTasks(prev => {
+        setTasksAndCache(prev => {
           const task = prev.find(t => t.id === id);
           if (!task) return prev;
           const reordered = [...prev.filter(t => t.id !== id), task];
@@ -1287,20 +1339,31 @@ function AppShell({
           const normalized = reordered.map(t => {
             if (t.status !== 'todo' || t.deletedAt) return t;
             const next = { ...t, sortOrder: sortOrder++ };
-            order.push({ id: next.id, sortOrder: next.sortOrder });
+            if (!next.id.startsWith('local-')) {
+              order.push({ id: next.id, sortOrder: next.sortOrder });
+            }
             return next;
           });
-          return normalized.map(t => order.some(o => o.id === t.id) ? { ...t, _dirty: true } : t);
+          const remoteOrderIds = new Set(order.map(o => o.id));
+          return normalized.map(t => remoteOrderIds.has(t.id) ? { ...t, _dirty: true, _syncState: 'update' } : t);
         });
         window.setTimeout(() => {
           setExitAction(current => current?.taskId === id && current.action === action ? null : current);
         }, 520);
-        apiReorderTasks(order)
+        const syncOrder = order.length > 0 ? apiReorderTasks(order) : Promise.resolve();
+        syncOrder
           .then(() => {
             const ids = new Set(order.map(o => o.id));
-            setTasks(prev => prev.map(task => ids.has(task.id) ? { ...task, _dirty: false } : task));
+            setTasksAndCache(prev => {
+              const next = prev.map(task => ids.has(task.id) ? { ...task, _dirty: false, _syncState: undefined } : task);
+              updateSyncStatusFromTasks(next);
+              return next;
+            });
           })
-          .catch(() => toast.error(t('sync.error')))
+          .catch(() => setTasksAndCache(prev => {
+            updateSyncStatusFromTasks(prev);
+            return prev;
+          }))
           .finally(unlock);
       }, 170);
     } else {
@@ -1318,28 +1381,29 @@ function AppShell({
           deletedAt: null,
           sortOrder: tasks.filter(t => t.status === 'todo' && !t.deletedAt).length,
           _dirty: true,
+          _syncState: 'create',
         } : null;
 
-        setTasks(prev => {
+        setTasksAndCache(prev => {
           const updated = prev.map(t => t.id !== id ? t : { ...t, status: newStatus as TaskStatus });
           return markDirty(nextTask ? [...updated, nextTask] : updated, id);
         });
-        apiUpdateTask(id, { status: newStatus })
-          .then(() => setTasks(prev => markClean(prev, id)))
-          .catch(() => toast.error(t('sync.error')))
-          .finally(unlock);
-        if (nextTask) {
-          apiCreateTask({
-            title: nextTask.title, priority: nextTask.priority,
-            estimateMinutes: nextTask.estimateMinutes,
-            status: nextTask.status, tag: nextTask.tag,
-            progress: nextTask.progress, dueDate: nextTask.dueDate,
-            reminderAt: nextTask.reminderAt, repeatRule: nextTask.repeatRule,
-            sortOrder: nextTask.sortOrder,
-          }).then(created => {
-            setTasks(prev => markClean(prev.map(t => t.id === nextTask.id ? { ...t, id: created.id } : t), created.id));
-          }).catch(() => toast.error(t('sync.error')));
+        if (id.startsWith('local-')) {
+          window.setTimeout(() => { retryDirtyTasks().finally(unlock); }, 0);
+        } else {
+          apiUpdateTask(id, { status: newStatus })
+            .then(() => setTasksAndCache(prev => {
+              const next = markClean(prev, id);
+              updateSyncStatusFromTasks(next);
+              return next;
+            }))
+            .catch(() => setTasksAndCache(prev => {
+              updateSyncStatusFromTasks(prev);
+              return prev;
+            }))
+            .finally(unlock);
         }
+        if (nextTask) window.setTimeout(() => retryDirtyTasks(), 0);
         if (action === 'complete') {
           const newCount = completedTodayRef.current + 1;
           setCompletedToday(newCount);
@@ -1379,21 +1443,35 @@ function AppShell({
 
   /** Apply reordered pending tasks back into the full tasks array */
   const handleSaveOrder = (newPendingOrder: Task[]) => {
-    setTasks(prev => {
+    setTasksAndCache(prev => {
       const nonPending = prev.filter(t => t.status !== 'todo');
-      const ids = new Set(newPendingOrder.map(t => t.id));
-      return [...newPendingOrder, ...nonPending].map(t => ids.has(t.id) ? { ...t, _dirty: true } : t);
+      const remoteIds = new Set(newPendingOrder.filter(t => !t.id.startsWith('local-')).map(t => t.id));
+      return [...newPendingOrder, ...nonPending].map(t => remoteIds.has(t.id) ? { ...t, _dirty: true, _syncState: 'update' } : t);
     });
-    const order = newPendingOrder.map((t, i) => ({ id: t.id, sortOrder: i }));
-    apiReorderTasks(order)
+    const order = newPendingOrder
+      .map((t, i) => ({ id: t.id, sortOrder: i }))
+      .filter(t => !t.id.startsWith('local-'));
+    const syncOrder = order.length > 0 ? apiReorderTasks(order) : Promise.resolve();
+    syncOrder
       .then(() => {
-        const ids = new Set(newPendingOrder.map(t => t.id));
-        setTasks(prev => prev.map(t => ids.has(t.id) ? { ...t, _dirty: false } : t));
+        const ids = new Set(order.map(t => t.id));
+        setTasksAndCache(prev => {
+          const next = prev.map(t => ids.has(t.id) ? { ...t, _dirty: false, _syncState: undefined } : t);
+          updateSyncStatusFromTasks(next);
+          return next;
+        });
       })
-      .catch(() => toast.error('Reorder sync failed — retrying'));
+      .catch(() => setTasksAndCache(prev => {
+        updateSyncStatusFromTasks(prev);
+        return prev;
+      }));
   };
 
   const persistTaskUpdate = (id: string, data: Partial<Task>) => {
+    if (id.startsWith('local-')) {
+      window.setTimeout(() => retryDirtyTasks(), 0);
+      return;
+    }
     setSyncStatus(navigator.onLine ? 'syncing' : 'offline');
     apiUpdateTask(id, {
       title: data.title,
@@ -1408,11 +1486,16 @@ function AppShell({
       deletedAt: data.deletedAt,
       sortOrder: data.sortOrder,
     }).then(() => {
-      setTasks(prev => markClean(prev, id));
-      setSyncStatus('idle');
+      setTasksAndCache(prev => {
+        const next = markClean(prev, id);
+        updateSyncStatusFromTasks(next);
+        return next;
+      });
     }).catch(() => {
-      setSyncStatus(navigator.onLine ? 'error' : 'offline');
-      toast.error(t('sync.error'));
+      setTasksAndCache(prev => {
+        updateSyncStatusFromTasks(prev);
+        return prev;
+      });
     });
   };
 
@@ -1442,13 +1525,13 @@ function AppShell({
 
   const handleDeleteTask = (task: Task) => {
     const deletedAt = new Date().toISOString();
-    setTasks(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt } : t), task.id));
+    setTasksAndCache(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt } : t), task.id));
     persistTaskUpdate(task.id, { deletedAt });
     toast(t('task.deleted'), {
       action: {
         label: t('task.undo'),
         onClick: () => {
-          setTasks(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt: null } : t), task.id));
+          setTasksAndCache(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt: null } : t), task.id));
           persistTaskUpdate(task.id, { deletedAt: null });
         },
       },
@@ -1486,7 +1569,7 @@ function AppShell({
         repeatRule: form.repeatRule,
         tag: form.tag,
       };
-      setTasks(prev => markDirty(prev.map(t => t.id === editingTaskId ? { ...t, ...patch } : t), editingTaskId));
+      setTasksAndCache(prev => markDirty(prev.map(t => t.id === editingTaskId ? { ...t, ...patch } : t), editingTaskId));
       persistTaskUpdate(editingTaskId, patch);
       closeTaskForm();
       return;
@@ -1496,7 +1579,7 @@ function AppShell({
     const idx = insertIndex(tasks, { id: tempId, title: '', priority: form.priority, estimateMinutes: 0, status: 'todo', progress: 0, dueDate: form.dueDate || null, sortOrder: 0 } as Task);
 
     const optimisticTask: Task = {
-      id: tempId, _dirty: true,
+      id: tempId, _dirty: true, _syncState: 'create',
       title: form.title, priority: form.priority,
       estimateMinutes: parseInt(form.minutes) || 15,
       status: 'todo', progress: 0,
@@ -1504,26 +1587,12 @@ function AppShell({
       repeatRule: form.repeatRule, deletedAt: null, tag: form.tag,
       sortOrder: idx,
     };
-    setTasks(prev => {
+    setTasksAndCache(prev => {
       const i = insertIndex(prev, optimisticTask);
       return [...prev.slice(0, i), optimisticTask, ...prev.slice(i)];
     });
     closeTaskForm();
-    // Background push
-    apiCreateTask({
-      title: optimisticTask.title, priority: optimisticTask.priority,
-      estimateMinutes: optimisticTask.estimateMinutes,
-      status: optimisticTask.status, tag: optimisticTask.tag,
-      progress: optimisticTask.progress, dueDate: optimisticTask.dueDate,
-      reminderAt: optimisticTask.reminderAt, repeatRule: optimisticTask.repeatRule,
-      sortOrder: optimisticTask.sortOrder,
-    }).then(created => {
-      setTasks(prev => markClean(prev.map(t => t.id === tempId ? { ...t, id: created.id } : t), created.id));
-      setSyncStatus('idle');
-    }).catch((e) => {
-      setSyncStatus(navigator.onLine ? 'error' : 'offline');
-      toast.error(t('sync.error'));
-    });
+    window.setTimeout(() => retryDirtyTasks(), 0);
   };
   
   return (
@@ -1620,10 +1689,10 @@ function AppShell({
           transition={{ type: 'spring', stiffness: 360, damping: 36, mass: 0.85 }}
         >
           {/* ── Flow panel ── */}
-          <div className="flex flex-col items-center px-4 sm:px-6 pb-4 h-full" style={{ width: '50%' }}>
+          <div className="h-full overflow-y-auto px-4 sm:px-6 pb-4" style={{ width: '50%' }}>
             {pendingTasks.length > 0 ? (
-              <>
-                <div className="relative w-full aspect-[4/5] max-w-[360px] mt-2">
+              <div className="mx-auto flex min-h-full w-full max-w-sm flex-col items-center gap-4">
+                <div className="relative mt-2 w-full max-w-[360px] aspect-[4/5] shrink-0">
                   <AnimatePresence custom={exitAction} mode="popLayout">
                     {pendingTasks.slice(0, 3).map((task, index) => {
                       const isTop = index === 0;
@@ -1658,22 +1727,28 @@ function AppShell({
                 </div>
 
                 {/* Up next + reorder button */}
-                <div className="w-full max-w-sm mt-6 bg-card border border-border rounded-2xl p-3 shadow-sm">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold uppercase text-muted-foreground">{t('task.upNext')}</span>
+                <div className="w-full rounded-2xl border border-border bg-card p-3 shadow-sm">
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <span className="block text-xs font-semibold uppercase text-muted-foreground">{t('task.upNext')}</span>
+                      <span className="block truncate text-[11px] text-muted-foreground">
+                        {Math.max(pendingTasks.length - 1, 0)} queued
+                      </span>
+                    </div>
                     <button
                       onClick={() => setIsReordering(true)}
-                      className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors bg-muted hover:bg-muted/80 px-2.5 py-1.5 rounded-lg font-semibold"
+                      className="flex shrink-0 items-center gap-1.5 rounded-lg bg-muted px-2.5 py-1.5 text-xs font-semibold text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground"
                     >
                       <ArrowUpDown className="w-3.5 h-3.5" />{t('task.reorder')}
                     </button>
                   </div>
-                  <div className="space-y-1.5">
-                    {pendingTasks.slice(1, 4).map(task => (
-                      <div key={task.id} className="flex items-center gap-2 rounded-lg bg-muted/50 px-2.5 py-2">
+                  <div className="max-h-36 space-y-1.5 overflow-y-auto pr-1">
+                    {pendingTasks.slice(1).map((task, index) => (
+                      <div key={task.id} className="grid min-h-10 grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-2 rounded-lg bg-muted/50 px-2.5 py-2">
+                        <span className="w-5 text-right text-[11px] font-semibold text-muted-foreground tabular-nums">{index + 2}</span>
                         <span className={`w-2 h-2 rounded-full flex-shrink-0 ${DOT_COLOR[task.priority]}`} />
-                        <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{task.title}</span>
-                        <span className="text-xs text-muted-foreground">{task.estimateMinutes}m</span>
+                        <span className="min-w-0 truncate text-sm font-medium text-foreground">{task.title}</span>
+                        <span className="rounded-md bg-card/70 px-1.5 py-0.5 text-xs text-muted-foreground">{task.estimateMinutes}m</span>
                       </div>
                     ))}
                     {pendingTasks.length === 1 && (
@@ -1683,11 +1758,11 @@ function AppShell({
                 </div>
 
                 {/* Hint */}
-                <div className="w-full max-w-sm mt-3 px-1 flex gap-4 text-xs text-muted-foreground">
+                <div className="flex w-full gap-4 px-1 pb-1 text-xs text-muted-foreground">
                   <span className="flex items-center gap-1"><AlarmClock className="w-3 h-3" />{t('task.snoozeHint')}</span>
                   <span className="flex items-center gap-1"><SkipForward className="w-3 h-3" />{t('task.skipHint')}</span>
                 </div>
-              </>
+              </div>
             ) : (
               <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
                 className="flex flex-col items-center justify-center h-full w-full max-w-sm text-center px-6">
