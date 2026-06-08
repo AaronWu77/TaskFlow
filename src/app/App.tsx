@@ -4,7 +4,7 @@ import {
   Check, X, Clock, Plus, Flame, CheckCircle2,
   Calendar, Tag, XCircle, ChevronLeft, ChevronRight,
   ListTodo, SkipForward, AlarmClock, RotateCcw,
-  GripVertical, ArrowUpDown, Globe,
+  GripVertical, ArrowUpDown, Globe, ChevronUp, ChevronDown,
   Search, Bell, RotateCw
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
@@ -321,6 +321,16 @@ function fmtDate(y: number, m: number, d: number) {
   return `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 }
 
+function arrayMove<T>(items: T[], from: number, to: number): T[] {
+  if (from === to || from < 0 || to < 0 || from >= items.length || to >= items.length) {
+    return items;
+  }
+  const next = [...items];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  return next;
+}
+
 function quickDueDate(offset: number): string {
   const next = new Date();
   next.setDate(next.getDate() + offset);
@@ -607,23 +617,37 @@ function RepeatTaskModal({ task, onClose, onRepeat }: {
 // --- Reorder Row Item (with dedicated drag handle) ---
 function ReorderRow({
   task,
+  position,
+  isFirst,
   isDragging,
   dragOffsetY,
   setRowRef,
   onHandlePointerDown,
+  onMoveUp,
+  onMoveDown,
+  canMoveUp,
+  canMoveDown,
 }: {
   task: Task;
+  position: number;
+  isFirst: boolean;
   isDragging: boolean;
   dragOffsetY: number;
   setRowRef: (node: HTMLDivElement | null) => void;
   onHandlePointerDown: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <motion.div
       ref={setRowRef}
       layout
       className={cn(
-        'bg-card border border-border rounded-xl flex items-center gap-3 px-3 py-3.5 select-none',
+        'select-none rounded-2xl border px-3 py-3.5',
+        isFirst ? 'border-primary/20 bg-primary/5 shadow-sm' : 'border-border bg-card',
         isDragging && 'relative z-10 border-primary/40 shadow-lg shadow-black/10'
       )}
       animate={{ y: isDragging ? dragOffsetY : 0, scale: isDragging ? 1.015 : 1 }}
@@ -631,20 +655,66 @@ function ReorderRow({
         ? { type: 'tween', duration: 0.02 }
         : { type: 'spring', stiffness: 420, damping: 34, mass: 0.75 }}
     >
-      <button
-        onPointerDown={onHandlePointerDown}
-        className="touch-none cursor-grab active:cursor-grabbing text-muted-foreground hover:text-foreground transition-colors flex-shrink-0 p-1 -m-1 rounded"
-        aria-label={`Reorder ${task.title}`}
-        type="button"
-      >
-        <GripVertical className="w-5 h-5" />
-      </button>
-      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${DOT_COLOR[task.priority]}`} />
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-foreground leading-snug truncate">{task.title}</p>
-        {task.tag && <p className="text-xs text-muted-foreground mt-0.5">{task.tag}</p>}
+      <div className="flex items-start gap-3">
+        <div className="flex min-w-0 flex-1 items-start gap-3">
+          <button
+            onPointerDown={onHandlePointerDown}
+            className="mt-0.5 touch-none cursor-grab rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:cursor-grabbing"
+            aria-label={`Reorder ${task.title}`}
+            type="button"
+          >
+            <GripVertical className="h-5 w-5" />
+          </button>
+          <div className="mt-1 flex w-8 flex-col items-center gap-2">
+            <span className="text-xs font-semibold text-muted-foreground tabular-nums">{position}</span>
+            <span className={`h-2.5 w-2.5 rounded-full ${DOT_COLOR[task.priority]}`} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="min-w-0 flex-1 text-sm font-semibold leading-snug text-foreground">
+                {task.title}
+              </p>
+              {isFirst && (
+                <span className="rounded-full bg-primary/10 px-2 py-1 text-[11px] font-semibold text-primary">
+                  {t('task.now')}
+                </span>
+              )}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span className="rounded-md bg-muted px-2 py-1">{task.estimateMinutes}m</span>
+              <span className={`rounded-md px-2 py-1 font-semibold ${PRIORITY_BADGE[task.priority]}`}>
+                {task.priority}
+              </span>
+              {task.tag && (
+                <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1">
+                  <Tag className="h-3 w-3" />
+                  {task.tag}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-col gap-1">
+          <button
+            type="button"
+            onClick={onMoveUp}
+            disabled={!canMoveUp}
+            aria-label={`Move ${task.title} up`}
+            className="rounded-lg border border-border p-1.5 text-muted-foreground transition-colors hover:border-primary/30 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <ChevronUp className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={onMoveDown}
+            disabled={!canMoveDown}
+            aria-label={`Move ${task.title} down`}
+            className="rounded-lg border border-border p-1.5 text-muted-foreground transition-colors hover:border-primary/30 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <ChevronDown className="h-4 w-4" />
+          </button>
+        </div>
       </div>
-      <span className="text-xs text-muted-foreground bg-muted px-2 py-1 rounded-md flex-shrink-0">{task.estimateMinutes}m</span>
     </motion.div>
   );
 }
@@ -659,6 +729,7 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
   const taskById = useMemo(() => new Map(pendingTasks.map(task => [task.id, task])), [pendingTasks]);
   const pendingTaskIds = useMemo(() => pendingTasks.map(task => task.id), [pendingTasks]);
   const pendingTaskIdsKey = pendingTaskIds.join('\u001f');
+  const currentOrderKey = orderIds.join('\u001f');
   const order = useMemo(
     () => orderIds.map(id => taskById.get(id)).filter((task): task is Task => !!task),
     [orderIds, taskById]
@@ -667,9 +738,27 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
   const rowRefs = React.useRef(new Map<string, HTMLDivElement>());
   const lastHapticIndexRef = React.useRef<number | null>(null);
 
-  React.useEffect(() => { setOrderIds(pendingTaskIds); }, [pendingTaskIdsKey]);
+  React.useEffect(() => {
+    if (!isOpen) return;
+    setOrderIds(pendingTaskIds);
+    setDragState(null);
+  }, [isOpen, pendingTaskIdsKey]);
 
-  const handleDone = () => { onSave(order); onClose(); };
+  const hasChanges = currentOrderKey !== pendingTaskIdsKey;
+  const leadTask = order[0] ?? null;
+  const queuedCount = Math.max(order.length - 1, 0);
+
+  const handleClose = () => {
+    setOrderIds(pendingTaskIds);
+    setDragState(null);
+    onClose();
+  };
+
+  const handleDone = () => {
+    if (hasChanges) onSave(order);
+    onClose();
+  };
+
   const setRowRef = React.useCallback((id: string, node: HTMLDivElement | null) => {
     if (node) rowRefs.current.set(id, node);
     else rowRefs.current.delete(id);
@@ -677,12 +766,12 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
 
   const moveDraggedId = React.useCallback((dragId: string, pointerY: number) => {
     setOrderIds(prev => {
-      const currentIndex = prev.indexOf(dragId);
-      if (currentIndex < 0) return prev;
+      if (!prev.includes(dragId)) return prev;
+      const withoutDragged = prev.filter(id => id !== dragId);
+      let targetIndex = withoutDragged.length;
 
-      let targetIndex = currentIndex;
-      for (let i = 0; i < prev.length; i += 1) {
-        const id = prev[i];
+      for (let i = 0; i < withoutDragged.length; i += 1) {
+        const id = withoutDragged[i];
         const row = rowRefs.current.get(id);
         if (!row) continue;
         const rect = row.getBoundingClientRect();
@@ -691,18 +780,29 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
           targetIndex = i;
           break;
         }
-        targetIndex = i;
       }
 
-      if (targetIndex === currentIndex) return prev;
-      const next = [...prev];
-      const [moved] = next.splice(currentIndex, 1);
-      next.splice(targetIndex, 0, moved);
-      if (lastHapticIndexRef.current !== targetIndex) {
-        lastHapticIndexRef.current = targetIndex;
+      const next = [...withoutDragged];
+      next.splice(targetIndex, 0, dragId);
+      const nextKey = next.join('\u001f');
+      if (nextKey === prev.join('\u001f')) return prev;
+
+      const nextIndex = next.indexOf(dragId);
+      if (lastHapticIndexRef.current !== nextIndex) {
+        lastHapticIndexRef.current = nextIndex;
         Haptics.impact({ style: ImpactStyle.Light }).catch(() => {});
       }
       return next;
+    });
+  }, []);
+
+  const moveByStep = React.useCallback((id: string, direction: -1 | 1) => {
+    setOrderIds(prev => {
+      const currentIndex = prev.indexOf(id);
+      const nextIndex = currentIndex + direction;
+      if (currentIndex < 0 || nextIndex < 0 || nextIndex >= prev.length) return prev;
+      Haptics.impact({ style: ImpactStyle.Light }).catch(() => {});
+      return arrayMove(prev, currentIndex, nextIndex);
     });
   }, []);
 
@@ -743,7 +843,7 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.2 }}
             className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40"
-            onClick={handleDone}
+            onClick={handleClose}
           />
           <motion.div
             key="sheet"
@@ -758,17 +858,25 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
               <div className="w-10 h-1 rounded-full bg-muted-foreground/30" />
             </div>
 
-            <div className="flex items-center justify-between px-5 py-3 border-b border-border">
+            <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-3">
               <div>
                 <h2 className="text-base font-bold">{t('task.reorderTasks')}</h2>
                 <p className="text-xs text-muted-foreground mt-0.5">{t('task.reorderHint')}</p>
               </div>
-              <button
-                onClick={handleDone}
-                className="flex items-center gap-1.5 bg-primary text-primary-foreground px-4 py-2 rounded-xl text-sm font-semibold active:scale-95 transition-transform"
-              >
-                <Check className="w-4 h-4" />{t('task.done')}
-              </button>
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  onClick={handleClose}
+                  className="rounded-xl border border-border px-3 py-2 text-sm font-semibold text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
+                >
+                  {t('task.cancel')}
+                </button>
+                <button
+                  onClick={handleDone}
+                  className="flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-transform active:scale-95"
+                >
+                  <Check className="w-4 h-4" />{t('task.done')}
+                </button>
+              </div>
             </div>
 
             <div className="overflow-y-auto flex-1 px-4 py-3">
@@ -778,25 +886,52 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
                   <p className="text-sm text-muted-foreground">{t('task.noPendingTasks')}</p>
                 </div>
               ) : (
-                <div className="space-y-2">
-                  {order.map(task => (
-                    <ReorderRow
-                      key={task.id}
-                      task={task}
-                      isDragging={dragState?.id === task.id}
-                      dragOffsetY={dragState?.id === task.id ? dragState.currentY - dragState.startY : 0}
-                      setRowRef={(node) => setRowRef(task.id, node)}
-                      onHandlePointerDown={(event) => startDrag(task.id, event)}
-                    />
-                  ))}
-                </div>
+                <>
+                  {leadTask && (
+                    <div className="mb-3 rounded-2xl border border-primary/20 bg-primary/5 p-3">
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-primary/80">
+                            {t('task.currentFocus')}
+                          </p>
+                          <p className="mt-1 text-sm font-semibold text-foreground">{leadTask.title}</p>
+                        </div>
+                        <span className="rounded-full bg-background/80 px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                          {t('task.queuedCount', { count: queuedCount })}
+                        </span>
+                      </div>
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        {t('task.reorderLeadHint')}
+                      </p>
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    {order.map((task, index) => (
+                      <ReorderRow
+                        key={task.id}
+                        task={task}
+                        position={index + 1}
+                        isFirst={index === 0}
+                        isDragging={dragState?.id === task.id}
+                        dragOffsetY={dragState?.id === task.id ? dragState.currentY - dragState.startY : 0}
+                        setRowRef={(node) => setRowRef(task.id, node)}
+                        onHandlePointerDown={(event) => startDrag(task.id, event)}
+                        onMoveUp={() => moveByStep(task.id, -1)}
+                        onMoveDown={() => moveByStep(task.id, 1)}
+                        canMoveUp={index > 0}
+                        canMoveDown={index < order.length - 1}
+                      />
+                    ))}
+                  </div>
+                </>
               )}
             </div>
 
             <div className="px-5 py-3 border-t border-border">
-              <p className="text-xs text-center text-muted-foreground">
-                {order.length} {t('task.tasksInFlow')}
-              </p>
+              <div className="flex items-center justify-between gap-4 text-xs text-muted-foreground">
+                <p>{order.length} {t('task.tasksInFlow')}</p>
+                <p>{hasChanges ? t('task.unsavedChanges') : t('task.orderSaved')}</p>
+              </div>
             </div>
           </motion.div>
         </>
