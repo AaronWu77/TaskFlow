@@ -8,13 +8,13 @@
 
 ```
 iPhone (Capacitor WKWebView)
-  └─ HTTP/HTTPS → Nginx :80/443（阿里云 47.95.226.89）
+  └─ HTTPS → Nginx :443（taskflow.top / 阿里云 47.95.226.89）
                       ├─ /api/* → Express :3000（Docker 内部网络）
                       └─ /health
                           └─ Prisma → PostgreSQL :5432（Docker 内部网络）
 ```
 
-**关键设计：** 前端 `VITE_API_URL` 必须带 `/api` 后缀，如 `http://47.95.226.89/api`。Nginx 只代理 `/api/` 路径，不带此前缀的请求会 404。
+**关键设计：** 前端 `VITE_API_URL` 必须带 `/api` 后缀，如 `https://taskflow.top/api`。Nginx 代理 `/api/` 到 API 容器，`/health` 用于健康检查。
 
 ---
 
@@ -93,23 +93,27 @@ cat > .env << EOF
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 JWT_ACCESS_SECRET=$(openssl rand -hex 48)
 JWT_REFRESH_SECRET=$(openssl rand -hex 48)
-CORS_ORIGIN=http://47.95.226.89,capacitor://localhost,http://localhost:5173,https://taskflow.top
-COOKIE_SECURE=false
+CORS_ORIGIN=https://taskflow.top,https://www.taskflow.top,capacitor://localhost
+COOKIE_SECURE=true
+EMAIL_VERIFICATION_CONSOLE=false
+RESEND_API_KEY=<Resend API Key，必须在 Resend 后台创建并妥善保存>
+EMAIL_FROM=TaskFlow <verify@taskflow.top>
+EMAIL_VERIFICATION_WEBHOOK_URL=
+EMAIL_VERIFICATION_WEBHOOK_TOKEN=
 EOF
 ```
 
 ### 3. 启动
 
 ```bash
-docker compose build
-docker compose up -d
+docker compose up -d --build
 ```
 
 ### 4. 验证
 
 ```bash
 docker compose ps          # 三个容器均为 Up
-curl http://localhost/health    # → {"status":"ok"}
+curl https://taskflow.top/health    # → {"status":"ok"}
 ```
 
 ### 5. 后续更新（标准流程）
@@ -125,7 +129,7 @@ git push origin main
 ssh root@47.95.226.89
 cd /opt/TaskFlow
 git pull
-docker compose up -d --build api
+docker compose up -d --build
 ```
 
 如果出现了env里内容不匹配的问题，则
@@ -142,7 +146,7 @@ nano /opt/TaskFlow/.env
 
 ```bash
 cd ~/Desktop/TaskFlow
-echo "VITE_API_URL=http://47.95.226.89/api" > .env.local   # ← 注意 /api 后缀
+echo "VITE_API_URL=https://taskflow.top/api" > .env.local   # ← 注意 /api 后缀
 pnpm run dev    # → http://localhost:5173
 ```
 
@@ -150,29 +154,62 @@ pnpm run dev    # → http://localhost:5173
 
 ```bash
 cd ~/Desktop/TaskFlow
-VITE_API_URL=http://47.95.226.89/api npm run ios
+VITE_API_URL=https://taskflow.top/api npm run ios
 # Xcode 打开后 → Clean Build Folder → ⌘R
 ```
 
 > ⚠️ 每次修改 `VITE_API_URL` 或 Info.plist，必须重新 `npm run ios` + Clean Build Folder。
 
-### 域名通过后切换 HTTPS
+### HTTPS 证书配置
 
 ```bash
-# 1. 服务器申请 Let's Encrypt
+# 1. 服务器申请 Let's Encrypt（HTTP 验证失败时使用 DNS 验证）
 apt install -y certbot
-docker compose stop nginx
-certbot certonly --standalone -d taskflow.top -d www.taskflow.top
-mkdir -p /opt/TaskFlow/ssl
-cp /etc/letsencrypt/live/taskflow.top/fullchain.pem /opt/TaskFlow/ssl/
-cp /etc/letsencrypt/live/taskflow.top/privkey.pem /opt/TaskFlow/ssl/
+docker compose down
+certbot certonly --manual --preferred-challenges dns -d taskflow.top -d www.taskflow.top
 
-# 2. 编辑 nginx.conf，取消 HTTPS server 块和 HTTP 重定向注释
-# 3. 更新 .env CORS_ORIGIN 为 HTTPS 域名
-# 4. 删除 Info.plist 中的 NSAllowsArbitraryLoadsInWebContent（HTTPS 不再需要）
+# 2. 按 Certbot 提示在阿里云 DNS 添加 TXT 记录：
+# _acme-challenge
+# _acme-challenge.www
+
+# 3. 证书签发后复制到项目 ssl 目录
+mkdir -p /opt/TaskFlow/ssl
+cp /etc/letsencrypt/live/taskflow.top/fullchain.pem /opt/TaskFlow/ssl/fullchain.pem
+cp /etc/letsencrypt/live/taskflow.top/privkey.pem /opt/TaskFlow/ssl/privkey.pem
+
+# 4. 启动服务并验证
+docker compose up -d --build
+curl https://taskflow.top/health
+
 # 5. 重新构建 iOS
 VITE_API_URL=https://taskflow.top/api npm run ios
 ```
+
+> 注意：手动 DNS 证书不会自动续期。当前证书到期前需要重新运行 DNS 验证命令，复制新证书后 `docker compose restart nginx`。
+
+---
+
+## 三、清空旧数据库并以新结构为准
+
+如果确认旧数据完全不需要，可以删除 Docker volume，让 PostgreSQL 重新初始化，并由 API 容器启动时执行 Prisma migrations。
+
+**危险：以下命令会永久删除生产数据库数据。执行前确认不需要备份。**
+
+```bash
+cd /opt/TaskFlow
+docker compose down -v
+docker compose up -d --build
+```
+
+如果想先备份再清空：
+
+```bash
+docker compose exec postgres pg_dump -U taskflow taskflow > backup_$(date +%Y%m%d_%H%M%S).sql
+docker compose down -v
+docker compose up -d --build
+```
+
+重置后需要重新注册账号，并通过 Resend 邮箱验证码完成验证。
 
 ---
 
@@ -180,7 +217,7 @@ VITE_API_URL=https://taskflow.top/api npm run ios
 
 ```bash
 # 更新代码
-cd /opt/TaskFlow && git pull && docker compose up -d --build api
+cd /opt/TaskFlow && git pull && docker compose up -d --build
 
 # 查看日志
 docker compose logs -f api
@@ -248,14 +285,17 @@ app.use(cors({
 POSTGRES_PASSWORD=<随机生成>
 JWT_ACCESS_SECRET=<随机生成>
 JWT_REFRESH_SECRET=<随机生成>
-CORS_ORIGIN=http://47.95.226.89,capacitor://localhost,http://localhost:5173,https://taskflow.top
-COOKIE_SECURE=false
+CORS_ORIGIN=https://taskflow.top,https://www.taskflow.top,capacitor://localhost
+COOKIE_SECURE=true
+EMAIL_VERIFICATION_CONSOLE=false
+RESEND_API_KEY=<server-only secret>
+EMAIL_FROM=TaskFlow <verify@taskflow.top>
 ```
 
 ### `.env.local`（Mac 前端）
 
 ```
-VITE_API_URL=http://47.95.226.89/api
+VITE_API_URL=https://taskflow.top/api
 ```
 
 ### `ios/App/App/Info.plist`（ATS 部分）

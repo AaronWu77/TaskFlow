@@ -191,8 +191,10 @@ accessToken 存在 `localStorage['taskflow_access_token']`；refreshToken 存在
 
 ```
 GET  /health              → 健康检查（无鉴权）
-POST /auth/register       → 注册
-POST /auth/login          → 登录
+POST /auth/register       → 注册并发送邮箱验证码
+POST /auth/verify-email   → 验证邮箱并签发登录会话
+POST /auth/resend-verification → 重新发送邮箱验证码
+POST /auth/login          → 登录（未验证邮箱会重新发送验证码）
 POST /auth/refresh        → 刷新 accessToken（读 httpOnly cookie）
 POST /auth/logout         → 登出（清除 cookie）
 
@@ -223,22 +225,34 @@ npx prisma studio --schema=src/prisma/schema.prisma
 
 ## 5. 认证流程
 
-### 注册 / 登录
+### 注册 / 邮箱验证 / 登录
 
 ```
 客户端 → POST /auth/register { email, password }
 服务端：
-  1. 检查邮箱唯一性
-  2. bcrypt.hash(password, 12)
-  3. 写入 User 表
-  4. 签发 accessToken（15min，HS256，JWT_ACCESS_SECRET）
-  5. 签发 refreshToken（7d，HS256，JWT_REFRESH_SECRET）
-  6. Set-Cookie: taskflow_refresh=<refreshToken>; HttpOnly; SameSite=Strict
-  7. 返回 { accessToken, user: { id, email } }
+  1. 标准化邮箱并校验格式
+  2. 按 IP + email 做注册限流
+  3. 检查邮箱唯一性
+  4. 通过 Resend 或开发环境 console 发送 6 位验证码
+  5. bcrypt.hash(password, 12)
+  6. 写入 User 表，emailVerifiedAt 为空
+  7. 返回 { requiresEmailVerification: true, user }
 
 客户端：
-  1. 存 accessToken 到 localStorage
-  2. Cookie 由浏览器自动管理
+  1. 进入验证码界面
+  2. POST /auth/verify-email { email, code }
+  3. 验证成功后服务端写入 emailVerifiedAt
+  4. 签发 accessToken + refreshToken
+  5. Cookie 由浏览器自动管理
+```
+
+```
+客户端 → POST /auth/login { email, password }
+服务端：
+  1. 校验邮箱格式和登录限流
+  2. 校验 bcrypt 密码
+  3. 如果 emailVerifiedAt 为空，重新发送验证码并返回 EMAIL_NOT_VERIFIED
+  4. 如果已验证，签发 accessToken + refreshToken
 ```
 
 ### Token 刷新
@@ -246,15 +260,20 @@ npx prisma studio --schema=src/prisma/schema.prisma
 ```
 客户端 → POST /auth/refresh（自动携带 Cookie）
 服务端：
-  1. 读取 req.cookies.taskflow_refresh
+  1. 读取 req.cookies.taskflow_refresh 或 Authorization fallback refresh token
   2. jwt.verify(token, JWT_REFRESH_SECRET)
-  3. 签发新 accessToken
-  4. 返回 { accessToken }
+  3. 查询 RefreshSession，确认未撤销且未过期
+  4. 撤销旧 refresh session，创建新 refresh session
+  5. 签发新 accessToken 和 refreshToken
+  6. 返回 { accessToken, refreshToken, user }
 ```
 
 ### 安全注意事项
 
 - **生产环境**必须在 HTTPS 下运行，否则 `httpOnly` cookie 的 `Secure` 属性无法生效
+- 生产环境 `.env` 必须设置 `COOKIE_SECURE=true`
+- 生产环境 `.env` 必须设置 `RESEND_API_KEY` 和 `EMAIL_FROM`，否则新用户无法收到验证码
+- 已泄露的 Resend API Key 必须立刻在 Resend 后台撤销并重新生成
 - JWT 密钥至少 32 字节随机字符串，生成方法：
   ```bash
   node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"

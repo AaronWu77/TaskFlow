@@ -249,8 +249,9 @@ router.post('/register', asyncHandler(async (req, res) => {
       user: userPayload(user),
       ...verification,
     });
-  } catch {
-    res.status(503).json({ code: 'EMAIL_DELIVERY_NOT_CONFIGURED', error: 'Email verification delivery is not configured' });
+  } catch (err) {
+    console.error('TaskFlow email verification delivery failed:', err);
+    res.status(503).json({ code: 'EMAIL_DELIVERY_FAILED', error: 'Email verification delivery failed' });
   }
 }));
 
@@ -291,8 +292,9 @@ router.post('/login', asyncHandler(async (req, res) => {
         user: userPayload(user),
         ...verification,
       });
-    } catch {
-      res.status(503).json({ code: 'EMAIL_DELIVERY_NOT_CONFIGURED', error: 'Email verification delivery is not configured' });
+    } catch (err) {
+      console.error('TaskFlow email verification delivery failed:', err);
+      res.status(503).json({ code: 'EMAIL_DELIVERY_FAILED', error: 'Email verification delivery failed' });
     }
     return;
   }
@@ -322,8 +324,9 @@ router.post('/resend-verification', asyncHandler(async (req, res) => {
   try {
     const verification = await startEmailVerification(user.email);
     res.json({ ok: true, ...verification });
-  } catch {
-    res.status(503).json({ code: 'EMAIL_DELIVERY_NOT_CONFIGURED', error: 'Email verification delivery is not configured' });
+  } catch (err) {
+    console.error('TaskFlow email verification delivery failed:', err);
+    res.status(503).json({ code: 'EMAIL_DELIVERY_FAILED', error: 'Email verification delivery failed' });
   }
 }));
 
