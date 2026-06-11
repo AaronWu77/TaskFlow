@@ -114,18 +114,79 @@ export async function apiFetch(path: string, options: RequestInit = {}): Promise
 export interface AuthUser {
   id: string;
   email: string;
+  emailVerifiedAt?: string | null;
+  emailVerified?: boolean;
 }
 
-export async function apiLogin(email: string, password: string): Promise<{ user: AuthUser; accessToken: string }> {
+export interface AuthSuccess {
+  user: AuthUser;
+  accessToken: string;
+}
+
+export interface AuthVerificationRequired {
+  requiresEmailVerification: true;
+  user: AuthUser;
+  devCode?: string;
+}
+
+export type AuthResult = AuthSuccess | AuthVerificationRequired;
+
+function isVerificationRequired(data: unknown): data is AuthVerificationRequired {
+  return !!data && typeof data === 'object' && (data as { requiresEmailVerification?: unknown }).requiresEmailVerification === true;
+}
+
+async function parseAuthResponse(res: Response, fallback: string): Promise<AuthResult> {
+  const data = await res.json().catch(() => ({ error: fallback })) as {
+    error?: string;
+    user?: AuthUser;
+    accessToken?: string;
+    refreshToken?: string;
+    requiresEmailVerification?: boolean;
+    devCode?: string;
+  };
+  if (!res.ok) {
+    if (isVerificationRequired(data) && data.user) return data;
+    throw new Error(data.error || fallback);
+  }
+  if (data.requiresEmailVerification && data.user) {
+    return { requiresEmailVerification: true, user: data.user, devCode: data.devCode };
+  }
+  if (!data.accessToken || !data.user) throw new Error(fallback);
+  setAccessToken(data.accessToken);
+  setStoredRefreshToken(data.refreshToken ?? null);
+  return { user: data.user, accessToken: data.accessToken };
+}
+
+export async function apiLogin(email: string, password: string): Promise<AuthResult> {
   const res = await fetch(`${BASE_URL}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
     body: JSON.stringify({ email, password }),
   });
+  return parseAuthResponse(res, 'Login failed');
+}
+
+export async function apiRegister(email: string, password: string): Promise<AuthResult> {
+  const res = await fetch(`${BASE_URL}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ email, password }),
+  });
+  return parseAuthResponse(res, 'Registration failed');
+}
+
+export async function apiVerifyEmail(email: string, code: string): Promise<AuthSuccess> {
+  const res = await fetch(`${BASE_URL}/auth/verify-email`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ email, code }),
+  });
   if (!res.ok) {
-    const err = await res.json() as { error: string };
-    throw new Error(err.error || 'Login failed');
+    const err = await res.json().catch(() => ({ error: 'Email verification failed' })) as { error: string };
+    throw new Error(err.error || 'Email verification failed');
   }
   const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken?: string };
   setAccessToken(data.accessToken);
@@ -133,21 +194,18 @@ export async function apiLogin(email: string, password: string): Promise<{ user:
   return data;
 }
 
-export async function apiRegister(email: string, password: string): Promise<{ user: AuthUser; accessToken: string }> {
-  const res = await fetch(`${BASE_URL}/auth/register`, {
+export async function apiResendVerification(email: string): Promise<{ ok: true; devCode?: string; alreadyVerified?: boolean }> {
+  const res = await fetch(`${BASE_URL}/auth/resend-verification`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email }),
   });
   if (!res.ok) {
-    const err = await res.json() as { error: string };
-    throw new Error(err.error || 'Registration failed');
+    const err = await res.json().catch(() => ({ error: 'Failed to resend verification code' })) as { error: string };
+    throw new Error(err.error || 'Failed to resend verification code');
   }
-  const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken?: string };
-  setAccessToken(data.accessToken);
-  setStoredRefreshToken(data.refreshToken ?? null);
-  return data;
+  return res.json() as Promise<{ ok: true; devCode?: string; alreadyVerified?: boolean }>;
 }
 
 export async function apiLogout(): Promise<void> {

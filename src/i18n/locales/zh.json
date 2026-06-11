@@ -113,6 +113,16 @@
     "passwordHint": "（至少8个字符）",
     "emailPlaceholder": "example@domain.com",
     "passwordPlaceholder": "••••••••",
+    "verifyTitle": "验证邮箱",
+    "verifyHeading": "请查看你的邮箱",
+    "verifyDescription": "请输入发送到 {{email}} 的 6 位验证码，验证后才会开启云同步。",
+    "verificationCode": "验证码",
+    "verificationCodePlaceholder": "123456",
+    "verifyAndContinue": "验证并继续",
+    "resendCode": "重新发送验证码",
+    "resending": "发送中...",
+    "backToSignIn": "返回登录",
+    "devCode": "开发环境验证码：{{code}}",
     "privacyNote": "你的任务数据仅自己可见，跨设备同步。"
   },
   "account": {

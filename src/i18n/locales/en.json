@@ -113,6 +113,16 @@
     "passwordHint": "(min 8 chars)",
     "emailPlaceholder": "you@example.com",
     "passwordPlaceholder": "••••••••",
+    "verifyTitle": "Verify your email",
+    "verifyHeading": "Check your inbox",
+    "verifyDescription": "Enter the 6-digit code sent to {{email}} before cloud sync is enabled.",
+    "verificationCode": "Verification code",
+    "verificationCodePlaceholder": "123456",
+    "verifyAndContinue": "Verify and Continue",
+    "resendCode": "Resend code",
+    "resending": "Sending...",
+    "backToSignIn": "Back to sign in",
+    "devCode": "Development code: {{code}}",
     "privacyNote": "Your tasks stay private and sync across devices."
   },
   "account": {

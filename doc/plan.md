@@ -1,138 +1,207 @@
-# TaskFlow 问题修复实施计划（第二轮）
+# TaskFlow App Store 化优化分阶段计划
 
-## 1. 功能目的
+## 0. 计划目标
 
-### 1.1 问题
+当前 TaskFlow 已具备任务流、日历、账号、JWT 刷新、PostgreSQL 同步和 iOS Capacitor 基础，但还不适合直接作为可公开注册的 App Store 产品上线。核心风险集中在账号真实性、用户数据隔离、本地缓存按账号隔离、服务端数据校验、同步冲突、隐私合规和 UI/UX 反馈。
 
-用户报告当前版本存在三类可感知问题：
-
-1. **自动登录失效**：退出 App 并关闭后台后再次进入，未能自动恢复登录状态，需要重新输入邮箱和密码。
-2. **任务卡片交互异常**：在 Flow 与 Calendar 界面中，进度条只能点击不能滑动（滑动触发 Snooze），且点击 Snooze/Skip 按钮实际触发的是 Complete 动作。
-3. **主色调切换**：账户页需要提供主色调切换功能（经代码审查发现此功能已实现，需验证是否正常工作）。
-
-### 1.2 目标
-
-1. 自动登录在冷启动后稳定恢复，refresh token 机制在 Web 和 iOS 两端均可靠工作。
-2. 进度条可正常拖动滑动；Snooze/Skip/Complete 三个按钮各自触发正确动作，互不干扰。
-3. 确认主色调切换功能正常工作，如有问题则修复。
-4. Web 与 iOS（Capacitor）两端行为一致。
-
-### 1.3 范围边界
-
-1. 本次不重构整体架构，不拆分 `src/app/App.tsx`。
-2. 不修改 shadcn/ui 组件库源码，仅在业务层修复。
-3. 不引入新的依赖。
+本计划目标是先完成一个安全、可信、可审核的 App Store v1 版本，而不是优先增加大量新功能。
 
 ---
 
-## 2. 根因分析
+## Phase 1: 安全与认证地基
 
-### 2.1 自动登录失效
+### 当前问题
 
-**当前架构**：
-- Access token 仅存内存（`api.ts:10`），页面刷新即丢失
-- Web 端 refresh token 仅依赖 httpOnly cookie `taskflow_refresh`（`api.ts:34-36` 返回 null）
-- iOS 端 refresh token 存 Capacitor Preferences（`api.ts:38-43`）
-- 启动时 `restoreSession()` 调用 `apiRefreshDetailed()` 尝试刷新（`App.tsx:1980`）
+1. `backend/src/routes/auth.ts` 只校验邮箱/密码非空和密码长度，任意字符串或不存在的邮箱都可能创建账号。
+2. 注册后立即登录并开启同步，没有邮箱真实性验证。
+3. 注册、登录、刷新 token 接口缺少防滥用措施，容易被暴力尝试或批量注册。
+4. 生产配置仍允许 HTTP 与 `COOKIE_SECURE=false`，`nginx.conf` 的 HTTPS 配置仍是注释状态。
 
-**可能根因**：
-1. **Web 端 cookie 丢失**：`SameSite: 'strict'`（`backend/src/routes/auth.ts:31`）在某些场景下阻止 cookie 发送；浏览器可能在关闭后清除 cookie
-2. **iOS 端 Capacitor Preferences 不可靠**：WKWebView 的 httpOnly cookie 不保证跨重启持久化；Preferences 存储可能被 iOS 清理
-3. **后端 JWT secret 变更**：如果后端重启导致 `JWT_REFRESH_SECRET` 变化，所有已签发的 refresh token 失效
-4. **`canUseSession` 逻辑缺陷**：`isSessionExpired` 基于客户端时间戳（7天TTL），但 `clearSession()` 直接删除 session 而非设置 `signedOut: true`，导致 `signedOut` 守卫形同虚设（`App.tsx:90-94`）
+### 解决方案
 
-### 2.2 任务卡片交互异常
+1. 增加邮箱标准化和格式校验：统一 trim、小写化，后端拒绝非法邮箱格式。
+2. 增加邮箱验证流程：注册后发送验证码或 magic link，数据库新增 `emailVerifiedAt` 字段。
+3. 未验证邮箱进入受限状态：允许查看本地界面，但禁止云同步写入，账号页明确显示“邮箱未验证”。
+4. 增加注册和登录限流：按 IP、邮箱、设备维度限制请求频率。
+5. 增加登录失败保护：失败次数过多后短暂冷却，错误信息不暴露账号是否存在。
+6. 生产环境强制 HTTPS、`COOKIE_SECURE=true`、HSTS、正式 CORS 白名单。
 
-**2.0.0 版本（正常）**：
-- 按钮使用简单 `onClick` + `isSlidingProgress` 守卫
-- 进度条有完整的 `onPointerDown/Up/Cancel` + `onMouseUp` + `onTouchStart/End` 处理
+### 验收标准
 
-**当前版本（异常）**：
-- 按钮增加了 `onPointerDown`/`onPointerUp` 用于视觉反馈（`pressedAction`），但 **未调用 `e.stopPropagation()`**
-- 进度条移除了 `onMouseUp` 和 `onTouchStart/End`，仅保留 pointer 事件
-- 新增 `runAction()` 包装函数，引入 `canTriggerAction()` 检查和 `blockActionUntilRef` 防抖
-
-**可能根因**：
-1. **Pointer 事件冒泡**：按钮的 `onPointerDown` 未 `stopPropagation()`，事件可能冒泡到父容器干扰其他组件
-2. **`isSlidingProgress` 状态竞争**：React state 异步更新，`runAction` 中检查的 `isSlidingProgress` 可能是过期值
-3. **CSS 层叠问题**：Complete 按钮 `z-20` 与 Snooze/Skip 容器 `z-20` 相同，Complete 按钮可能在视觉上覆盖了 Snooze/Skip 的点击区域
-
-### 2.3 主色调切换
-
-**现状**：代码中已实现 5 套预设主色调（lavender/ocean/forest/sunset/rose），AccountPage 中已有色块选择 UI，且有 `accentThemeReady` 门控防止 iOS 冷启动覆盖。**此功能可能已正常工作**，需用户确认。
+1. 无效邮箱、空邮箱、格式错误邮箱不能注册。
+2. 未验证邮箱不能开启完整云同步。
+3. 重复注册、频繁登录、频繁验证码请求会被限流。
+4. 生产构建只允许正式 API 域名、Capacitor origin 和 HTTPS cookie。
 
 ---
 
-## 3. TodoList
+## Phase 2: 用户与本地数据隔离
 
-| ID | 任务 | 描述 | 验收标准 |
-|---|---|---|---|
-| `fix-auto-login` | 修复自动登录 | 诊断并修复 refresh token 在冷启动时不可用的问题 | 退出 App 关闭后台后重新进入，自动恢复登录状态 |
-| `fix-card-interaction` | 修复任务卡片交互 | 恢复进度条滑动能力，修复按钮误触问题 | 进度条可拖动；Snooze/Skip/Complete 各自触发正确动作 |
-| `verify-accent-theme` | 验证主色调切换 | 确认现有主色调切换功能是否正常工作 | 切换后全局主色实时变化；重启后保持 |
-| `regression-test` | 回归测试 | 在 Web 和 iOS 上验证所有修复 | 三个问题均稳定修复，无新回归 |
+### 当前问题
 
----
+1. 本地任务缓存使用固定 key，例如 `taskflow_tasks`、`taskflow_streak`、`taskflow_completed_today`。
+2. 多账号切换、离线登录或 refresh 失败时，存在看到上一账号本地数据的风险。
+3. 当前前端主要用 email 表示登录用户，缺少稳定的 `userId` 本地命名空间。
+4. 离线降级逻辑会在 refresh 失败但 session 未过期时进入 App，必须严格绑定最近验证过的用户身份。
 
-## 4. 具体执行方案
+### 解决方案
 
-### 阶段 A：修复自动登录
+1. 后端登录、注册、刷新接口始终返回 `user.id`、`email`、`emailVerifiedAt`。
+2. 前端 session 改为保存 `userId`、`email`、`lastAuthenticatedAt`、`emailVerifiedAt`。
+3. 所有本地数据 key 改为按用户隔离，例如 `taskflow:${userId}:tasks`、`taskflow:${userId}:stats`。
+4. 离线模式只能加载当前 `userId` 对应缓存，不允许通过 email 或旧 legacy key 恢复其他账号数据。
+5. 登出时只清当前用户敏感 session/token；是否删除当前用户任务缓存需要明确 UI 提示。
+6. 切换账号时必须先完成新账号认证，再切换本地数据命名空间。
 
-**涉及模块**：
-- `src/app/api.ts`（refresh token 读取逻辑）
-- `src/app/App.tsx`（`restoreSession` 函数）
-- `backend/src/routes/auth.ts`（cookie 配置）
+### 验收标准
 
-**执行步骤**：
-
-1. **诊断 cookie 持久性**：检查 `COOKIE_OPTS` 配置（`auth.ts:28-33`），确认 `sameSite`/`secure`/`maxAge` 设置是否导致 cookie 在重启后丢失
-2. **增加 Web 端 refresh token fallback**：在 `api.ts` 的 `getStoredRefreshToken()` 中，为 web 端增加 localStorage fallback（存储加密或混淆后的 token），作为 httpOnly cookie 的后备
-3. **修复 `clearSession` 逻辑**：`clearSession()` 应设置 `signedOut: true` 而非直接删除，使 `canUseSession` 守卫生效
-4. **增加诊断日志**：在 `restoreSession` 中增加关键节点日志（开发模式），帮助定位 refresh 失败的具体原因
-5. **统一清理策略**：`handleLogout`、`onAuthFailure`、session 过期三条路径使用统一的清理函数
-
-### 阶段 B：修复任务卡片交互
-
-**涉及模块**：
-- `src/app/App.tsx`（`TaskCard` 组件，约 391-560 行）
-
-**执行步骤**：
-
-1. **恢复按钮的 `stopPropagation`**：所有按钮的 `onPointerDown` 处理器增加 `e.stopPropagation()`，防止事件冒泡干扰
-2. **简化 `runAction` 逻辑**：移除 `canTriggerAction()` 中的时间戳防抖（`blockActionUntilRef`），仅保留 `isSlidingProgress` 守卫，与 2.0.0 版本行为一致
-3. **恢复进度条的多路径事件处理**：在 `onPointerUp` 基础上，增加 `onBlur` 兜底（已有），确保滑动结束时 `isSlidingProgress` 被正确重置
-4. **修复 CSS 层叠**：确保 Complete 按钮的 `z-index` 不覆盖 Snooze/Skip 区域，或将按钮容器的 `z-index` 提高
-5. **统一 Flow 与 Calendar 行为**：两处复用同一 `TaskCard`，确保 `TaskDetailModal` 中的交互一致
-
-### 阶段 C：验证主色调切换
-
-**涉及模块**：
-- `src/app/App.tsx`（`AccountPage` + `applyAccentTheme`）
-
-**执行步骤**：
-
-1. **功能验证**：确认 5 个色块点击后 CSS 变量正确更新
-2. **持久化验证**：确认重启后主题保持
-3. **iOS 冷启动验证**：确认 `accentThemeReady` 门控正常工作
-4. 如发现问题，按现有模式修复
-
-### 阶段 D：回归测试
-
-**执行步骤**：
-
-1. Web 端全流程：登录 → 退出 → 关闭浏览器 → 重新打开 → 确认自动登录
-2. Web 端 Flow 卡片：进度条滑动 → Snooze → Skip → Complete，确认各动作正确
-3. Web 端 Calendar 详情卡：同上测试
-4. 账户页：切换 5 种主色调，确认实时生效和持久化
-5. 如有 iOS 环境，重复以上测试
+1. A 账号离线创建任务后切换 B 账号，B 账号不能看到 A 账号数据。
+2. refresh token 失效或网络失败时，只能进入最近一次验证过的用户空间。
+3. 本地缓存中不存在未带 `userId` 命名空间的新任务数据。
+4. 登出、重启、离线恢复、重新登录四个流程不会串号。
 
 ---
 
-## 更新日志
+## Phase 3: 数据库与后端数据可信度
 
-- 2026-06-07：第一轮计划与审查完成（主题持久化、任务卡交互、防泄漏 token、存储恢复健壮性）。
-- 2026-06-07：用户报告问题仍存在，启动第二轮诊断与修复计划。重点：自动登录 cookie 持久性、按钮事件冒泡、进度条滑动恢复。
-- 2026-06-07：第二轮修复完成并提交（commit c035d88）。
-  - 自动登录：backend cookie SameSite 改为 lax + web 端 localStorage refresh token fallback + signedOut 守卫
-  - 任务卡片交互：移除复杂 pointer 事件处理器，恢复 v2.0.0 简单 onClick 模式
-  - 主色调切换：确认已完整实现，无需额外修改
+### 当前问题
+
+1. 任务字段缺少强校验：`priority`、`status`、`progress`、`estimateMinutes`、`dueDate`、`repeatRule` 都由客户端自由传入。
+2. 用户统计由客户端决定，`/user/stats` 会直接信任客户端提交的 streak。
+3. `deletedAt` 是软删除字段，但缺少垃圾箱、恢复、永久删除和生命周期规则。
+4. 数据模型缺少用户管理能力，例如修改邮箱、删除账号、数据导出、会话管理。
+
+### 解决方案
+
+1. 后端加入统一 validation middleware，所有写接口先校验再进入业务逻辑。
+2. `priority` 限定为 `P1/P2/P3`，`status` 限定为 `todo/doing/done/snoozed/skipped`。
+3. `progress` 限定为 `0-100`，`estimateMinutes` 限定为合理范围，例如 `1-1440`。
+4. `dueDate` 使用 `YYYY-MM-DD`，`reminderAt` 使用合法 ISO datetime，`repeatRule` 限定为 `none/daily/weekly/monthly`。
+5. 统计改为服务端计算：新增 `completedAt` 或 `TaskCompletionEvent`，streak 由服务端根据完成事件生成。
+6. 软删除默认不在普通 `GET /tasks` 返回；新增最近删除、恢复、永久删除能力。
+7. 用户表新增 `emailVerifiedAt`、`displayName`、`lastLoginAt`、`deletedAt`、`timezone`、`locale`。
+8. 增加账号删除和数据导出接口，满足 App Store 对用户数据管理的预期。
+
+### 验收标准
+
+1. 非法任务字段会被后端拒绝，并返回结构化错误。
+2. 用户无法通过接口伪造 streak 或 completed count。
+3. 删除任务后普通列表不返回，最近删除中可恢复。
+4. 用户可以在账号页发起数据导出和删除账号流程。
+
+---
+
+## Phase 4: 同步可靠性与冲突处理
+
+### 当前问题
+
+1. 当前同步以本地 dirty task 和远端任务合并为主，缺少明确的操作队列。
+2. 重复提交、网络中断、App 重启后的操作去重能力不足。
+3. 多设备同时编辑同一任务时，缺少版本冲突判断。
+4. 同步状态只区分 `idle/syncing/offline/error`，对用户不够清晰。
+
+### 解决方案
+
+1. 将 dirty task 改为持久化 dirty queue，每个操作包含 `operationId`、`taskId`、`type`、`payload`、`createdAt`。
+2. 服务端记录或幂等处理 `operationId`，避免重复提交造成重复创建或重复计数。
+3. 每次任务更新提交 `lastKnownUpdatedAt` 或版本号，服务端发现冲突返回 `409`。
+4. 客户端收到冲突后提供最小处理方式：保留本机、使用云端、稍后处理。
+5. 同步状态细分为：已同步、正在同步、离线待同步、邮箱未验证、存在冲突、服务器错误。
+6. 账号页展示最近同步时间和待同步数量。
+
+### 验收标准
+
+1. 离线创建、编辑、完成、删除任务后重启 App，再联网可正确同步。
+2. 同一操作不会因重试被重复执行。
+3. 两台设备同时编辑同一任务时，会出现明确冲突提示，而不是静默覆盖。
+4. 用户能理解当前数据是否已安全同步到云端。
+
+---
+
+## Phase 5: UI/UX 与用户交互优化
+
+### 当前问题
+
+1. 注册页只提供邮箱和密码，没有解释邮箱验证、同步、隐私和错误原因。
+2. 错误信息主要直接展示后端英文 message，中英文体验不一致。
+3. 账号页功能偏少，只能切换语言、主色调和退出登录。
+4. 任务创建表单缺少字段级错误提示和更清晰的默认值解释。
+5. 删除、同步失败、离线模式等关键状态对用户不够可见。
+
+### 解决方案
+
+1. 注册流程增加邮箱验证码输入、重新发送倒计时、邮箱修改入口。
+2. 密码输入增加强度提示和明确规则，不只显示“至少 8 个字符”。
+3. 错误文案改为错误码映射，所有核心认证和同步错误都提供中英文翻译。
+4. 账号页新增邮箱验证状态、同步状态、数据管理、会话管理、隐私政策入口。
+5. 任务表单增加字段级错误，例如标题为空、预估时间过大、提醒时间早于当前时间。
+6. 删除任务后提供最近删除入口，不只依赖 toast 撤销。
+7. 空状态根据场景区分：新用户引导、当天无任务、筛选无结果、离线无缓存。
+8. 同步失败时显示可操作说明，例如“点击重试”“邮箱验证后同步”“解决冲突”。
+
+### 验收标准
+
+1. 新用户能清楚理解为什么需要邮箱验证。
+2. 所有核心错误都不是裸英文后端错误。
+3. 账号页能完成用户身份、同步和数据管理相关操作。
+4. 任务表单错误能在提交前或提交后明确定位到具体字段。
+5. iPhone SE、标准 iPhone、Pro Max 上没有遮挡、裁切或键盘覆盖关键按钮。
+
+---
+
+## Phase 6: App Store 发布准备
+
+### 当前问题
+
+1. `doc/APP_STORE_READINESS.md` 已有基础清单，但还缺少账号删除、隐私政策、邮箱验证和生产安全闭环。
+2. 如果未来开启提醒功能，需要清楚说明通知用途并请求系统权限。
+3. App Store 审核需要可用测试账号、稳定生产后端、隐私政策 URL 和截图。
+
+### 解决方案
+
+1. 完成隐私政策页面，内容覆盖邮箱、密码哈希、任务、标签、截止日期、提醒、统计数据和刷新会话。
+2. 提供 App 内账号删除入口，并在隐私政策中说明删除周期。
+3. 创建 App Store 审核测试账号，确保邮箱已验证且有示例任务数据。
+4. 准备中英文截图：任务流、添加任务、日历、搜索筛选、账号设置、空状态。
+5. 真实设备测试登录、刷新、登出、离线同步、弱网恢复、账号删除。
+6. 如果启用通知，补充本地通知权限说明和系统权限申请时机。
+
+### 验收标准
+
+1. `npm run check` 通过。
+2. 后端 migration 可在生产环境部署。
+3. 生产 API 使用 HTTPS，cookie 和 CORS 配置符合上线要求。
+4. 隐私政策 URL 可访问，且描述与实际数据处理一致。
+5. App Store Connect 中的测试账号可用。
+6. 审核截图覆盖核心使用流程。
+
+---
+
+## 建议执行顺序
+
+1. Phase 1：先修认证安全和邮箱验证，否则公开注册不可控。
+2. Phase 2：再修用户数据隔离，否则多账号和离线恢复存在数据串号风险。
+3. Phase 3：再修后端数据可信度，确保数据库不会被非法客户端污染。
+4. Phase 4：再修同步可靠性，避免 App Store 用户在多设备和弱网下丢数据。
+5. Phase 5：再做 UI/UX 精修，让安全和同步状态对普通用户可理解。
+6. Phase 6：最后按 App Store 要求收口发布材料和真实设备验证。
+
+---
+
+## 总体验收测试清单
+
+1. 认证测试：无效邮箱、未验证邮箱、重复注册、验证码过期、密码过短、登录失败限流、刷新 token 轮换、退出所有设备。
+2. 用户隔离测试：A/B 多账号切换、离线恢复、登出后重启、refresh 失效后进入离线模式。
+3. 数据校验测试：非法任务字段、越权访问其他用户任务、伪造统计数据。
+4. 同步测试：离线创建/编辑/完成/删除后重启，再联网同步；多设备冲突处理。
+5. UI/UX 测试：中英文、键盘打开、错误提示、验证码流程、账号页、空状态、删除撤销、最近删除。
+6. 发布测试：生产 HTTPS、真实设备、隐私政策、审核账号、截图、后端 migration、`npm run check`。
+
+---
+
+## 默认假设
+
+1. 保留“账号必需，支持跨设备同步”的产品定位。
+2. 邮箱验证默认采用一次性验证码或 magic link，邮件服务后续可选 Resend、SendGrid 或 AWS SES。
+3. App Store v1 不加入团队协作、公开分享、社交功能和广告追踪。
+4. 离线可读写继续保留，但必须绑定最近验证过的 `userId`，不能跨用户复用缓存。
