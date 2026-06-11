@@ -211,6 +211,8 @@ docker compose up -d --build
 
 重置后需要重新注册账号，并通过 Resend 邮箱验证码完成验证。
 
+Phase 2 之后，本地缓存按 `userId` 隔离。旧版浏览器或 iOS WebView 中残留的全局 key（如 `taskflow_tasks`）不会再被新版本读取。如果要在测试设备上完全清空旧本地数据，可以退出登录后清理浏览器站点数据，或卸载重装 iOS 测试包。
+
 ---
 
 ## 五、常用运维命令

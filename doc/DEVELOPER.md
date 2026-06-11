@@ -171,7 +171,20 @@ apiFetch(path, options)
 
 accessToken 存在 `localStorage['taskflow_access_token']`；refreshToken 存在 httpOnly Cookie（服务端设置，JS 不可读）。
 
-### 3.4 任务插入排序（insertIndex）
+### 3.4 用户本地数据隔离
+
+登录成功后前端 session 保存 `userId`、`email`、`emailVerifiedAt` 和 `lastAuthenticatedAt`。任务、统计和同步元数据不再使用全局 key，而是按用户命名空间存储：
+
+```
+taskflow:<userId>:tasks
+taskflow:<userId>:streak
+taskflow:<userId>:completed_today
+taskflow:<userId>:sync_meta
+```
+
+离线恢复只允许使用带 `userId` 的有效 session。旧版 `taskflow_tasks`、`taskflow_streak`、`taskflow_completed_today` 不再作为数据源，避免多账号切换时串号。
+
+### 3.5 任务插入排序（insertIndex）
 
 新任务插入时不重排所有任务，只寻找第一个"比新任务优先级低"的 `todo` 任务位置：
 

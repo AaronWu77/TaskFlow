@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CheckCircle2, Mail, Lock, Eye, EyeOff, Loader2, ShieldCheck } from 'lucide-react';
-import { apiLogin, apiRegister, apiResendVerification, apiVerifyEmail } from './api';
+import { apiLogin, apiRegister, apiResendVerification, apiVerifyEmail, type AuthUser } from './api';
 import { useTranslation } from 'react-i18next';
 
 interface AuthPageProps {
-  onAuth: (email: string) => void;
+  onAuth: (user: AuthUser) => void;
   savedEmail?: string;
 }
 
@@ -34,7 +34,7 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
     try {
       if (mode === 'verify') {
         const result = await apiVerifyEmail(pendingEmail || email.trim().toLowerCase(), verificationCode);
-        onAuth(result.user.email);
+        onAuth(result.user);
         return;
       }
       const fn = mode === 'login' ? apiLogin : apiRegister;
@@ -46,7 +46,7 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
         setMode('verify');
         return;
       }
-      onAuth(result.user.email);
+      onAuth(result.user);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {

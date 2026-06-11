@@ -11,7 +11,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
 import { storageGet, storageSet, storageRemove, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser } from './api';
+import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, type AuthUser } from './api';
 import { toast, Toaster } from 'sonner';
 import { cn } from './components/ui/utils';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
@@ -42,15 +42,24 @@ interface Task {
 
 // Sync metadata
 type SyncMeta = { lastSync: string };
-const SYNC_META_KEY = 'taskflow_sync_meta';
 const SESSION_KEY = 'taskflow_session';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 type SessionMeta = {
+  userId: string;
   email: string;
+  emailVerifiedAt?: string | null;
   signedOut: boolean;
   lastAuthenticatedAt: string;
 };
+
+function userStorageKey(userId: string, name: string): string {
+  return `taskflow:${userId}:${name}`;
+}
+
+function legacySessionEmail(): string {
+  return storageGet('taskflow_user_email') || '';
+}
 
 function loadSession(): SessionMeta | null {
   try {
@@ -60,14 +69,18 @@ function loadSession(): SessionMeta | null {
       // Accept session even with empty email if signedOut flag is present
       if (parsed.signedOut === true) {
         return {
+          userId: typeof parsed.userId === 'string' ? parsed.userId : '',
           email: parsed.email || '',
+          emailVerifiedAt: typeof parsed.emailVerifiedAt === 'string' ? parsed.emailVerifiedAt : null,
           signedOut: true,
           lastAuthenticatedAt: parsed.lastAuthenticatedAt || new Date().toISOString(),
         };
       }
-      if (parsed.email && parsed.lastAuthenticatedAt) {
+      if (parsed.userId && parsed.email && parsed.lastAuthenticatedAt) {
         return {
+          userId: parsed.userId,
           email: parsed.email,
+          emailVerifiedAt: typeof parsed.emailVerifiedAt === 'string' ? parsed.emailVerifiedAt : null,
           signedOut: parsed.signedOut === true,
           lastAuthenticatedAt: parsed.lastAuthenticatedAt,
         };
@@ -77,19 +90,23 @@ function loadSession(): SessionMeta | null {
   return null;
 }
 
-function saveSession(email: string): void {
+function saveSession(user: AuthUser): void {
   storageSet(SESSION_KEY, JSON.stringify({
-    email,
+    userId: user.id,
+    email: user.email,
+    emailVerifiedAt: user.emailVerifiedAt ?? null,
     signedOut: false,
     lastAuthenticatedAt: new Date().toISOString(),
   } satisfies SessionMeta));
   storageSet('taskflow_logged_in', '1');
-  storageSet('taskflow_user_email', email);
+  storageSet('taskflow_user_email', user.email);
 }
 
 function clearSession(): void {
   storageSet(SESSION_KEY, JSON.stringify({
+    userId: '',
     email: '',
+    emailVerifiedAt: null,
     signedOut: true,
     lastAuthenticatedAt: new Date().toISOString(),
   } satisfies SessionMeta));
@@ -102,16 +119,16 @@ function isSessionExpired(session: SessionMeta): boolean {
   return Number.isNaN(last) || Date.now() - last > SESSION_TTL_MS;
 }
 
-function loadSyncMeta(): SyncMeta {
+function loadSyncMeta(userId: string): SyncMeta {
   try {
-    const raw = storageGet(SYNC_META_KEY);
+    const raw = storageGet(userStorageKey(userId, 'sync_meta'));
     if (raw) return JSON.parse(raw);
   } catch { /**/ }
   return { lastSync: '' };
 }
 
-function saveSyncMeta(meta: SyncMeta) {
-  storageSet(SYNC_META_KEY, JSON.stringify(meta));
+function saveSyncMeta(userId: string, meta: SyncMeta) {
+  storageSet(userStorageKey(userId, 'sync_meta'), JSON.stringify(meta));
 }
 
 /** Mark a task as dirty (in-memory only — cache save via useEffect) */
@@ -272,27 +289,27 @@ function syncAppViewportHeight(forceInnerHeight = false) {
   document.documentElement.style.setProperty('--app-vh', `${nextHeight}px`);
 }
 
-function loadTasks(): Task[] {
+function loadTasks(userId: string): Task[] {
   try {
-    const raw = storageGet('taskflow_tasks');
+    const raw = storageGet(userStorageKey(userId, 'tasks'));
     if (raw) return JSON.parse(raw) as Task[];
   } catch { /**/ }
   return [];
 }
 
-function saveTasksToCache(tasks: Task[]) {
+function saveTasksToCache(userId: string, tasks: Task[]) {
   try {
-    storageSet('taskflow_tasks', JSON.stringify(tasks));
+    storageSet(userStorageKey(userId, 'tasks'), JSON.stringify(tasks));
   } catch { /**/ }
 }
 
 // --- Persistence helpers ---
 const todayStr = () => new Date().toISOString().split('T')[0];
 
-function loadStatsFromCache(): { streak: number; completedToday: number } {
+function loadStatsFromCache(userId: string): { streak: number; completedToday: number } {
   let streak = 0, completedToday = 0;
   try {
-    const rawS = storageGet('taskflow_streak');
+    const rawS = storageGet(userStorageKey(userId, 'streak'));
     if (rawS) {
       const { count, lastDate } = JSON.parse(rawS) as { count: number; lastDate: string };
       const today = todayStr();
@@ -302,7 +319,7 @@ function loadStatsFromCache(): { streak: number; completedToday: number } {
         if (lastDate === yesterday.toISOString().split('T')[0]) streak = count;
       }
     }
-    const rawC = storageGet('taskflow_completed_today');
+    const rawC = storageGet(userStorageKey(userId, 'completed_today'));
     if (rawC) {
       const { date, count } = JSON.parse(rawC) as { date: string; count: number };
       completedToday = date === todayStr() ? count : 0;
@@ -311,10 +328,10 @@ function loadStatsFromCache(): { streak: number; completedToday: number } {
   return { streak, completedToday };
 }
 
-function saveStatsToCache(streak: number, completedToday: number, lastDate?: string | null) {
+function saveStatsToCache(userId: string, streak: number, completedToday: number, lastDate?: string | null) {
   const today = todayStr();
-  storageSet('taskflow_streak', JSON.stringify({ count: streak, lastDate: lastDate || today }));
-  storageSet('taskflow_completed_today', JSON.stringify({ date: today, count: completedToday }));
+  storageSet(userStorageKey(userId, 'streak'), JSON.stringify({ count: streak, lastDate: lastDate || today }));
+  storageSet(userStorageKey(userId, 'completed_today'), JSON.stringify({ date: today, count: completedToday }));
 }
 
 function fmtDate(y: number, m: number, d: number) {
@@ -1320,22 +1337,22 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
 
 // AppShell contains all hooks — must never be rendered conditionally to satisfy Rules of Hooks
 function AppShell({
-  email,
+  user,
   accentTheme,
   onAccentThemeChange,
   onLogout,
   cloudSyncEnabled,
 }: {
-  email: string;
+  user: AuthUser;
   accentTheme: AccentTheme;
   onAccentThemeChange: (theme: AccentTheme) => void;
   onLogout: () => void;
   cloudSyncEnabled: boolean;
 }) {
   const { t } = useTranslation();
-  const [tasks, setTasks] = useState<Task[]>(() => loadTasks());
-  const [streak, setStreak] = useState(() => loadStatsFromCache().streak);
-  const [completedToday, setCompletedToday] = useState(() => loadStatsFromCache().completedToday);
+  const [tasks, setTasks] = useState<Task[]>(() => loadTasks(user.id));
+  const [streak, setStreak] = useState(() => loadStatsFromCache(user.id).streak);
+  const [completedToday, setCompletedToday] = useState(() => loadStatsFromCache(user.id).completedToday);
   const completedTodayRef = React.useRef(completedToday);
   completedTodayRef.current = completedToday;
   const hasInteractedRef = React.useRef(false);
@@ -1360,10 +1377,10 @@ function AppShell({
   const setTasksAndCache = React.useCallback((updater: React.SetStateAction<Task[]>) => {
     setTasks(prev => {
       const next = typeof updater === 'function' ? (updater as (prev: Task[]) => Task[])(prev) : updater;
-      saveTasksToCache(next);
+      saveTasksToCache(user.id, next);
       return next;
     });
-  }, []);
+  }, [user.id]);
 
   const updateSyncStatusFromTasks = React.useCallback((nextTasks: Task[]) => {
     if (!cloudSyncEnabled) {
@@ -1379,7 +1396,7 @@ function AppShell({
     let cancelled = false;
     async function init() {
       if (!cloudSyncEnabled) {
-        const cached = loadTasks();
+        const cached = loadTasks(user.id);
         setTasksAndCache(cached.length > 0 ? cached : []);
         setTasksLoading(false);
         setSyncStatus('idle');
@@ -1390,7 +1407,7 @@ function AppShell({
         const remote = await apiGetTasks();
         if (!cancelled) {
           serverReachable = true;
-          const cached = loadTasks();
+          const cached = loadTasks(user.id);
           const dirtyById = new Map(cached.filter(t => t._dirty).map(t => [t.id, t]));
           const remoteTasks: Task[] = remote.map(t => {
             const normalized: Task = {
@@ -1409,8 +1426,8 @@ function AppShell({
 
           const merged = [...remoteTasks, ...dirtyTasks];
           setTasksAndCache(merged);
-          saveTasksToCache(merged);
-          saveSyncMeta({ lastSync: new Date().toISOString() });
+          saveTasksToCache(user.id, merged);
+          saveSyncMeta(user.id, { lastSync: new Date().toISOString() });
         }
       } catch {
         console.warn('TaskFlow: server unreachable, using cached data');
@@ -1420,13 +1437,13 @@ function AppShell({
 
       // If offline, use cached tasks
       if (!serverReachable) {
-        const cached = loadTasks();
+        const cached = loadTasks(user.id);
         setTasksAndCache(cached.length > 0 ? cached : []);
       }
 
       // Stats — cache is the authority for streak; server is a mirror
       try {
-        const cached = loadStatsFromCache();
+        const cached = loadStatsFromCache(user.id);
         if (!cancelled && !hasInteractedRef.current) {
           setStreak(cached.streak);
           setCompletedToday(cached.completedToday);
@@ -1440,7 +1457,7 @@ function AppShell({
               setStreak(stats.streak);
               setCompletedToday(stats.todayCount);
             }
-            saveStatsToCache(stats.streak, stats.todayCount, stats.streakDate);
+            saveStatsToCache(user.id, stats.streak, stats.todayCount, stats.streakDate);
           }).catch(() => {});
         }
       } catch {
@@ -1451,20 +1468,24 @@ function AppShell({
     init();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cloudSyncEnabled, setTasksAndCache]);
+  }, [cloudSyncEnabled, setTasksAndCache, user.id]);
 
   // On native cold-start, restore data from Capacitor Preferences if localStorage was cleared
   useEffect(() => {
-    const STORAGE_KEYS = ['taskflow_tasks', 'taskflow_streak', 'taskflow_completed_today'];
+    const STORAGE_KEYS = [
+      userStorageKey(user.id, 'tasks'),
+      userStorageKey(user.id, 'streak'),
+      userStorageKey(user.id, 'completed_today'),
+    ];
     restoreFromNativeStorage(STORAGE_KEYS).then(() => {
       // Re-read from localStorage into state; if API already loaded, don't overwrite
-      setTasksAndCache(prev => prev.length === 0 ? loadTasks() : prev);
-      const cached = loadStatsFromCache();
+      setTasksAndCache(prev => prev.length === 0 ? loadTasks(user.id) : prev);
+      const cached = loadStatsFromCache(user.id);
       setStreak(prev => prev === 0 ? cached.streak : prev);
       setCompletedToday(prev => prev === 0 ? cached.completedToday : prev);
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [user.id]);
 
   useEffect(() => {
     if (!isAddingTask) return;
@@ -1477,7 +1498,7 @@ function AppShell({
   }, [isAddingTask]);
 
   // Cache tasks to localStorage whenever they change
-  useEffect(() => { saveTasksToCache(tasks); }, [tasks]);
+  useEffect(() => { saveTasksToCache(user.id, tasks); }, [tasks, user.id]);
 
   const retryDirtyTasks = React.useCallback(async () => {
     if (!cloudSyncEnabled) {
@@ -1485,7 +1506,7 @@ function AppShell({
       return;
     }
     if (syncInFlightRef.current) return;
-    const dirty = loadTasks().filter(t => t._dirty);
+    const dirty = loadTasks(user.id).filter(t => t._dirty);
     if (dirty.length === 0) {
       setSyncStatus('idle');
       return;
@@ -1497,14 +1518,14 @@ function AppShell({
     syncInFlightRef.current = true;
     setSyncStatus('syncing');
     try {
-      const flushed = await flushDirtyTasks(loadTasks());
+      const flushed = await flushDirtyTasks(loadTasks(user.id));
       setTasksAndCache(flushed);
       const stillDirty = flushed.some(t => t._dirty);
       setSyncStatus(stillDirty ? 'error' : 'idle');
     } finally {
       syncInFlightRef.current = false;
     }
-  }, [cloudSyncEnabled, setTasksAndCache]);
+  }, [cloudSyncEnabled, setTasksAndCache, user.id]);
 
   useEffect(() => {
     retryDirtyTasks();
@@ -1514,7 +1535,7 @@ function AppShell({
         setSyncStatus('idle');
         return;
       }
-      if (loadTasks().some(t => t._dirty)) setSyncStatus('offline');
+      if (loadTasks(user.id).some(t => t._dirty)) setSyncStatus('offline');
       else setSyncStatus('idle');
     };
     const handleFocus = () => retryDirtyTasks();
@@ -1526,7 +1547,7 @@ function AppShell({
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('focus', handleFocus);
     };
-  }, [cloudSyncEnabled, retryDirtyTasks]);
+  }, [cloudSyncEnabled, retryDirtyTasks, user.id]);
 
   const activeTasks = useMemo(() => tasks.filter(t => !t.deletedAt), [tasks]);
   const pendingTasks = useMemo(() => activeTasks.filter(t => t.status === 'todo'), [activeTasks]);
@@ -1665,7 +1686,7 @@ function AppShell({
             yesterday.setDate(yesterday.getDate() - 1);
             const yStr = yesterday.toISOString().split('T')[0];
             try {
-              const raw = storageGet('taskflow_streak');
+              const raw = storageGet(userStorageKey(user.id, 'streak'));
               if (raw) {
                 const { count, lastDate } = JSON.parse(raw) as { count: number; lastDate: string };
                 newStreak = lastDate === yStr ? count + 1 : 1;
@@ -1674,9 +1695,9 @@ function AppShell({
               }
             } catch { newStreak = 1; }
             setStreak(newStreak);
-            saveStatsToCache(newStreak, newCount);
+            saveStatsToCache(user.id, newStreak, newCount);
           } else {
-            saveStatsToCache(streak, newCount);
+            saveStatsToCache(user.id, streak, newCount);
           }
 
           // Push to server (server stores what client computed)
@@ -1861,8 +1882,8 @@ function AppShell({
       {/* Account Page */}
       <AnimatePresence>
         {accountOpen && (
-          <AccountPage
-            email={email}
+            <AccountPage
+            email={user.email}
             accentTheme={accentTheme}
             onAccentThemeChange={onAccentThemeChange}
             onClose={() => setAccountOpen(false)}
@@ -2247,7 +2268,12 @@ function AppShell({
 export default function App() {
   // 'loading' = checking refresh cookie, 'auth' = not logged in, 'app' = logged in
   const [appState, setAppState] = useState<'loading' | 'auth' | 'app'>('loading');
-  const [userEmail, setUserEmail] = useState(() => loadSession()?.email || '');
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => {
+    const session = loadSession();
+    return session && !session.signedOut && session.userId
+      ? { id: session.userId, email: session.email, emailVerifiedAt: session.emailVerifiedAt ?? null }
+      : null;
+  });
   const [cloudSyncEnabled, setCloudSyncEnabled] = useState(false);
   const [accentTheme, setAccentTheme] = useState<AccentTheme>('tcx111400');
   const [accentThemeReady, setAccentThemeReady] = useState(false);
@@ -2316,14 +2342,14 @@ export default function App() {
     setAuthFailureHandler(() => {
       const session = loadSession();
       if (session && !session.signedOut && !isSessionExpired(session)) {
-        setUserEmail(session.email);
+        setCurrentUser({ id: session.userId, email: session.email, emailVerifiedAt: session.emailVerifiedAt ?? null });
         setCloudSyncEnabled(false);
         setAppState('app');
         return;
       }
       clearLocalAuthTokens();
       clearSession();
-      setUserEmail('');
+      setCurrentUser(null);
       setCloudSyncEnabled(false);
       setAppState('auth');
     });
@@ -2339,9 +2365,7 @@ export default function App() {
       if (cancelled) return;
 
       const session = loadSession();
-      const legacyEmail = storageGet('taskflow_user_email') || '';
-      const canUseSession = !!session && !session.signedOut && !isSessionExpired(session);
-      const emailForRestore = session?.email || legacyEmail;
+      const canUseSession = !!session && !!session.userId && !session.signedOut && !isSessionExpired(session);
 
       // If user explicitly logged out or session is invalid, skip refresh and go to auth
       if (!canUseSession && session?.signedOut) {
@@ -2355,21 +2379,27 @@ export default function App() {
       if (cancelled) return;
       if (refreshResult === 'ok') {
         const refreshedUser = getRefreshedUser();
-        const restoredEmail = refreshedUser?.email || emailForRestore;
-        if (restoredEmail) saveSession(restoredEmail);
-        setUserEmail(restoredEmail);
+        if (!refreshedUser) {
+          clearLocalAuthTokens();
+          clearSession();
+          setCloudSyncEnabled(false);
+          setAppState('auth');
+          return;
+        }
+        saveSession(refreshedUser);
+        setCurrentUser(refreshedUser);
         setCloudSyncEnabled(true);
         setAppState('app');
         return;
       }
       if (refreshResult === 'network' && canUseSession) {
-        setUserEmail(emailForRestore);
+        setCurrentUser({ id: session.userId, email: session.email, emailVerifiedAt: session.emailVerifiedAt ?? null });
         setCloudSyncEnabled(false);
         setAppState('app');
         return;
       }
       if (refreshResult === 'unauthorized' && canUseSession) {
-        setUserEmail(emailForRestore);
+        setCurrentUser({ id: session.userId, email: session.email, emailVerifiedAt: session.emailVerifiedAt ?? null });
         setCloudSyncEnabled(false);
         setAppState('app');
         return;
@@ -2384,11 +2414,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function handleAuth(email: string) {
+  function handleAuth(user: AuthUser) {
     (document.activeElement as HTMLElement | null)?.blur();
     syncAppViewportHeight(true);
-    setUserEmail(email);
-    saveSession(email);
+    setCurrentUser(user);
+    saveSession(user);
     setCloudSyncEnabled(true);
     setAppState('app');
   }
@@ -2397,28 +2427,24 @@ export default function App() {
     // Flush dirty tasks to cloud before logout
     try {
       if (cloudSyncEnabled) {
-        const raw = storageGet('taskflow_tasks');
+        const userId = currentUser?.id;
+        const raw = userId ? storageGet(userStorageKey(userId, 'tasks')) : null;
         if (raw) {
           const tasks = JSON.parse(raw) as Task[];
           await flushDirtyTasks(tasks);
         }
         // Push current stats
-        const stats = loadStatsFromCache();
+        const stats = userId ? loadStatsFromCache(userId) : { completedToday: 0 };
         try { await apiUpdateUserStats({ todayCount: stats.completedToday }); } catch { /* */ }
       }
     } catch { /* non-critical */ }
 
     try { await apiLogout(); } catch { /* still clean up locally */ }
-    // Wipe local database (always, even if network logout fails)
-    storageRemove('taskflow_tasks');
-    storageRemove('taskflow_streak');
-    storageRemove('taskflow_completed_today');
-    storageRemove(SYNC_META_KEY);
     clearSession();
     clearLocalAuthTokens();
     setCloudSyncEnabled(false);
     setAppState('auth');
-    setUserEmail('');
+    setCurrentUser(null);
   }
 
   if (appState === 'loading') {
@@ -2430,12 +2456,16 @@ export default function App() {
   }
 
   if (appState === 'auth') {
-    return <AuthPage onAuth={handleAuth} />;
+    return <AuthPage onAuth={handleAuth} savedEmail={legacySessionEmail()} />;
+  }
+
+  if (!currentUser) {
+    return <AuthPage onAuth={handleAuth} savedEmail={legacySessionEmail()} />;
   }
 
   return (
     <AppShell
-      email={userEmail}
+      user={currentUser}
       accentTheme={accentTheme}
       onAccentThemeChange={setAccentTheme}
       onLogout={handleLogout}
