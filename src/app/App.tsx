@@ -11,7 +11,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
 import { storageGet, storageSet, storageRemove, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, apiGetDeletedTasks, apiRestoreTask, apiPermanentDeleteTask, apiExportUserData, apiDeleteAccount, type AuthUser, type TaskDTO } from './api';
+import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, apiGetDeletedTasks, apiRestoreTask, apiPermanentDeleteTask, apiExportUserData, apiDeleteAccount, isTaskConflictError, type AuthUser, type TaskDTO } from './api';
 import { toast, Toaster } from 'sonner';
 import { cn } from './components/ui/utils';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
@@ -37,8 +37,11 @@ interface Task {
   completedAt?: string | null;
   deletedAt?: string | null;
   sortOrder: number;
+  updatedAt?: string;
   _dirty?: boolean; // local-only: true if pending sync to server
   _syncState?: 'create' | 'update'; // local-only: tells sync whether to POST or PATCH
+  _operationId?: string; // local-only: stable idempotency key for retries
+  _conflict?: boolean; // local-only: true when server rejected update due to a newer version
 }
 
 // Sync metadata
@@ -156,13 +159,20 @@ function saveSyncMeta(userId: string, meta: SyncMeta) {
 }
 
 /** Mark a task as dirty (in-memory only — cache save via useEffect) */
-function markDirty(tasks: Task[], id: string, syncState: Task['_syncState'] = 'update'): Task[] {
-  return tasks.map(t => t.id === id ? { ...t, _dirty: true, _syncState: t.id.startsWith('local-') ? 'create' : syncState } : t);
+function markDirty(tasks: Task[], id: string, syncState: Task['_syncState'] = 'update', operationId?: string): Task[] {
+  return tasks.map(t => t.id === id ? { ...t, _dirty: true, _conflict: false, _operationId: operationId || t._operationId || syncOperationId(), _syncState: t.id.startsWith('local-') ? 'create' : syncState } : t);
 }
 
 /** Mark a task as clean (in-memory only — cache save via useEffect) */
 function markClean(tasks: Task[], id: string): Task[] {
-  return tasks.map(t => t.id === id ? { ...t, _dirty: false, _syncState: undefined } : t);
+  return tasks.map(t => t.id === id ? { ...t, _dirty: false, _syncState: undefined, _operationId: undefined, _conflict: false } : t);
+}
+
+function syncOperationId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `op-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function taskPatch(t: Task) {
@@ -179,6 +189,18 @@ function taskPatch(t: Task) {
     deletedAt: t.deletedAt,
     sortOrder: t.sortOrder,
   };
+}
+
+function taskSyncPayload(t: Task) {
+  return {
+    ...taskPatch(t),
+    operationId: t._operationId || syncOperationId(),
+    lastKnownUpdatedAt: t.updatedAt ?? null,
+  };
+}
+
+function applySavedTaskMeta(tasks: Task[], saved: TaskDTO): Task[] {
+  return tasks.map(t => t.id === saved.id ? { ...t, completedAt: saved.completedAt, updatedAt: saved.updatedAt } : t);
 }
 
 /** Push all dirty tasks to server, returning tasks with clean flags */
@@ -199,16 +221,29 @@ async function flushDirtyTasks(tasks: Task[]): Promise<Task[]> {
     try {
       const shouldCreate = t._syncState === 'create' || t.id.startsWith('local-');
       if (shouldCreate) {
-        const created = await apiCreateTask(taskPatch(t));
-        updated = updated.map(x => x.id === t.id ? { ...x, id: created.id, _dirty: false, _syncState: undefined } : x);
+        const created = await apiCreateTask({ ...taskPatch(t), operationId: t._operationId || syncOperationId() });
+        updated = updated.map(x => x.id === t.id ? {
+          ...x,
+          id: created.id,
+          completedAt: created.completedAt,
+          updatedAt: created.updatedAt,
+          _dirty: false,
+          _syncState: undefined,
+          _operationId: undefined,
+          _conflict: false,
+        } : x);
         continue;
       }
       if (!remoteIds.has(t.id)) {
         continue;
       }
-      await apiUpdateTask(t.id, taskPatch(t));
+      const saved = await apiUpdateTask(t.id, taskSyncPayload(t));
+      updated = updated.map(x => x.id === t.id ? { ...x, completedAt: saved.completedAt, updatedAt: saved.updatedAt } : x);
       updated = markClean(updated, t.id);
-    } catch {
+    } catch (error) {
+      if (isTaskConflictError(error)) {
+        updated = updated.map(x => x.id === t.id ? { ...x, _dirty: true, _conflict: true } : x);
+      }
       // Keep dirty, will retry later
     }
   }
@@ -1311,7 +1346,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 
 // --- Account Page ---
 
-function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogout, onOpenDeletedTasks, deletedCount, onExportData, onDeleteAccount }: {
+function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogout, onOpenDeletedTasks, deletedCount, onExportData, onDeleteAccount, syncStatus, lastSync, pendingSyncCount }: {
   email: string;
   accentTheme: AccentTheme;
   onAccentThemeChange: (theme: AccentTheme) => void;
@@ -1321,9 +1356,13 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
   deletedCount: number;
   onExportData: () => void;
   onDeleteAccount: () => void;
+  syncStatus: 'idle' | 'syncing' | 'offline' | 'pending' | 'conflict' | 'error';
+  lastSync: string;
+  pendingSyncCount: number;
 }) {
   const { t, i18n } = useTranslation();
   const displayName = email.split('@')[0];
+  const lastSyncLabel = lastSync ? new Date(lastSync).toLocaleString(i18n.language === 'zh' ? 'zh-CN' : 'en-US') : t('account.neverSynced');
 
   return (
     <motion.div
@@ -1398,6 +1437,26 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
               >
                 <Globe className="w-4 h-4 flex-shrink-0" />{t('account.english')}
               </button>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.sync')}</p>
+            <div className="rounded-xl border border-border bg-card px-4 py-3 text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-semibold text-foreground">{t('account.syncStatus')}</span>
+                <span className={cn('rounded-full px-2 py-0.5 text-xs font-semibold', syncStatus === 'conflict' || syncStatus === 'error' ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground')}>
+                  {t(`sync.${syncStatus}`)}
+                </span>
+              </div>
+              <div className="mt-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                <span>{t('account.pendingSync')}</span>
+                <span>{pendingSyncCount}</span>
+              </div>
+              <div className="mt-1 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                <span>{t('account.lastSync')}</span>
+                <span className="text-right">{lastSyncLabel}</span>
+              </div>
             </div>
           </div>
 
@@ -1544,6 +1603,7 @@ function AppShell({
   const [tasks, setTasks] = useState<Task[]>(() => loadTasks(user.id));
   const [streak, setStreak] = useState(() => loadStatsFromCache(user.id).streak);
   const [completedToday, setCompletedToday] = useState(() => loadStatsFromCache(user.id).completedToday);
+  const [lastSync, setLastSync] = useState(() => loadSyncMeta(user.id).lastSync);
   const tasksRef = React.useRef(tasks);
   const completedTodayRef = React.useRef(completedToday);
   completedTodayRef.current = completedToday;
@@ -1564,7 +1624,7 @@ function AppShell({
   const [isRepeatMode, setIsRepeatMode] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [showTaskOptions, setShowTaskOptions] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'offline' | 'error'>('idle');
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'offline' | 'pending' | 'conflict' | 'error'>('idle');
   const [form, setForm] = useState<AddTaskState>(DEFAULT_FORM);
   const [deletedTasksOpen, setDeletedTasksOpen] = useState(false);
   const [deletedTasks, setDeletedTasks] = useState<Task[]>([]);
@@ -1584,8 +1644,11 @@ function AppShell({
     completedAt: t.completedAt,
     deletedAt: t.deletedAt,
     sortOrder: t.sortOrder,
+    updatedAt: t.updatedAt,
     _dirty: false,
     _syncState: undefined,
+    _operationId: undefined,
+    _conflict: false,
   }), []);
 
   const setTasksAndCache = React.useCallback((updater: React.SetStateAction<Task[]>) => {
@@ -1602,9 +1665,35 @@ function AppShell({
       setSyncStatus('idle');
       return;
     }
+    if (nextTasks.some(task => task._conflict)) {
+      setSyncStatus('conflict');
+      return;
+    }
     const hasDirty = nextTasks.some(task => task._dirty);
-    setSyncStatus(hasDirty ? (navigator.onLine ? 'error' : 'offline') : 'idle');
+    setSyncStatus(hasDirty ? (navigator.onLine ? 'pending' : 'offline') : 'idle');
   }, [cloudSyncEnabled]);
+
+  const buildTaskSyncPatch = React.useCallback((id: string, data: Partial<Task>, operationId?: string) => {
+    const current = tasksRef.current.find(task => task.id === id);
+    return {
+      ...data,
+      operationId: operationId || current?._operationId || syncOperationId(),
+      lastKnownUpdatedAt: current?.updatedAt ?? null,
+    };
+  }, []);
+
+  const handleTaskSyncError = React.useCallback((id: string, error: unknown) => {
+    if (isTaskConflictError(error)) {
+      setTasksAndCache(prev => prev.map(task => task.id === id ? { ...task, _dirty: true, _conflict: true } : task));
+      setSyncStatus('conflict');
+      toast.error(t('sync.conflict'));
+      return;
+    }
+    setTasksAndCache(prev => {
+      updateSyncStatusFromTasks(prev);
+      return prev;
+    });
+  }, [setTasksAndCache, t, updateSyncStatusFromTasks]);
 
   // On mount: pull all tasks from cloud (cloud-primary), fall back to cache
   useEffect(() => {
@@ -1636,7 +1725,9 @@ function AppShell({
           const merged = [...remoteTasks, ...dirtyTasks];
           setTasksAndCache(merged);
           saveTasksToCache(user.id, merged);
-          saveSyncMeta(user.id, { lastSync: new Date().toISOString() });
+          const syncedAt = new Date().toISOString();
+          saveSyncMeta(user.id, { lastSync: syncedAt });
+          setLastSync(syncedAt);
         }
       } catch {
         console.warn('TaskFlow: server unreachable, using cached data');
@@ -1730,7 +1821,13 @@ function AppShell({
       const flushed = await flushDirtyTasks(loadTasks(user.id));
       setTasksAndCache(flushed);
       const stillDirty = flushed.some(t => t._dirty);
-      setSyncStatus(stillDirty ? 'error' : 'idle');
+      const hasConflict = flushed.some(t => t._conflict);
+      setSyncStatus(hasConflict ? 'conflict' : stillDirty ? 'error' : 'idle');
+      if (!hasConflict && !stillDirty) {
+        const syncedAt = new Date().toISOString();
+        saveSyncMeta(user.id, { lastSync: syncedAt });
+        setLastSync(syncedAt);
+      }
     } finally {
       syncInFlightRef.current = false;
     }
@@ -1760,30 +1857,29 @@ function AppShell({
 
   const activeTasks = useMemo(() => tasks.filter(t => !t.deletedAt), [tasks]);
   const pendingTasks = useMemo(() => activeTasks.filter(t => t.status === 'todo'), [activeTasks]);
+  const pendingSyncCount = useMemo(() => tasks.filter(t => t._dirty).length, [tasks]);
   const flowDetailTask = flowDetailTaskId ? activeTasks.find(t => t.id === flowDetailTaskId) ?? null : null;
   const manageTask = manageTaskId ? activeTasks.find(t => t.id === manageTaskId) ?? null : null;
 
   const handleProgressChange = (id: string, newProgress: number) => {
     if (actionLocksRef.current.has(id)) return;
+    const syncPatch = buildTaskSyncPatch(id, { progress: newProgress });
     setTasksAndCache(prev => {
       const updated = prev.map(t => t.id === id ? { ...t, progress: newProgress } : t);
-      return markDirty(updated, id);
+      return markDirty(updated, id, 'update', syncPatch.operationId);
     });
     if (!cloudSyncEnabled || id.startsWith('local-')) {
       window.setTimeout(() => retryDirtyTasks(), 0);
       return;
     }
     // Background push
-    apiUpdateTask(id, { progress: newProgress })
-      .then(() => setTasksAndCache(prev => {
-        const next = markClean(prev, id);
+    apiUpdateTask(id, syncPatch)
+      .then(saved => setTasksAndCache(prev => {
+        const next = markClean(applySavedTaskMeta(prev, saved), id);
         updateSyncStatusFromTasks(next);
         return next;
       }))
-      .catch(() => setTasksAndCache(prev => {
-        updateSyncStatusFromTasks(prev);
-        return prev;
-      }));
+      .catch(error => handleTaskSyncError(id, error));
   };
 
   const handleAction = (id: string, action: ExitAction) => {
@@ -1866,6 +1962,7 @@ function AppShell({
       const newStatus = action === 'complete' ? 'done' : 'skipped';
       setTimeout(() => {
         const task = tasks.find(t => t.id === id);
+        const syncPatch = buildTaskSyncPatch(id, { status: newStatus });
         const nextDueDate = action === 'complete' ? nextRepeatDate(task?.dueDate, task?.repeatRule) : null;
         const nextTask: Task | null = task && nextDueDate ? {
           ...task,
@@ -1876,27 +1973,26 @@ function AppShell({
           reminderAt: null,
           deletedAt: null,
           sortOrder: tasks.filter(t => t.status === 'todo' && !t.deletedAt).length,
+          updatedAt: new Date().toISOString(),
           _dirty: true,
           _syncState: 'create',
+          _operationId: syncOperationId(),
         } : null;
 
         setTasksAndCache(prev => {
           const updated = prev.map(t => t.id !== id ? t : { ...t, status: newStatus as TaskStatus });
-          return markDirty(nextTask ? [...updated, nextTask] : updated, id);
+          return markDirty(nextTask ? [...updated, nextTask] : updated, id, 'update', syncPatch.operationId);
         });
         if (!cloudSyncEnabled || id.startsWith('local-')) {
           window.setTimeout(() => { retryDirtyTasks().finally(unlock); }, 0);
         } else {
-          apiUpdateTask(id, { status: newStatus })
-            .then(() => setTasksAndCache(prev => {
-              const next = markClean(prev, id);
+          apiUpdateTask(id, syncPatch)
+            .then(saved => setTasksAndCache(prev => {
+              const next = markClean(applySavedTaskMeta(prev, saved), id);
               updateSyncStatusFromTasks(next);
               return next;
             }))
-            .catch(() => setTasksAndCache(prev => {
-              updateSyncStatusFromTasks(prev);
-              return prev;
-            }))
+            .catch(error => handleTaskSyncError(id, error))
             .finally(unlock);
         }
         if (nextTask) window.setTimeout(() => retryDirtyTasks(), 0);
@@ -1966,13 +2062,13 @@ function AppShell({
       }));
   };
 
-  const persistTaskUpdate = (id: string, data: Partial<Task>) => {
+  const persistTaskUpdate = (id: string, data: Partial<Task>, operationId?: string) => {
     if (!cloudSyncEnabled || id.startsWith('local-')) {
       window.setTimeout(() => retryDirtyTasks(), 0);
       return;
     }
     setSyncStatus(navigator.onLine ? 'syncing' : 'offline');
-    apiUpdateTask(id, {
+    apiUpdateTask(id, buildTaskSyncPatch(id, {
       title: data.title,
       priority: data.priority,
       estimateMinutes: data.estimateMinutes,
@@ -1984,18 +2080,13 @@ function AppShell({
       repeatRule: data.repeatRule,
       deletedAt: data.deletedAt,
       sortOrder: data.sortOrder,
-    }).then(() => {
+    }, operationId)).then(saved => {
       setTasksAndCache(prev => {
-        const next = markClean(prev, id);
+        const next = markClean(applySavedTaskMeta(prev, saved), id);
         updateSyncStatusFromTasks(next);
         return next;
       });
-    }).catch(() => {
-      setTasksAndCache(prev => {
-        updateSyncStatusFromTasks(prev);
-        return prev;
-      });
-    });
+    }).catch(error => handleTaskSyncError(id, error));
   };
 
   const closeTaskForm = () => {
@@ -2045,25 +2136,35 @@ function AppShell({
   }, [refreshDeletedTasks]);
 
   const handleRestoreDeletedTask = React.useCallback((task: Task) => {
+    const operationId = task._operationId || syncOperationId();
     setDeletedTasks(prev => prev.filter(t => t.id !== task.id));
     setTasksAndCache(prev => {
-      const restored = { ...task, deletedAt: null, _dirty: !cloudSyncEnabled || task.id.startsWith('local-'), _syncState: 'update' as const };
+      const restored = { ...task, deletedAt: null, _dirty: !cloudSyncEnabled || task.id.startsWith('local-'), _syncState: 'update' as const, _operationId: operationId };
       const exists = prev.some(t => t.id === task.id);
       return exists
-        ? prev.map(t => t.id === task.id ? { ...t, deletedAt: null, _dirty: restored._dirty, _syncState: restored._syncState } : t)
+        ? prev.map(t => t.id === task.id ? { ...t, deletedAt: null, _dirty: restored._dirty, _syncState: restored._syncState, _operationId: operationId } : t)
         : [...prev, restored];
     });
     if (!cloudSyncEnabled || task.id.startsWith('local-')) {
-      persistTaskUpdate(task.id, { deletedAt: null });
+      persistTaskUpdate(task.id, { deletedAt: null }, operationId);
       return;
     }
-    apiRestoreTask(task.id)
+    apiRestoreTask(task.id, {
+      operationId,
+      lastKnownUpdatedAt: task.updatedAt ?? null,
+    })
       .then(restored => setTasksAndCache(prev => {
         const nextTask = toTask(restored);
         const exists = prev.some(t => t.id === nextTask.id);
         return exists ? prev.map(t => t.id === nextTask.id ? nextTask : t) : [...prev, nextTask];
       }))
-      .catch(() => {
+      .catch(error => {
+        if (isTaskConflictError(error)) {
+          setTasksAndCache(prev => prev.map(t => t.id === task.id ? { ...t, _dirty: true, _conflict: true } : t));
+          setSyncStatus('conflict');
+          toast.error(t('sync.conflict'));
+          return;
+        }
         toast.error(t('task.restoreFailed'));
         refreshDeletedTasks();
       });
@@ -2114,14 +2215,16 @@ function AppShell({
 
   const handleDeleteTask = (task: Task) => {
     const deletedAt = new Date().toISOString();
-    setTasksAndCache(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt } : t), task.id));
-    persistTaskUpdate(task.id, { deletedAt });
+    const operationId = task._operationId || syncOperationId();
+    setTasksAndCache(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt } : t), task.id, 'update', operationId));
+    persistTaskUpdate(task.id, { deletedAt }, operationId);
     toast(t('task.deleted'), {
       action: {
         label: t('task.undo'),
         onClick: () => {
-          setTasksAndCache(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt: null } : t), task.id));
-          persistTaskUpdate(task.id, { deletedAt: null });
+          const undoOperationId = syncOperationId();
+          setTasksAndCache(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt: null } : t), task.id, 'update', undoOperationId));
+          persistTaskUpdate(task.id, { deletedAt: null }, undoOperationId);
         },
       },
     });
@@ -2158,8 +2261,9 @@ function AppShell({
         repeatRule: form.repeatRule,
         tag: form.tag,
       };
-      setTasksAndCache(prev => markDirty(prev.map(t => t.id === editingTaskId ? { ...t, ...patch } : t), editingTaskId));
-      persistTaskUpdate(editingTaskId, patch);
+      const operationId = tasksRef.current.find(task => task.id === editingTaskId)?._operationId || syncOperationId();
+      setTasksAndCache(prev => markDirty(prev.map(t => t.id === editingTaskId ? { ...t, ...patch } : t), editingTaskId, 'update', operationId));
+      persistTaskUpdate(editingTaskId, patch, operationId);
       closeTaskForm();
       return;
     }
@@ -2169,12 +2273,14 @@ function AppShell({
 
     const optimisticTask: Task = {
       id: tempId, _dirty: true, _syncState: 'create',
+      _operationId: syncOperationId(),
       title: form.title, priority: form.priority,
       estimateMinutes: parseInt(form.minutes) || 15,
       status: 'todo', progress: 0,
       dueDate: form.dueDate || null, reminderAt: form.reminderAt || null,
       repeatRule: form.repeatRule, deletedAt: null, tag: form.tag,
       sortOrder: idx,
+      updatedAt: new Date().toISOString(),
     };
     setTasksAndCache(prev => {
       const i = insertIndex(prev, optimisticTask);
@@ -2227,6 +2333,9 @@ function AppShell({
             deletedCount={tasks.filter(task => !!task.deletedAt).length || deletedTasks.length}
             onExportData={handleExportData}
             onDeleteAccount={handleDeleteAccount}
+            syncStatus={syncStatus}
+            lastSync={lastSync}
+            pendingSyncCount={pendingSyncCount}
           />
         )}
       </AnimatePresence>
@@ -2262,7 +2371,7 @@ function AppShell({
           <button
             onClick={retryDirtyTasks}
             className={`w-full flex items-center justify-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold ${
-              syncStatus === 'error'
+              syncStatus === 'error' || syncStatus === 'conflict'
                 ? 'border-destructive/30 bg-destructive/10 text-destructive'
                 : 'border-border bg-card text-muted-foreground'
             }`}

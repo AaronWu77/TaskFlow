@@ -1,5 +1,5 @@
 import { Router, Response, NextFunction, RequestHandler } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { recomputeUserStats } from '../services/stats';
 
@@ -34,6 +34,79 @@ function isValidDateOnly(value: string): boolean {
 
 function validationError(res: Response, field: string, message: string): void {
   res.status(400).json({ code: 'VALIDATION_ERROR', field, error: message });
+}
+
+function normalizeOperationId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.length <= 120 ? trimmed : null;
+}
+
+function normalizeLastKnownUpdatedAt(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  return isValidIsoDateTime(value) ? value : null;
+}
+
+async function findRecordedOperation(userId: string, operationId: string) {
+  return prisma.taskOperation.findFirst({
+    where: { userId, operationId },
+  });
+}
+
+function toJsonResponse(response: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(response)) as Prisma.InputJsonValue;
+}
+
+function isUniqueOperationError(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+    return false;
+  }
+  const target = error.meta?.target;
+  return target === 'TaskOperation_operationId_key'
+    || (Array.isArray(target) && target.includes('operationId'));
+}
+
+async function claimOperation(tx: Prisma.TransactionClient, userId: string, operationId: string | null, type: string): Promise<void> {
+  if (!operationId) return;
+  await tx.taskOperation.create({
+    data: {
+      userId,
+      operationId,
+      type,
+    },
+  });
+}
+
+async function completeOperation(tx: Prisma.TransactionClient, operationId: string | null, taskId: string | null, response: unknown): Promise<void> {
+  if (!operationId) return;
+  await tx.taskOperation.update({
+    where: { operationId },
+    data: {
+      taskId,
+      response: toJsonResponse(response),
+    },
+  });
+}
+
+async function sendRecordedOperation(res: Response, userId: string, operationId: string, status = 200): Promise<boolean> {
+  const recorded = await findRecordedOperation(userId, operationId);
+  if (recorded?.response) {
+    res.status(status).json(recorded.response);
+    return true;
+  }
+  res.status(409).json({
+    code: 'OPERATION_IN_PROGRESS',
+    error: 'Operation is already being processed',
+  });
+  return true;
+}
+
+function conflictResponse(res: Response, serverTask: unknown): void {
+  res.status(409).json({
+    code: 'TASK_CONFLICT',
+    error: 'Task was changed on another device',
+    serverTask,
+  });
 }
 
 function parseInteger(value: unknown, field: string, res: Response, min: number, max: number): number | undefined {
@@ -194,25 +267,40 @@ router.get('/deleted', asyncHandler(async (req, res) => {
 
 // POST /tasks — create a new task
 router.post('/', asyncHandler(async (req, res) => {
+  const operationId = isObject(req.body) ? normalizeOperationId(req.body.operationId) : null;
   const data = parseTaskPayload(req.body, res, false);
   if (!data) return;
-  const task = await prisma.task.create({
-    data: {
-      userId: req.userId!,
-      title: data.title as string,
-      priority: data.priority as string,
-      estimateMinutes: data.estimateMinutes as number,
-      status: data.status as string,
-      tag: data.tag as string | null | undefined,
-      progress: data.progress as number,
-      dueDate: data.dueDate as string | null | undefined,
-      reminderAt: data.reminderAt as string | null | undefined,
-      repeatRule: data.repeatRule as string | null | undefined,
-      completedAt: data.status === 'done' ? new Date().toISOString() : null,
-      deletedAt: data.deletedAt as string | null | undefined,
-      sortOrder: data.sortOrder as number,
-    },
-  });
+  let task;
+  try {
+    task = await prisma.$transaction(async (tx) => {
+      await claimOperation(tx, req.userId!, operationId, 'create');
+      const created = await tx.task.create({
+        data: {
+          userId: req.userId!,
+          title: data.title as string,
+          priority: data.priority as string,
+          estimateMinutes: data.estimateMinutes as number,
+          status: data.status as string,
+          tag: data.tag as string | null | undefined,
+          progress: data.progress as number,
+          dueDate: data.dueDate as string | null | undefined,
+          reminderAt: data.reminderAt as string | null | undefined,
+          repeatRule: data.repeatRule as string | null | undefined,
+          completedAt: data.status === 'done' ? new Date().toISOString() : null,
+          deletedAt: data.deletedAt as string | null | undefined,
+          sortOrder: data.sortOrder as number,
+        },
+      });
+      await completeOperation(tx, operationId, created.id, created);
+      return created;
+    });
+  } catch (error) {
+    if (operationId && isUniqueOperationError(error)) {
+      await sendRecordedOperation(res, req.userId!, operationId, 201);
+      return;
+    }
+    throw error;
+  }
   if (task.completedAt) {
     await recomputeUserStats(prisma, req.userId!);
   }
@@ -246,23 +334,56 @@ router.put('/reorder', asyncHandler(async (req, res) => {
 // PATCH /tasks/:id — update task fields (status, progress, sortOrder, etc.)
 router.patch('/:id', asyncHandler(async (req, res) => {
   const id = String(req.params.id);
-  const existing = await prisma.task.findFirst({ where: { id, userId: req.userId! } });
-  if (!existing) {
+  const operationId = isObject(req.body) ? normalizeOperationId(req.body.operationId) : null;
+  if (operationId) {
+    const recorded = await findRecordedOperation(req.userId!, operationId);
+    if (recorded?.response) {
+      res.json(recorded.response);
+      return;
+    }
+  }
+  const lastKnownUpdatedAt = isObject(req.body) ? normalizeLastKnownUpdatedAt(req.body.lastKnownUpdatedAt) : null;
+  const data = parseTaskPayload(req.body, res, true);
+  if (!data) return;
+  let statsChanged = false;
+  let updated;
+  try {
+    updated = await prisma.$transaction(async (tx) => {
+      const existing = await tx.task.findFirst({ where: { id, userId: req.userId! } });
+      if (!existing) return null;
+      if (lastKnownUpdatedAt && existing.updatedAt.toISOString() !== lastKnownUpdatedAt) {
+        return { conflict: existing };
+      }
+      await claimOperation(tx, req.userId!, operationId, 'update');
+      if (data.status === 'done' && existing.status !== 'done' && !existing.completedAt) {
+        data.completedAt = new Date().toISOString();
+      } else if (data.status !== undefined && data.status !== 'done' && existing.completedAt) {
+        data.completedAt = null;
+      }
+      const saved = await tx.task.update({
+        where: { id },
+        data,
+      });
+      statsChanged = saved.completedAt !== existing.completedAt;
+      await completeOperation(tx, operationId, saved.id, saved);
+      return saved;
+    });
+  } catch (error) {
+    if (operationId && isUniqueOperationError(error)) {
+      await sendRecordedOperation(res, req.userId!, operationId);
+      return;
+    }
+    throw error;
+  }
+  if (!updated) {
     res.status(404).json({ error: 'Task not found' });
     return;
   }
-  const data = parseTaskPayload(req.body, res, true);
-  if (!data) return;
-  if (data.status === 'done' && existing.status !== 'done' && !existing.completedAt) {
-    data.completedAt = new Date().toISOString();
-  } else if (data.status !== undefined && data.status !== 'done' && existing.completedAt) {
-    data.completedAt = null;
+  if ('conflict' in updated) {
+    conflictResponse(res, updated.conflict);
+    return;
   }
-  const updated = await prisma.task.update({
-    where: { id },
-    data,
-  });
-  if (updated.completedAt !== existing.completedAt) {
+  if (statsChanged) {
     await recomputeUserStats(prisma, req.userId!);
   }
   res.json(updated);
@@ -271,15 +392,42 @@ router.patch('/:id', asyncHandler(async (req, res) => {
 // POST /tasks/:id/restore — restore a soft-deleted task
 router.post('/:id/restore', asyncHandler(async (req, res) => {
   const id = String(req.params.id);
+  const operationId = isObject(req.body) ? normalizeOperationId(req.body.operationId) : null;
+  if (operationId) {
+    const recorded = await findRecordedOperation(req.userId!, operationId);
+    if (recorded?.response) {
+      res.json(recorded.response);
+      return;
+    }
+  }
   const existing = await prisma.task.findFirst({ where: { id, userId: req.userId! } });
   if (!existing) {
     res.status(404).json({ error: 'Task not found' });
     return;
   }
-  const restored = await prisma.task.update({
-    where: { id },
-    data: { deletedAt: null },
-  });
+  const lastKnownUpdatedAt = isObject(req.body) ? normalizeLastKnownUpdatedAt(req.body.lastKnownUpdatedAt) : null;
+  if (lastKnownUpdatedAt && existing.updatedAt.toISOString() !== lastKnownUpdatedAt) {
+    conflictResponse(res, existing);
+    return;
+  }
+  let restored;
+  try {
+    restored = await prisma.$transaction(async (tx) => {
+      await claimOperation(tx, req.userId!, operationId, 'restore');
+      const saved = await tx.task.update({
+        where: { id },
+        data: { deletedAt: null },
+      });
+      await completeOperation(tx, operationId, saved.id, saved);
+      return saved;
+    });
+  } catch (error) {
+    if (operationId && isUniqueOperationError(error)) {
+      await sendRecordedOperation(res, req.userId!, operationId);
+      return;
+    }
+    throw error;
+  }
   res.json(restored);
 }));
 
@@ -305,15 +453,42 @@ router.delete('/:id/permanent', asyncHandler(async (req, res) => {
 // DELETE /tasks/:id — soft delete a task
 router.delete('/:id', asyncHandler(async (req, res) => {
   const id = String(req.params.id);
+  const operationId = isObject(req.body) ? normalizeOperationId(req.body.operationId) : null;
+  if (operationId) {
+    const recorded = await findRecordedOperation(req.userId!, operationId);
+    if (recorded?.response) {
+      res.json(recorded.response);
+      return;
+    }
+  }
   const existing = await prisma.task.findFirst({ where: { id, userId: req.userId! } });
   if (!existing) {
     res.status(404).json({ error: 'Task not found' });
     return;
   }
-  const deleted = await prisma.task.update({
-    where: { id },
-    data: { deletedAt: existing.deletedAt || new Date().toISOString() },
-  });
+  const lastKnownUpdatedAt = isObject(req.body) ? normalizeLastKnownUpdatedAt(req.body.lastKnownUpdatedAt) : null;
+  if (lastKnownUpdatedAt && existing.updatedAt.toISOString() !== lastKnownUpdatedAt) {
+    conflictResponse(res, existing);
+    return;
+  }
+  let deleted;
+  try {
+    deleted = await prisma.$transaction(async (tx) => {
+      await claimOperation(tx, req.userId!, operationId, 'delete');
+      const saved = await tx.task.update({
+        where: { id },
+        data: { deletedAt: existing.deletedAt || new Date().toISOString() },
+      });
+      await completeOperation(tx, operationId, saved.id, saved);
+      return saved;
+    });
+  } catch (error) {
+    if (operationId && isUniqueOperationError(error)) {
+      await sendRecordedOperation(res, req.userId!, operationId);
+      return;
+    }
+    throw error;
+  }
   res.json(deleted);
 }));
 

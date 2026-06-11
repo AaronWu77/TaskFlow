@@ -391,7 +391,8 @@ vim .env   # 填写以下三项（必填）：
 docker compose up -d
 
 # 4. 验证
-curl http://localhost/health   # → {"status":"ok"}
+curl http://localhost/health        # → {"status":"ok"}，容器本机健康检查
+curl https://你的前端域名/health     # → {"status":"ok"}，生产 HTTPS 对外检查
 docker compose logs -f api     # 查看 API 日志
 ```
 

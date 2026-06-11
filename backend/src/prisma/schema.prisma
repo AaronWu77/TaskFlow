@@ -26,6 +26,7 @@ model User {
   tasks     Task[]
   stats     UserStats?
   refreshSessions RefreshSession[]
+  taskOperations TaskOperation[]
 }
 
 model Task {
@@ -52,6 +53,21 @@ model Task {
   @@index([userId, completedAt])
   @@index([userId, deletedAt])
   @@index([userId, sortOrder])
+}
+
+model TaskOperation {
+  id          String   @id @default(cuid())
+  operationId String  @unique
+  userId      String
+  taskId      String?
+  type        String
+  response    Json?
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([taskId])
+  @@index([createdAt])
 }
 
 model UserStats {

@@ -160,7 +160,12 @@
     "system": "System",
     "language": "Language",
     "chinese": "中文",
-    "english": "English"
+    "english": "English",
+    "sync": "Sync",
+    "syncStatus": "Status",
+    "pendingSync": "Pending changes",
+    "lastSync": "Last synced",
+    "neverSynced": "Never"
   },
   "stats": {
     "streakDays_one": "{{count}} Day",
@@ -168,7 +173,9 @@
   },
   "sync": {
     "syncing": "Syncing changes...",
+    "pending": "Changes pending sync — tap to retry",
     "offline": "Offline — changes are saved locally",
+    "conflict": "Sync conflict — cloud version changed",
     "error": "Sync failed — tap to retry",
     "idle": "Synced"
   }

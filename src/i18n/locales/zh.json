@@ -160,7 +160,12 @@
     "system": "跟随系统",
     "language": "语言",
     "chinese": "中文",
-    "english": "English"
+    "english": "English",
+    "sync": "同步",
+    "syncStatus": "状态",
+    "pendingSync": "待同步修改",
+    "lastSync": "最近同步",
+    "neverSynced": "从未同步"
   },
   "stats": {
     "streakDays_one": "{{count}} 天",
@@ -168,7 +173,9 @@
   },
   "sync": {
     "syncing": "正在同步修改...",
+    "pending": "有修改等待同步 — 点击重试",
     "offline": "离线中 — 修改已保存在本地",
+    "conflict": "同步冲突 — 云端版本已变化",
     "error": "同步失败 — 点击重试",
     "idle": "已同步"
   }

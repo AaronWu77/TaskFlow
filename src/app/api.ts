@@ -14,6 +14,24 @@ export type RefreshResult = 'ok' | 'unauthorized' | 'network';
 const IS_NATIVE_PLATFORM = Capacitor.isNativePlatform();
 let refreshedUser: AuthUser | null = null;
 
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  data?: unknown;
+
+  constructor(message: string, status: number, code?: string, data?: unknown) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+    this.data = data;
+  }
+}
+
+export function isTaskConflictError(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.status === 409 && error.code === 'TASK_CONFLICT';
+}
+
 // Callback invoked when both the access token and refresh cookie are expired.
 // The App component registers this to transition back to the login screen.
 let onAuthFailure: (() => void) | null = null;
@@ -265,14 +283,15 @@ export async function apiCreateTask(task: {
   repeatRule?: string | null;
   deletedAt?: string | null;
   sortOrder?: number;
+  operationId?: string;
 }): Promise<TaskDTO> {
   const res = await apiFetch('/tasks', {
     method: 'POST',
     body: JSON.stringify(task),
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Failed to create task' })) as { error: string };
-    throw new Error(err.error || 'Failed to create task');
+    const err = await res.json().catch(() => ({ error: 'Failed to create task' })) as { error?: string; code?: string };
+    throw new ApiError(err.error || 'Failed to create task', res.status, err.code, err);
   }
   return res.json() as Promise<TaskDTO>;
 }
@@ -289,14 +308,16 @@ export async function apiUpdateTask(id: string, data: Partial<{
   repeatRule: string | null;
   deletedAt: string | null;
   sortOrder: number;
+  lastKnownUpdatedAt: string | null;
+  operationId: string;
 }>): Promise<TaskDTO> {
   const res = await apiFetch(`/tasks/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify(data),
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Failed to update task' })) as { error: string };
-    throw new Error(err.error || 'Failed to update task');
+    const err = await res.json().catch(() => ({ error: 'Failed to update task' })) as { error?: string; code?: string };
+    throw new ApiError(err.error || 'Failed to update task', res.status, err.code, err);
   }
   return res.json() as Promise<TaskDTO>;
 }
@@ -304,17 +325,21 @@ export async function apiUpdateTask(id: string, data: Partial<{
 export async function apiDeleteTask(id: string): Promise<TaskDTO | null> {
   const res = await apiFetch(`/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok && res.status !== 404) {
-    throw new Error('Failed to delete task');
+    const err = await res.json().catch(() => ({ error: 'Failed to delete task' })) as { error?: string; code?: string };
+    throw new ApiError(err.error || 'Failed to delete task', res.status, err.code, err);
   }
   if (res.status === 404) return null;
   return res.json() as Promise<TaskDTO>;
 }
 
-export async function apiRestoreTask(id: string): Promise<TaskDTO> {
-  const res = await apiFetch(`/tasks/${encodeURIComponent(id)}/restore`, { method: 'POST' });
+export async function apiRestoreTask(id: string, data?: { operationId?: string; lastKnownUpdatedAt?: string | null }): Promise<TaskDTO> {
+  const res = await apiFetch(`/tasks/${encodeURIComponent(id)}/restore`, {
+    method: 'POST',
+    body: JSON.stringify(data ?? {}),
+  });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Failed to restore task' })) as { error: string };
-    throw new Error(err.error || 'Failed to restore task');
+    const err = await res.json().catch(() => ({ error: 'Failed to restore task' })) as { error?: string; code?: string };
+    throw new ApiError(err.error || 'Failed to restore task', res.status, err.code, err);
   }
   return res.json() as Promise<TaskDTO>;
 }
