@@ -11,7 +11,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
 import { storageGet, storageSet, storageRemove, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, apiGetDeletedTasks, apiRestoreTask, apiPermanentDeleteTask, type AuthUser, type TaskDTO } from './api';
+import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, apiGetDeletedTasks, apiRestoreTask, apiPermanentDeleteTask, apiExportUserData, apiDeleteAccount, type AuthUser, type TaskDTO } from './api';
 import { toast, Toaster } from 'sonner';
 import { cn } from './components/ui/utils';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
@@ -34,6 +34,7 @@ interface Task {
   dueDate?: string | null;
   reminderAt?: string | null;
   repeatRule?: 'none' | 'daily' | 'weekly' | 'monthly' | null;
+  completedAt?: string | null;
   deletedAt?: string | null;
   sortOrder: number;
   _dirty?: boolean; // local-only: true if pending sync to server
@@ -578,12 +579,14 @@ function TaskCard({ task, onAction, onProgressChange, pendingAction = null, acti
 }
 
 // --- Task Detail Modal (Calendar) ---
-function TaskDetailModal({ task, onClose, onAction, onProgressChange, actionDisabled = false }: {
+function TaskDetailModal({ task, onClose, onAction, onProgressChange, actionDisabled = false, onManage }: {
   task: Task | null; onClose: () => void;
   onAction: (id: string, action: ExitAction) => void;
   onProgressChange: (id: string, progress: number) => void;
   actionDisabled?: boolean;
+  onManage?: (task: Task) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <Dialog.Root open={!!task} onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
@@ -605,6 +608,58 @@ function TaskDetailModal({ task, onClose, onAction, onProgressChange, actionDisa
               <X className="w-4 h-4" />
             </button>
           </Dialog.Close>
+          {task && onManage && (
+            <button
+              type="button"
+              onClick={() => { onManage(task); onClose(); }}
+              className="absolute -bottom-14 left-1/2 z-20 -translate-x-1/2 rounded-full border border-border bg-card px-5 py-2 text-sm font-semibold text-foreground shadow-sm"
+            >
+              {t('task.manage')}
+            </button>
+          )}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function TaskManageDialog({ task, onClose, onEdit, onDelete }: {
+  task: Task | null;
+  onClose: () => void;
+  onEdit: (task: Task) => void;
+  onDelete: (task: Task) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Dialog.Root open={!!task} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 backdrop-blur-md z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Content className="fixed left-[50%] top-[50%] z-50 w-[calc(100%-2rem)] max-w-sm translate-x-[-50%] translate-y-[-50%] rounded-3xl border border-border bg-card p-5 shadow-2xl focus:outline-none">
+          <Dialog.Title className="text-base font-bold">{task?.title}</Dialog.Title>
+          <Dialog.Description className="mt-1 text-sm text-muted-foreground">{t('task.manageTaskDesc')}</Dialog.Description>
+          {task && (
+            <div className="mt-5 space-y-2">
+              <button
+                type="button"
+                onClick={() => { onEdit(task); onClose(); }}
+                className="flex w-full items-center justify-center rounded-xl bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground active:scale-95"
+              >
+                {t('task.editTask')}
+              </button>
+              <button
+                type="button"
+                onClick={() => { onDelete(task); onClose(); }}
+                className="flex w-full items-center justify-center rounded-xl bg-destructive/10 px-4 py-3 text-sm font-semibold text-destructive active:scale-95"
+              >
+                {t('task.delete')}
+              </button>
+              <Dialog.Close asChild>
+                <button type="button" className="flex w-full items-center justify-center rounded-xl bg-muted px-4 py-3 text-sm font-semibold text-muted-foreground active:scale-95">
+                  {t('task.cancel')}
+                </button>
+              </Dialog.Close>
+            </div>
+          )}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -981,12 +1036,13 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
 }
 
 // --- Calendar View ---
-function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTask, actingTaskIds }: {
+function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTask, onManageTask, actingTaskIds }: {
   tasks: Task[];
   onAction: (id: string, action: ExitAction) => void;
   onProgressChange: (id: string, progress: number) => void;
   onAddTask: () => void;
   onRepeatTask: (task: Task) => void;
+  onManageTask?: (task: Task) => void;
   actingTaskIds?: Set<string>;
 }) {
   const { t, i18n } = useTranslation();
@@ -1041,7 +1097,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 
   return (
     <>
-      <TaskDetailModal task={detailTask} onClose={() => setDetailTaskId(null)} onAction={onAction} onProgressChange={onProgressChange} actionDisabled={detailTask ? actingTaskIds?.has(detailTask.id) : false} />
+      <TaskDetailModal task={detailTask} onClose={() => setDetailTaskId(null)} onAction={onAction} onProgressChange={onProgressChange} actionDisabled={detailTask ? actingTaskIds?.has(detailTask.id) : false} onManage={onManageTask} />
       <RepeatTaskModal task={repeatTask} onClose={() => setRepeatTask(null)} onRepeat={onRepeatTask} />
 
       <div className="w-full max-w-md space-y-3">
@@ -1255,7 +1311,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 
 // --- Account Page ---
 
-function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogout, onOpenDeletedTasks, deletedCount }: {
+function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogout, onOpenDeletedTasks, deletedCount, onExportData, onDeleteAccount }: {
   email: string;
   accentTheme: AccentTheme;
   onAccentThemeChange: (theme: AccentTheme) => void;
@@ -1263,6 +1319,8 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
   onLogout: () => void;
   onOpenDeletedTasks: () => void;
   deletedCount: number;
+  onExportData: () => void;
+  onDeleteAccount: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const displayName = email.split('@')[0];
@@ -1353,6 +1411,22 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
               <span>{t('task.recentlyDeleted')}</span>
               <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{deletedCount}</span>
             </button>
+            <button
+              type="button"
+              onClick={onExportData}
+              className="flex w-full items-center justify-between rounded-xl border border-border bg-card px-4 py-3 text-left text-sm font-semibold text-foreground transition-colors hover:bg-muted/50"
+            >
+              <span>{t('account.exportData')}</span>
+              <ChevronRight className="h-4 w-4 text-muted-foreground" />
+            </button>
+            <button
+              type="button"
+              onClick={onDeleteAccount}
+              className="flex w-full items-center justify-between rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-3 text-left text-sm font-semibold text-destructive transition-colors hover:bg-destructive/10"
+            >
+              <span>{t('account.deleteAccount')}</span>
+              <ChevronRight className="h-4 w-4" />
+            </button>
           </div>
         </div>
       </div>
@@ -1382,7 +1456,7 @@ function DeletedTasksDialog({ open, tasks, loading, onClose, onRestore, onPerman
   return (
     <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/30 backdrop-blur-md z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Overlay className="fixed inset-0 backdrop-blur-md z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <Dialog.Content className="fixed left-[50%] top-[50%] z-50 flex max-h-[78vh] w-[calc(100%-2rem)] max-w-md translate-x-[-50%] translate-y-[-50%] flex-col rounded-3xl border border-border bg-card p-5 shadow-2xl focus:outline-none">
           <div className="mb-4 flex items-start justify-between gap-4">
             <div>
@@ -1470,6 +1544,7 @@ function AppShell({
   const [tasks, setTasks] = useState<Task[]>(() => loadTasks(user.id));
   const [streak, setStreak] = useState(() => loadStatsFromCache(user.id).streak);
   const [completedToday, setCompletedToday] = useState(() => loadStatsFromCache(user.id).completedToday);
+  const tasksRef = React.useRef(tasks);
   const completedTodayRef = React.useRef(completedToday);
   completedTodayRef.current = completedToday;
   const hasInteractedRef = React.useRef(false);
@@ -1483,6 +1558,7 @@ function AppShell({
   const [isReordering, setIsReordering] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [flowDetailTaskId, setFlowDetailTaskId] = useState<string | null>(null);
+  const [manageTaskId, setManageTaskId] = useState<string | null>(null);
 
   const [isAddingTask, setIsAddingTask] = useState(false);
   const [isRepeatMode, setIsRepeatMode] = useState(false);
@@ -1505,6 +1581,7 @@ function AppShell({
     dueDate: t.dueDate,
     reminderAt: t.reminderAt,
     repeatRule: (t.repeatRule as Task['repeatRule']) ?? 'none',
+    completedAt: t.completedAt,
     deletedAt: t.deletedAt,
     sortOrder: t.sortOrder,
     _dirty: false,
@@ -1514,6 +1591,7 @@ function AppShell({
   const setTasksAndCache = React.useCallback((updater: React.SetStateAction<Task[]>) => {
     setTasks(prev => {
       const next = typeof updater === 'function' ? (updater as (prev: Task[]) => Task[])(prev) : updater;
+      tasksRef.current = next;
       saveTasksToCache(user.id, next);
       return next;
     });
@@ -1572,7 +1650,7 @@ function AppShell({
         setTasksAndCache(cached.length > 0 ? cached : []);
       }
 
-      // Stats — cache is the authority for streak; server is a mirror
+      // Stats — cache gives instant offline feedback; server recomputes authoritative values.
       try {
         const cached = loadStatsFromCache(user.id);
         if (!cancelled && !hasInteractedRef.current) {
@@ -1683,6 +1761,7 @@ function AppShell({
   const activeTasks = useMemo(() => tasks.filter(t => !t.deletedAt), [tasks]);
   const pendingTasks = useMemo(() => activeTasks.filter(t => t.status === 'todo'), [activeTasks]);
   const flowDetailTask = flowDetailTaskId ? activeTasks.find(t => t.id === flowDetailTaskId) ?? null : null;
+  const manageTask = manageTaskId ? activeTasks.find(t => t.id === manageTaskId) ?? null : null;
 
   const handleProgressChange = (id: string, newProgress: number) => {
     if (actionLocksRef.current.has(id)) return;
@@ -1725,21 +1804,36 @@ function AppShell({
     hasInteractedRef.current = true;
     if (action === 'snooze') {
       setTimeout(() => {
-        let order: Array<{ id: string; sortOrder: number }> = [];
+        const latestTasks = tasksRef.current;
+        const task = latestTasks.find(t => t.id === id);
+        if (!task) {
+          unlock();
+          return;
+        }
+        const reordered = [...latestTasks.filter(t => t.id !== id), task];
+        let sortOrder = 0;
+        const order: Array<{ id: string; sortOrder: number }> = [];
+        const normalized = reordered.map(t => {
+          if (t.status !== 'todo' || t.deletedAt) return t;
+          const next = { ...t, sortOrder: sortOrder++ };
+          if (!next.id.startsWith('local-')) {
+            order.push({ id: next.id, sortOrder: next.sortOrder });
+          }
+          return next;
+        });
+        const remoteOrderIds = new Set(order.map(o => o.id));
         setTasksAndCache(prev => {
-          const task = prev.find(t => t.id === id);
           if (!task) return prev;
-          const reordered = [...prev.filter(t => t.id !== id), task];
-          let sortOrder = 0;
-          const normalized = reordered.map(t => {
-            if (t.status !== 'todo' || t.deletedAt) return t;
-            const next = { ...t, sortOrder: sortOrder++ };
-            if (!next.id.startsWith('local-')) {
-              order.push({ id: next.id, sortOrder: next.sortOrder });
-            }
-            return next;
-          });
-          const remoteOrderIds = new Set(order.map(o => o.id));
+          if (prev !== latestTasks) {
+            const nextTask = prev.find(t => t.id === id);
+            if (!nextTask) return prev;
+            let nextSortOrder = 0;
+            return [...prev.filter(t => t.id !== id), nextTask].map(t => {
+              if (t.status !== 'todo' || t.deletedAt) return t;
+              const next = { ...t, sortOrder: nextSortOrder++ };
+              return remoteOrderIds.has(next.id) ? { ...next, _dirty: true, _syncState: 'update' } : next;
+            });
+          }
           return normalized.map(t => remoteOrderIds.has(t.id) ? { ...t, _dirty: true, _syncState: 'update' } : t);
         });
         window.setTimeout(() => {
@@ -1831,9 +1925,9 @@ function AppShell({
             saveStatsToCache(user.id, streak, newCount);
           }
 
-          // Push to server (server stores what client computed)
+          // Ask the server to recompute stats from completed tasks.
           if (cloudSyncEnabled) {
-            apiUpdateUserStats({ todayCount: newCount, streak: newStreak }).catch(() =>
+            apiUpdateUserStats().catch(() =>
               toast.error('Stats sync failed — retrying')
             );
           }
@@ -1987,6 +2081,37 @@ function AppShell({
     });
   }, [cloudSyncEnabled, refreshDeletedTasks, setTasksAndCache, t]);
 
+  const handleExportData = React.useCallback(async () => {
+    try {
+      const blob = await apiExportUserData();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `taskflow-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast.success(t('account.exportStarted'));
+    } catch {
+      toast.error(t('account.exportFailed'));
+    }
+  }, [t]);
+
+  const handleDeleteAccount = React.useCallback(async () => {
+    const confirmed = window.confirm(t('account.deleteAccountConfirm'));
+    if (!confirmed) return;
+    try {
+      await apiDeleteAccount();
+      clearUserLocalCache(user.id);
+      clearSession();
+      clearLocalAuthTokens();
+      onLogout();
+    } catch {
+      toast.error(t('account.deleteAccountFailed'));
+    }
+  }, [onLogout, t, user.id]);
+
   const handleDeleteTask = (task: Task) => {
     const deletedAt = new Date().toISOString();
     setTasksAndCache(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt } : t), task.id));
@@ -2067,6 +2192,14 @@ function AppShell({
         onAction={handleAction}
         onProgressChange={handleProgressChange}
         actionDisabled={flowDetailTask ? actingTaskIds.has(flowDetailTask.id) : false}
+        onManage={(task) => setManageTaskId(task.id)}
+      />
+
+      <TaskManageDialog
+        task={manageTask}
+        onClose={() => setManageTaskId(null)}
+        onEdit={openEditTask}
+        onDelete={handleDeleteTask}
       />
 
       <DeletedTasksDialog
@@ -2092,6 +2225,8 @@ function AppShell({
               openDeletedTasks();
             }}
             deletedCount={tasks.filter(task => !!task.deletedAt).length || deletedTasks.length}
+            onExportData={handleExportData}
+            onDeleteAccount={handleDeleteAccount}
           />
         )}
       </AnimatePresence>
@@ -2262,6 +2397,7 @@ function AppShell({
               onProgressChange={handleProgressChange}
               onAddTask={openAddTask}
               onRepeatTask={handleRepeatTask}
+              onManageTask={(task) => setManageTaskId(task.id)}
               actingTaskIds={actingTaskIds}
             />
           </div>
@@ -2637,9 +2773,8 @@ export default function App() {
           const tasks = JSON.parse(raw) as Task[];
           await flushDirtyTasks(tasks);
         }
-        // Push current stats
-        const stats = userId ? loadStatsFromCache(userId) : { completedToday: 0 };
-        try { await apiUpdateUserStats({ todayCount: stats.completedToday }); } catch { /* */ }
+        // Refresh server-derived stats after flushing pending task changes.
+        try { await apiUpdateUserStats(); } catch { /* */ }
       }
     } catch { /* non-critical */ }
 

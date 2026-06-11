@@ -1,6 +1,7 @@
 import { Router, Response, NextFunction, RequestHandler } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
+import { recomputeUserStats } from '../services/stats';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -11,25 +12,73 @@ function asyncHandler(fn: (req: AuthRequest, res: Response, next: NextFunction) 
   return (req, res, next) => fn(req as AuthRequest, res, next).catch(next);
 }
 
-// GET /user/stats — get current user's streak and completion stats
-router.get('/stats', asyncHandler(async (req, res) => {
-  let stats = await prisma.userStats.findUnique({
-    where: { userId: req.userId! },
+// GET /user/export — export current user's data as JSON
+router.get('/export', asyncHandler(async (req, res) => {
+  const user = await prisma.user.findUnique({
+    where: { id: req.userId! },
+    select: {
+      id: true,
+      email: true,
+      emailVerifiedAt: true,
+      displayName: true,
+      timezone: true,
+      locale: true,
+      createdAt: true,
+      updatedAt: true,
+      lastLoginAt: true,
+      deletedAt: true,
+    },
   });
-  if (!stats) {
-    stats = await prisma.userStats.create({
-      data: { userId: req.userId!, streak: 0, todayCount: 0 },
-    });
+  if (!user || user.deletedAt) {
+    res.status(404).json({ error: 'User not found' });
+    return;
   }
 
-  // Reset todayCount if the stored date is not today
-  const today = new Date().toISOString().split('T')[0];
-  if (stats.completedToday !== today) {
-    stats = await prisma.userStats.update({
+  const [tasks, stats] = await Promise.all([
+    prisma.task.findMany({
       where: { userId: req.userId! },
-      data: { completedToday: today, todayCount: 0 },
-    });
+      orderBy: { createdAt: 'asc' },
+    }),
+    prisma.userStats.findUnique({ where: { userId: req.userId! } }),
+  ]);
+
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="taskflow-export-${new Date().toISOString().slice(0, 10)}.json"`);
+  res.json({
+    exportedAt: new Date().toISOString(),
+    user,
+    stats,
+    tasks,
+  });
+}));
+
+// DELETE /user/account — delete current account and all related data
+router.delete('/account', asyncHandler(async (req, res) => {
+  const user = await prisma.user.findUnique({ where: { id: req.userId! } });
+  if (!user || user.deletedAt) {
+    res.status(404).json({ error: 'User not found' });
+    return;
   }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.refreshSession.updateMany({
+      where: { userId: req.userId!, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    await tx.user.delete({ where: { id: req.userId! } });
+  });
+
+  res.clearCookie('taskflow_refresh', {
+    httpOnly: true,
+    secure: process.env.COOKIE_SECURE === 'true',
+    sameSite: 'lax',
+  });
+  res.status(204).send();
+}));
+
+// GET /user/stats — get current user's streak and completion stats
+router.get('/stats', asyncHandler(async (req, res) => {
+  const stats = await recomputeUserStats(prisma, req.userId!);
 
   res.json({
     streak: stats.streak,
@@ -39,42 +88,9 @@ router.get('/stats', asyncHandler(async (req, res) => {
   });
 }));
 
-// PATCH /user/stats — update completion stats. Client computes streak, server stores it.
+// PATCH /user/stats — recompute completion stats from server-owned task completion records.
 router.patch('/stats', asyncHandler(async (req, res) => {
-  const { todayCount } = req.body as { todayCount?: number };
-  if (todayCount !== undefined && (!Number.isInteger(todayCount) || todayCount < 0 || todayCount > 1000)) {
-    res.status(400).json({ code: 'VALIDATION_ERROR', field: 'todayCount', error: 'todayCount must be a non-negative integer' });
-    return;
-  }
-
-  const today = new Date().toISOString().split('T')[0];
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  const yStr = yesterday.toISOString().split('T')[0];
-  let stats = await prisma.userStats.findUnique({ where: { userId: req.userId! } });
-
-  if (!stats) {
-    stats = await prisma.userStats.create({
-      data: { userId: req.userId!, streak: 0, todayCount: 0 },
-    });
-  }
-
-  const newCount = todayCount ?? (stats.todayCount + 1);
-  const hadCompletionToday = stats.completedToday === today && stats.todayCount > 0;
-  const newStreak = hadCompletionToday
-    ? stats.streak
-    : stats.streakDate === yStr
-      ? stats.streak + 1
-      : 1;
-  stats = await prisma.userStats.update({
-    where: { userId: req.userId! },
-    data: {
-      streak: newStreak,
-      streakDate: today,
-      completedToday: today,
-      todayCount: newCount,
-    },
-  });
+  const stats = await recomputeUserStats(prisma, req.userId!);
 
   res.json({
     streak: stats.streak,

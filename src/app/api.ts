@@ -228,6 +228,7 @@ export interface TaskDTO {
   dueDate: string | null;
   reminderAt: string | null;
   repeatRule: string | null;
+  completedAt: string | null;
   deletedAt: string | null;
   sortOrder: number;
   createdAt: string;
@@ -353,13 +354,30 @@ export async function apiGetUserStats(): Promise<UserStatsDTO> {
   return res.json() as Promise<UserStatsDTO>;
 }
 
-export async function apiUpdateUserStats(data: { todayCount: number; streak?: number }): Promise<UserStatsDTO> {
+export async function apiUpdateUserStats(): Promise<UserStatsDTO> {
   const res = await apiFetch('/user/stats', {
     method: 'PATCH',
-    body: JSON.stringify(data),
+    body: JSON.stringify({}),
   });
   if (!res.ok) {
     throw new Error('Failed to update user stats');
   }
   return res.json() as Promise<UserStatsDTO>;
+}
+
+export async function apiExportUserData(): Promise<Blob> {
+  const res = await apiFetch('/user/export');
+  if (!res.ok) {
+    throw new Error('Failed to export user data');
+  }
+  return res.blob();
+}
+
+export async function apiDeleteAccount(): Promise<void> {
+  const res = await apiFetch('/user/account', { method: 'DELETE' });
+  if (!res.ok && res.status !== 404) {
+    throw new Error('Failed to delete account');
+  }
+  setAccessToken(null);
+  setStoredRefreshToken(null);
 }

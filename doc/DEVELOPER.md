@@ -210,6 +210,8 @@ POST /auth/resend-verification → 重新发送邮箱验证码
 POST /auth/login          → 登录（未验证邮箱会重新发送验证码）
 POST /auth/refresh        → 刷新 accessToken（读 httpOnly cookie）
 POST /auth/logout         → 登出（清除 cookie）
+GET  /user/export         → 导出当前用户账号、统计和任务数据
+DELETE /user/account      → 删除当前账号和相关数据
 
 [以下需要 Bearer Token]
 GET    /tasks             → 获取当前用户未软删除任务（按 sortOrder）
@@ -307,7 +309,7 @@ npx prisma studio --schema=src/prisma/schema.prisma
 - 生产环境 `.env` 必须设置 `COOKIE_SECURE=true`
 - 生产环境 `.env` 必须设置 `RESEND_API_KEY` 和 `EMAIL_FROM`，否则新用户无法收到验证码
 - 已泄露的 Resend API Key 必须立刻在 Resend 后台撤销并重新生成
-- `/user/stats` 不接受客户端覆盖 streak；服务端根据今日首次完成更新连续天数
+- `/user/stats` 不接受客户端覆盖 streak/todayCount；服务端基于任务 `completedAt` 记录重算连续天数和今日完成数
 - JWT 密钥至少 32 字节随机字符串，生成方法：
   ```bash
   node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"

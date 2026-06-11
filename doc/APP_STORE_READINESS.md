@@ -56,6 +56,7 @@ Prepare screenshots for required iPhone sizes in both English and Chinese if bot
 - Backend task write APIs reject invalid enum/range/date values.
 - Normal task list responses do not include soft-deleted tasks.
 - Recently deleted tasks can be listed, restored, and permanently deleted.
+- Users can export their account/task data and delete their account in-app.
 - Streak cannot be arbitrarily overwritten by the client.
 - Production API is served over HTTPS at `https://taskflow.top/api`.
 - `COOKIE_SECURE=true` and production CORS only allow `https://taskflow.top`, `https://www.taskflow.top`, and `capacitor://localhost`.

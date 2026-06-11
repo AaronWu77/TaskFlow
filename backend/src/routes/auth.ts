@@ -282,6 +282,10 @@ router.post('/login', asyncHandler(async (req, res) => {
     res.status(401).json({ error: 'Invalid email or password' });
     return;
   }
+  if (user.deletedAt) {
+    res.status(401).json({ error: 'Invalid email or password' });
+    return;
+  }
   if (!user.emailVerifiedAt) {
     try {
       const verification = await startEmailVerification(user.email);
@@ -298,7 +302,8 @@ router.post('/login', asyncHandler(async (req, res) => {
     }
     return;
   }
-  await issueSession(user, res);
+  const loggedInUser = await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+  await issueSession(loggedInUser, res);
 }));
 
 // POST /auth/resend-verification
@@ -314,6 +319,10 @@ router.post('/resend-verification', asyncHandler(async (req, res) => {
   }
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) {
+    res.status(404).json({ code: 'USER_NOT_FOUND', error: 'Account not found' });
+    return;
+  }
+  if (user.deletedAt) {
     res.status(404).json({ code: 'USER_NOT_FOUND', error: 'Account not found' });
     return;
   }
@@ -347,6 +356,10 @@ router.post('/verify-email', asyncHandler(async (req, res) => {
     res.status(404).json({ code: 'USER_NOT_FOUND', error: 'Account not found' });
     return;
   }
+  if (user.deletedAt) {
+    res.status(404).json({ code: 'USER_NOT_FOUND', error: 'Account not found' });
+    return;
+  }
   if (!user.emailVerifiedAt && !consumeVerificationCode(email, code)) {
     res.status(400).json({ code: 'INVALID_VERIFICATION_CODE', error: 'Invalid or expired verification code' });
     return;
@@ -354,7 +367,8 @@ router.post('/verify-email', asyncHandler(async (req, res) => {
   const verifiedUser = user.emailVerifiedAt
     ? user
     : await prisma.user.update({ where: { id: user.id }, data: { emailVerifiedAt: new Date() } });
-  await issueSession(verifiedUser, res);
+  const loggedInUser = await prisma.user.update({ where: { id: verifiedUser.id }, data: { lastLoginAt: new Date() } });
+  await issueSession(loggedInUser, res);
 }));
 
 // POST /auth/refresh
@@ -370,7 +384,7 @@ router.post('/refresh', asyncHandler(async (req, res) => {
       where: { tokenHash: refreshTokenHash(token) },
       include: { user: true },
     });
-    if (!session || session.userId !== payload.userId || session.revokedAt || session.expiresAt <= new Date()) {
+    if (!session || session.userId !== payload.userId || session.revokedAt || session.expiresAt <= new Date() || session.user.deletedAt) {
       res.status(401).json({ error: 'Invalid or expired refresh token' });
       return;
     }

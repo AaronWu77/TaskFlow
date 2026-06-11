@@ -16,6 +16,11 @@ model User {
   email     String   @unique
   password  String
   emailVerifiedAt DateTime?
+  displayName String?
+  timezone String?
+  locale String?
+  deletedAt DateTime?
+  lastLoginAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   tasks     Task[]
@@ -35,6 +40,7 @@ model Task {
   dueDate         String?  // YYYY-MM-DD
   reminderAt      String?  // ISO datetime
   repeatRule      String?  // none | daily | weekly | monthly
+  completedAt     String?  // ISO datetime set by server when completed
   deletedAt       String?  // ISO datetime for soft delete / undo
   sortOrder       Int      @default(0)
   createdAt       DateTime @default(now())
@@ -43,6 +49,7 @@ model Task {
 
   @@index([userId, status])
   @@index([userId, dueDate])
+  @@index([userId, completedAt])
   @@index([userId, deletedAt])
   @@index([userId, sortOrder])
 }

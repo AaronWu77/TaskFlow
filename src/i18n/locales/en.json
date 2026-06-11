@@ -27,6 +27,8 @@
     "repeatTask": "Repeat Task",
     "edit": "Edit",
     "editTask": "Edit Task",
+    "manage": "Manage",
+    "manageTaskDesc": "Edit this task or move it to Recently Deleted.",
     "delete": "Delete",
     "deleted": "Task deleted",
     "undo": "Undo",
@@ -138,6 +140,12 @@
   "account": {
     "signOut": "Sign Out",
     "data": "Data",
+    "exportData": "Export Data",
+    "exportStarted": "Export started",
+    "exportFailed": "Could not export data",
+    "deleteAccount": "Delete Account",
+    "deleteAccountConfirm": "Permanently delete your TaskFlow account and all synced data? This cannot be undone.",
+    "deleteAccountFailed": "Could not delete account",
     "accentColor": "Accent Color",
     "accent": {
       "tcx111400": "11-1400 TCX",

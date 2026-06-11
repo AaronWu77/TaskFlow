@@ -27,6 +27,8 @@
     "repeatTask": "重复任务",
     "edit": "编辑",
     "editTask": "编辑任务",
+    "manage": "管理",
+    "manageTaskDesc": "编辑这个任务，或将它移到最近删除。",
     "delete": "删除",
     "deleted": "任务已删除",
     "undo": "撤销",
@@ -138,6 +140,12 @@
   "account": {
     "signOut": "退出登录",
     "data": "数据",
+    "exportData": "导出数据",
+    "exportStarted": "已开始导出",
+    "exportFailed": "导出数据失败",
+    "deleteAccount": "删除账号",
+    "deleteAccountConfirm": "确定永久删除你的 TaskFlow 账号和所有已同步数据吗？此操作无法撤销。",
+    "deleteAccountFailed": "删除账号失败",
     "accentColor": "主色调",
     "accent": {
       "tcx111400": "11-1400 TCX",

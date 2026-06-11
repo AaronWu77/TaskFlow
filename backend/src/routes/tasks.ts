@@ -1,6 +1,7 @@
 import { Router, Response, NextFunction, RequestHandler } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
+import { recomputeUserStats } from '../services/stats';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -207,10 +208,14 @@ router.post('/', asyncHandler(async (req, res) => {
       dueDate: data.dueDate as string | null | undefined,
       reminderAt: data.reminderAt as string | null | undefined,
       repeatRule: data.repeatRule as string | null | undefined,
+      completedAt: data.status === 'done' ? new Date().toISOString() : null,
       deletedAt: data.deletedAt as string | null | undefined,
       sortOrder: data.sortOrder as number,
     },
   });
+  if (task.completedAt) {
+    await recomputeUserStats(prisma, req.userId!);
+  }
   res.status(201).json(task);
 }));
 
@@ -248,10 +253,16 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   }
   const data = parseTaskPayload(req.body, res, true);
   if (!data) return;
+  if (data.status === 'done' && existing.status !== 'done' && !existing.completedAt) {
+    data.completedAt = new Date().toISOString();
+  }
   const updated = await prisma.task.update({
     where: { id },
     data,
   });
+  if (updated.completedAt && updated.completedAt !== existing.completedAt) {
+    await recomputeUserStats(prisma, req.userId!);
+  }
   res.json(updated);
 }));
 
@@ -283,6 +294,9 @@ router.delete('/:id/permanent', asyncHandler(async (req, res) => {
     return;
   }
   await prisma.task.delete({ where: { id } });
+  if (existing.completedAt) {
+    await recomputeUserStats(prisma, req.userId!);
+  }
   res.status(204).send();
 }));
 
