@@ -53,6 +53,10 @@ Prepare screenshots for required iPhone sizes in both English and Chinese if bot
 
 - `npm run check` passes from the repository root.
 - Backend migrations are deployed.
+- Backend task write APIs reject invalid enum/range/date values.
+- Normal task list responses do not include soft-deleted tasks.
+- Recently deleted tasks can be listed, restored, and permanently deleted.
+- Streak cannot be arbitrarily overwritten by the client.
 - Production API is served over HTTPS at `https://taskflow.top/api`.
 - `COOKIE_SECURE=true` and production CORS only allow `https://taskflow.top`, `https://www.taskflow.top`, and `capacitor://localhost`.
 - Resend domain verification is complete and `RESEND_API_KEY` / `EMAIL_FROM` are configured on the server.

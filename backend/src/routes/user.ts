@@ -41,9 +41,16 @@ router.get('/stats', asyncHandler(async (req, res) => {
 
 // PATCH /user/stats — update completion stats. Client computes streak, server stores it.
 router.patch('/stats', asyncHandler(async (req, res) => {
-  const { todayCount, streak: clientStreak } = req.body as { todayCount?: number; streak?: number };
+  const { todayCount } = req.body as { todayCount?: number };
+  if (todayCount !== undefined && (!Number.isInteger(todayCount) || todayCount < 0 || todayCount > 1000)) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', field: 'todayCount', error: 'todayCount must be a non-negative integer' });
+    return;
+  }
 
   const today = new Date().toISOString().split('T')[0];
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yStr = yesterday.toISOString().split('T')[0];
   let stats = await prisma.userStats.findUnique({ where: { userId: req.userId! } });
 
   if (!stats) {
@@ -52,16 +59,18 @@ router.patch('/stats', asyncHandler(async (req, res) => {
     });
   }
 
-  // If client sent a streak value, use it directly; otherwise keep current
-  const newStreak = clientStreak !== undefined ? clientStreak : stats.streak;
-  const streakDate = clientStreak !== undefined ? today : stats.streakDate;
-
   const newCount = todayCount ?? (stats.todayCount + 1);
+  const hadCompletionToday = stats.completedToday === today && stats.todayCount > 0;
+  const newStreak = hadCompletionToday
+    ? stats.streak
+    : stats.streakDate === yStr
+      ? stats.streak + 1
+      : 1;
   stats = await prisma.userStats.update({
     where: { userId: req.userId! },
     data: {
       streak: newStreak,
-      streakDate,
+      streakDate: today,
       completedToday: today,
       todayCount: newCount,
     },

@@ -243,6 +243,15 @@ export async function apiGetTasks(): Promise<TaskDTO[]> {
   return res.json() as Promise<TaskDTO[]>;
 }
 
+export async function apiGetDeletedTasks(): Promise<TaskDTO[]> {
+  const res = await apiFetch('/tasks/deleted');
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to fetch deleted tasks' })) as { error: string };
+    throw new Error(err.error || 'Failed to fetch deleted tasks');
+  }
+  return res.json() as Promise<TaskDTO[]>;
+}
+
 export async function apiCreateTask(task: {
   title: string;
   priority: string;
@@ -291,10 +300,29 @@ export async function apiUpdateTask(id: string, data: Partial<{
   return res.json() as Promise<TaskDTO>;
 }
 
-export async function apiDeleteTask(id: string): Promise<void> {
+export async function apiDeleteTask(id: string): Promise<TaskDTO | null> {
   const res = await apiFetch(`/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok && res.status !== 404) {
     throw new Error('Failed to delete task');
+  }
+  if (res.status === 404) return null;
+  return res.json() as Promise<TaskDTO>;
+}
+
+export async function apiRestoreTask(id: string): Promise<TaskDTO> {
+  const res = await apiFetch(`/tasks/${encodeURIComponent(id)}/restore`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to restore task' })) as { error: string };
+    throw new Error(err.error || 'Failed to restore task');
+  }
+  return res.json() as Promise<TaskDTO>;
+}
+
+export async function apiPermanentDeleteTask(id: string): Promise<void> {
+  const res = await apiFetch(`/tasks/${encodeURIComponent(id)}/permanent`, { method: 'DELETE' });
+  if (!res.ok && res.status !== 404) {
+    const err = await res.json().catch(() => ({ error: 'Failed to permanently delete task' })) as { error: string };
+    throw new Error(err.error || 'Failed to permanently delete task');
   }
 }
 

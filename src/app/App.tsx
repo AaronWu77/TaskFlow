@@ -11,7 +11,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
 import { storageGet, storageSet, storageRemove, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, type AuthUser } from './api';
+import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, apiGetDeletedTasks, apiRestoreTask, apiPermanentDeleteTask, type AuthUser, type TaskDTO } from './api';
 import { toast, Toaster } from 'sonner';
 import { cn } from './components/ui/utils';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
@@ -61,6 +61,28 @@ function legacySessionEmail(): string {
   return storageGet('taskflow_user_email') || '';
 }
 
+function migrateLegacyCacheForUser(userId: string): void {
+  const migrations: Array<{ legacyKey: string; scopedKey: string }> = [
+    { legacyKey: 'taskflow_tasks', scopedKey: userStorageKey(userId, 'tasks') },
+    { legacyKey: 'taskflow_streak', scopedKey: userStorageKey(userId, 'streak') },
+    { legacyKey: 'taskflow_completed_today', scopedKey: userStorageKey(userId, 'completed_today') },
+    { legacyKey: 'taskflow_sync_meta', scopedKey: userStorageKey(userId, 'sync_meta') },
+  ];
+  for (const { legacyKey, scopedKey } of migrations) {
+    const legacyValue = storageGet(legacyKey);
+    if (legacyValue !== null && storageGet(scopedKey) === null) {
+      storageSet(scopedKey, legacyValue);
+    }
+  }
+}
+
+function clearUserLocalCache(userId: string): void {
+  storageRemove(userStorageKey(userId, 'tasks'));
+  storageRemove(userStorageKey(userId, 'streak'));
+  storageRemove(userStorageKey(userId, 'completed_today'));
+  storageRemove(userStorageKey(userId, 'sync_meta'));
+}
+
 function loadSession(): SessionMeta | null {
   try {
     const raw = storageGet(SESSION_KEY);
@@ -91,6 +113,7 @@ function loadSession(): SessionMeta | null {
 }
 
 function saveSession(user: AuthUser): void {
+  migrateLegacyCacheForUser(user.id);
   storageSet(SESSION_KEY, JSON.stringify({
     userId: user.id,
     email: user.email,
@@ -1232,12 +1255,14 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 
 // --- Account Page ---
 
-function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogout }: {
+function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogout, onOpenDeletedTasks, deletedCount }: {
   email: string;
   accentTheme: AccentTheme;
   onAccentThemeChange: (theme: AccentTheme) => void;
   onClose: () => void;
   onLogout: () => void;
+  onOpenDeletedTasks: () => void;
+  deletedCount: number;
 }) {
   const { t, i18n } = useTranslation();
   const displayName = email.split('@')[0];
@@ -1317,6 +1342,18 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
               </button>
             </div>
           </div>
+
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.data')}</p>
+            <button
+              type="button"
+              onClick={onOpenDeletedTasks}
+              className="flex w-full items-center justify-between rounded-xl border border-border bg-card px-4 py-3 text-left text-sm font-semibold text-foreground transition-colors hover:bg-muted/50"
+            >
+              <span>{t('task.recentlyDeleted')}</span>
+              <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{deletedCount}</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1330,6 +1367,86 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
         </button>
       </div>
     </motion.div>
+  );
+}
+
+function DeletedTasksDialog({ open, tasks, loading, onClose, onRestore, onPermanentDelete }: {
+  open: boolean;
+  tasks: Task[];
+  loading: boolean;
+  onClose: () => void;
+  onRestore: (task: Task) => void;
+  onPermanentDelete: (task: Task) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 bg-black/30 backdrop-blur-md z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Content className="fixed left-[50%] top-[50%] z-50 flex max-h-[78vh] w-[calc(100%-2rem)] max-w-md translate-x-[-50%] translate-y-[-50%] flex-col rounded-3xl border border-border bg-card p-5 shadow-2xl focus:outline-none">
+          <div className="mb-4 flex items-start justify-between gap-4">
+            <div>
+              <Dialog.Title className="text-lg font-bold">{t('task.recentlyDeleted')}</Dialog.Title>
+              <Dialog.Description className="mt-1 text-sm text-muted-foreground">
+                {t('task.recentlyDeletedDesc')}
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button aria-label="Close recently deleted" className="rounded-full bg-muted p-2 text-muted-foreground hover:text-foreground">
+                <X className="h-4 w-4" />
+              </button>
+            </Dialog.Close>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {loading ? (
+              <div className="flex items-center justify-center py-12">
+                <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+              </div>
+            ) : tasks.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-border p-8 text-center">
+                <p className="text-sm font-semibold text-foreground">{t('task.noDeletedTasks')}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{t('task.noDeletedTasksDesc')}</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {tasks.map(task => (
+                  <div key={task.id} className="rounded-2xl border border-border bg-background/50 p-3">
+                    <div className="flex items-start gap-3">
+                      <span className={`mt-1.5 h-2.5 w-2.5 rounded-full ${DOT_COLOR[task.priority]}`} />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-semibold text-foreground">{task.title}</p>
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                          <span>{task.estimateMinutes}m</span>
+                          <span>{task.priority}</span>
+                          {task.deletedAt && <span>{new Date(task.deletedAt).toLocaleDateString()}</span>}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onRestore(task)}
+                        className="rounded-xl bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground active:scale-95"
+                      >
+                        {t('task.restore')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onPermanentDelete(task)}
+                        className="rounded-xl bg-destructive/10 px-3 py-2 text-sm font-semibold text-destructive active:scale-95"
+                      >
+                        {t('task.deleteForever')}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -1373,6 +1490,26 @@ function AppShell({
   const [showTaskOptions, setShowTaskOptions] = useState(false);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'offline' | 'error'>('idle');
   const [form, setForm] = useState<AddTaskState>(DEFAULT_FORM);
+  const [deletedTasksOpen, setDeletedTasksOpen] = useState(false);
+  const [deletedTasks, setDeletedTasks] = useState<Task[]>([]);
+  const [deletedTasksLoading, setDeletedTasksLoading] = useState(false);
+
+  const toTask = React.useCallback((t: TaskDTO): Task => ({
+    id: t.id,
+    title: t.title,
+    priority: t.priority as Priority,
+    estimateMinutes: t.estimateMinutes,
+    status: t.status as TaskStatus,
+    tag: t.tag ?? undefined,
+    progress: t.progress,
+    dueDate: t.dueDate,
+    reminderAt: t.reminderAt,
+    repeatRule: (t.repeatRule as Task['repeatRule']) ?? 'none',
+    deletedAt: t.deletedAt,
+    sortOrder: t.sortOrder,
+    _dirty: false,
+    _syncState: undefined,
+  }), []);
 
   const setTasksAndCache = React.useCallback((updater: React.SetStateAction<Task[]>) => {
     setTasks(prev => {
@@ -1410,13 +1547,7 @@ function AppShell({
           const cached = loadTasks(user.id);
           const dirtyById = new Map(cached.filter(t => t._dirty).map(t => [t.id, t]));
           const remoteTasks: Task[] = remote.map(t => {
-            const normalized: Task = {
-              id: t.id, title: t.title, priority: t.priority as Priority,
-              estimateMinutes: t.estimateMinutes, status: t.status as TaskStatus,
-              tag: t.tag ?? undefined, progress: t.progress, dueDate: t.dueDate,
-              reminderAt: t.reminderAt, repeatRule: (t.repeatRule as Task['repeatRule']) ?? 'none',
-              deletedAt: t.deletedAt, sortOrder: t.sortOrder, _dirty: false,
-            };
+            const normalized = toTask(t);
             return dirtyById.get(t.id) ?? normalized;
           });
 
@@ -1468,7 +1599,7 @@ function AppShell({
     init();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cloudSyncEnabled, setTasksAndCache, user.id]);
+  }, [cloudSyncEnabled, setTasksAndCache, toTask, user.id]);
 
   // On native cold-start, restore data from Capacitor Preferences if localStorage was cleared
   useEffect(() => {
@@ -1797,6 +1928,65 @@ function AppShell({
     setIsAddingTask(true);
   };
 
+  const refreshDeletedTasks = React.useCallback(async () => {
+    setDeletedTasksLoading(true);
+    try {
+      if (cloudSyncEnabled) {
+        const remote = await apiGetDeletedTasks();
+        setDeletedTasks(remote.map(toTask));
+      } else {
+        setDeletedTasks(loadTasks(user.id).filter(task => !!task.deletedAt));
+      }
+    } catch {
+      setDeletedTasks(loadTasks(user.id).filter(task => !!task.deletedAt));
+      toast.error(t('task.deletedLoadFailed'));
+    } finally {
+      setDeletedTasksLoading(false);
+    }
+  }, [cloudSyncEnabled, t, toTask, user.id]);
+
+  const openDeletedTasks = React.useCallback(() => {
+    setDeletedTasksOpen(true);
+    refreshDeletedTasks();
+  }, [refreshDeletedTasks]);
+
+  const handleRestoreDeletedTask = React.useCallback((task: Task) => {
+    setDeletedTasks(prev => prev.filter(t => t.id !== task.id));
+    setTasksAndCache(prev => {
+      const restored = { ...task, deletedAt: null, _dirty: !cloudSyncEnabled || task.id.startsWith('local-'), _syncState: 'update' as const };
+      const exists = prev.some(t => t.id === task.id);
+      return exists
+        ? prev.map(t => t.id === task.id ? { ...t, deletedAt: null, _dirty: restored._dirty, _syncState: restored._syncState } : t)
+        : [...prev, restored];
+    });
+    if (!cloudSyncEnabled || task.id.startsWith('local-')) {
+      persistTaskUpdate(task.id, { deletedAt: null });
+      return;
+    }
+    apiRestoreTask(task.id)
+      .then(restored => setTasksAndCache(prev => {
+        const nextTask = toTask(restored);
+        const exists = prev.some(t => t.id === nextTask.id);
+        return exists ? prev.map(t => t.id === nextTask.id ? nextTask : t) : [...prev, nextTask];
+      }))
+      .catch(() => {
+        toast.error(t('task.restoreFailed'));
+        refreshDeletedTasks();
+      });
+  }, [cloudSyncEnabled, refreshDeletedTasks, setTasksAndCache, t, toTask]);
+
+  const handlePermanentDeleteTask = React.useCallback((task: Task) => {
+    const confirmed = window.confirm(t('task.deleteForeverConfirm'));
+    if (!confirmed) return;
+    setDeletedTasks(prev => prev.filter(t => t.id !== task.id));
+    setTasksAndCache(prev => prev.filter(t => t.id !== task.id));
+    if (!cloudSyncEnabled || task.id.startsWith('local-')) return;
+    apiPermanentDeleteTask(task.id).catch(() => {
+      toast.error(t('task.deleteForeverFailed'));
+      refreshDeletedTasks();
+    });
+  }, [cloudSyncEnabled, refreshDeletedTasks, setTasksAndCache, t]);
+
   const handleDeleteTask = (task: Task) => {
     const deletedAt = new Date().toISOString();
     setTasksAndCache(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt } : t), task.id));
@@ -1879,15 +2069,29 @@ function AppShell({
         actionDisabled={flowDetailTask ? actingTaskIds.has(flowDetailTask.id) : false}
       />
 
+      <DeletedTasksDialog
+        open={deletedTasksOpen}
+        tasks={deletedTasks}
+        loading={deletedTasksLoading}
+        onClose={() => setDeletedTasksOpen(false)}
+        onRestore={handleRestoreDeletedTask}
+        onPermanentDelete={handlePermanentDeleteTask}
+      />
+
       {/* Account Page */}
       <AnimatePresence>
         {accountOpen && (
-            <AccountPage
+          <AccountPage
             email={user.email}
             accentTheme={accentTheme}
             onAccentThemeChange={onAccentThemeChange}
             onClose={() => setAccountOpen(false)}
             onLogout={onLogout}
+            onOpenDeletedTasks={() => {
+              setAccountOpen(false);
+              openDeletedTasks();
+            }}
+            deletedCount={tasks.filter(task => !!task.deletedAt).length || deletedTasks.length}
           />
         )}
       </AnimatePresence>
@@ -2440,6 +2644,7 @@ export default function App() {
     } catch { /* non-critical */ }
 
     try { await apiLogout(); } catch { /* still clean up locally */ }
+    if (currentUser?.id) clearUserLocalCache(currentUser.id);
     clearSession();
     clearLocalAuthTokens();
     setCloudSyncEnabled(false);

@@ -212,10 +212,13 @@ POST /auth/refresh        → 刷新 accessToken（读 httpOnly cookie）
 POST /auth/logout         → 登出（清除 cookie）
 
 [以下需要 Bearer Token]
-GET    /tasks             → 获取当前用户所有任务（按 sortOrder）
+GET    /tasks             → 获取当前用户未软删除任务（按 sortOrder）
+GET    /tasks/deleted     → 获取当前用户最近删除任务
 POST   /tasks             → 创建任务
 PATCH  /tasks/:id         → 更新任务字段
-DELETE /tasks/:id         → 删除任务
+POST   /tasks/:id/restore → 恢复软删除任务
+DELETE /tasks/:id         → 软删除任务
+DELETE /tasks/:id/permanent → 永久删除软删除任务
 PUT    /tasks/reorder     → 批量更新 sortOrder（拖拽排序）
 ```
 
@@ -224,6 +227,23 @@ PUT    /tasks/reorder     → 批量更新 sortOrder（拖拽排序）
 `backend/src/middleware/auth.ts` 从 `Authorization: Bearer <token>` 头提取并验证 accessToken，将 `userId` 注入 `req.userId`。
 
 所有任务操作均检查 `task.userId === req.userId`，防止越权访问。
+
+### 4.4 任务字段校验
+
+任务写接口在后端统一校验字段，非法客户端不能写入任意字符串：
+
+```
+priority: P1 | P2 | P3
+status: todo | doing | done | snoozed | skipped
+progress: 0-100 integer
+estimateMinutes: 1-1440 integer
+sortOrder: 0-1000000 integer
+dueDate: YYYY-MM-DD
+reminderAt/deletedAt: valid ISO datetime
+repeatRule: none | daily | weekly | monthly
+```
+
+普通 `GET /tasks` 默认排除 `deletedAt != null` 的软删除任务。
 
 ### 4.3 Prisma Client 位置
 
@@ -287,6 +307,7 @@ npx prisma studio --schema=src/prisma/schema.prisma
 - 生产环境 `.env` 必须设置 `COOKIE_SECURE=true`
 - 生产环境 `.env` 必须设置 `RESEND_API_KEY` 和 `EMAIL_FROM`，否则新用户无法收到验证码
 - 已泄露的 Resend API Key 必须立刻在 Resend 后台撤销并重新生成
+- `/user/stats` 不接受客户端覆盖 streak；服务端根据今日首次完成更新连续天数
 - JWT 密钥至少 32 字节随机字符串，生成方法：
   ```bash
   node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
