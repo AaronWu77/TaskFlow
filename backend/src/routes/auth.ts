@@ -96,6 +96,37 @@ async function issueSession(user: { id: string; email: string; emailVerifiedAt: 
 }
 
 async function sendVerificationCode(email: string, code: string): Promise<void> {
+  const resendApiKey = process.env.RESEND_API_KEY;
+  const emailFrom = process.env.EMAIL_FROM || 'TaskFlow <verify@taskflow.top>';
+  if (resendApiKey) {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${resendApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: emailFrom,
+        to: [email],
+        subject: 'Your TaskFlow verification code',
+        html: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.5; color: #111827;">
+            <h1 style="font-size: 20px; margin: 0 0 12px;">Verify your TaskFlow account</h1>
+            <p style="margin: 0 0 16px;">Enter this code in TaskFlow to finish signing in:</p>
+            <p style="font-size: 28px; font-weight: 700; letter-spacing: 0.2em; margin: 0 0 16px;">${code}</p>
+            <p style="margin: 0; color: #6b7280;">This code expires in 10 minutes. If you did not request it, you can ignore this email.</p>
+          </div>
+        `,
+        text: `Your TaskFlow verification code is ${code}. It expires in 10 minutes.`,
+      }),
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`Resend email delivery failed: ${detail}`);
+    }
+    return;
+  }
+
   const webhookUrl = process.env.EMAIL_VERIFICATION_WEBHOOK_URL;
   if (webhookUrl) {
     const response = await fetch(webhookUrl, {
@@ -120,7 +151,6 @@ async function sendVerificationCode(email: string, code: string): Promise<void> 
   if (!allowConsoleDelivery) {
     throw new Error('Email delivery is not configured');
   }
-  // Replace this with a real provider (Resend/SES/SendGrid) before production signup is opened.
   console.log(`TaskFlow email verification code for ${email}: ${code}`);
 }
 
