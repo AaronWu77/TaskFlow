@@ -255,12 +255,14 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   if (!data) return;
   if (data.status === 'done' && existing.status !== 'done' && !existing.completedAt) {
     data.completedAt = new Date().toISOString();
+  } else if (data.status !== undefined && data.status !== 'done' && existing.completedAt) {
+    data.completedAt = null;
   }
   const updated = await prisma.task.update({
     where: { id },
     data,
   });
-  if (updated.completedAt && updated.completedAt !== existing.completedAt) {
+  if (updated.completedAt !== existing.completedAt) {
     await recomputeUserStats(prisma, req.userId!);
   }
   res.json(updated);
