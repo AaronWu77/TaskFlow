@@ -233,7 +233,11 @@
     ]
   },
   "notifications": {
-    "reminderBody": "该专注这项任务了。",
+    "title": "进入专注流：{{priority}}",
+    "body": "{{task}} · {{estimate}} · {{due}}。现在开始。",
+    "dueToday": "今天截止",
+    "dueTomorrow": "明天截止",
+    "noDeadline": "无截止日期",
     "permissionDenied": "通知权限未开启。",
     "permission": {
       "unsupported": "不可用",

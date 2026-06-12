@@ -233,7 +233,11 @@
     ]
   },
   "notifications": {
-    "reminderBody": "Time to focus on this task.",
+    "title": "Now in flow: {{priority}}",
+    "body": "{{task}} · {{estimate}} · {{due}}. Start clean.",
+    "dueToday": "due today",
+    "dueTomorrow": "due tomorrow",
+    "noDeadline": "no deadline",
     "permissionDenied": "Notification permission is not enabled.",
     "permission": {
       "unsupported": "Not available",

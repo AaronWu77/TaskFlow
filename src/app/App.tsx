@@ -211,6 +211,37 @@ function canNotifyTask(task: Task): boolean {
   return new Date(task.reminderAt).getTime() > Date.now();
 }
 
+function truncateNotificationText(value: string, maxLength: number): string {
+  const trimmed = value.trim();
+  return trimmed.length > maxLength ? `${trimmed.slice(0, maxLength - 3)}...` : trimmed;
+}
+
+function notificationDueLabel(task: Task, t: (key: string, options?: Record<string, unknown>) => string, locale: string): string {
+  if (!task.dueDate) return t('notifications.noDeadline');
+  const today = new Date();
+  const due = new Date(`${task.dueDate}T00:00:00`);
+  const todayKey = today.toISOString().slice(0, 10);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowKey = tomorrow.toISOString().slice(0, 10);
+  if (task.dueDate === todayKey) return t('notifications.dueToday');
+  if (task.dueDate === tomorrowKey) return t('notifications.dueTomorrow');
+  return due.toLocaleDateString(locale === 'zh' ? 'zh-CN' : 'en-US', { month: 'short', day: 'numeric' });
+}
+
+function notificationCopy(task: Task, t: (key: string, options?: Record<string, unknown>) => string, locale: string) {
+  const priority = t(PRIORITY_LABEL_KEY[task.priority]);
+  const title = truncateNotificationText(task.title, 42);
+  return {
+    title: t('notifications.title', { priority }),
+    body: t('notifications.body', {
+      task: title,
+      estimate: estimateLabel(task.estimateMinutes),
+      due: notificationDueLabel(task, t, locale),
+    }),
+  };
+}
+
 async function getNotificationPermission(request: boolean): Promise<NotificationPermissionState> {
   if (!Capacitor.isNativePlatform()) return 'unsupported';
   try {
@@ -657,7 +688,7 @@ function TaskDetailModal({ task, onClose, onAction, onProgressChange, actionDisa
   actionDisabled?: boolean;
   onManage?: (task: Task) => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   return (
     <Dialog.Root open={!!task} onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
@@ -1813,18 +1844,22 @@ function AppShell({
         return;
       }
       await LocalNotifications.schedule({
-        notifications: candidates.map(task => ({
-          id: notificationIdForTask(task.id),
-          title: task.title,
-          body: t('notifications.reminderBody'),
-          schedule: { at: new Date(task.reminderAt!) },
-        })),
+        notifications: candidates.map(task => {
+          const copy = notificationCopy(task, t, i18n.language);
+          return {
+            id: notificationIdForTask(task.id),
+            title: copy.title,
+            body: copy.body,
+            schedule: { at: new Date(task.reminderAt!) },
+            extra: { taskId: task.id },
+          };
+        }),
       }).catch(() => undefined);
       if (!cancelled) scheduledNotificationIdsRef.current = nextIds;
     }
     syncReminderNotifications();
     return () => { cancelled = true; };
-  }, [notificationPermission, tasks, t]);
+  }, [i18n.language, notificationPermission, tasks, t]);
 
   const buildTaskSyncPatch = React.useCallback((id: string, data: Partial<Task>, operationId?: string) => {
     const current = tasksRef.current.find(task => task.id === id);

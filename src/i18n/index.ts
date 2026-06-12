@@ -7,8 +7,8 @@ const savedLang = typeof localStorage !== 'undefined' ? localStorage.getItem('ta
 
 i18n.use(initReactI18next).init({
   resources: { en: { translation: en }, zh: { translation: zh } },
-  lng: savedLang || 'en',
-  fallbackLng: 'en',
+  lng: savedLang || 'zh',
+  fallbackLng: 'zh',
   interpolation: { escapeValue: false },
 });
 
