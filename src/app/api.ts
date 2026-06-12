@@ -239,7 +239,7 @@ export interface TaskDTO {
   userId: string;
   title: string;
   priority: string;
-  estimateMinutes: number;
+  estimateMinutes: number | null;
   status: string;
   tag: string | null;
   progress: number;
@@ -274,7 +274,7 @@ export async function apiGetDeletedTasks(): Promise<TaskDTO[]> {
 export async function apiCreateTask(task: {
   title: string;
   priority: string;
-  estimateMinutes: number;
+  estimateMinutes?: number | null;
   status?: string;
   tag?: string;
   progress?: number;
@@ -299,7 +299,7 @@ export async function apiCreateTask(task: {
 export async function apiUpdateTask(id: string, data: Partial<{
   title: string;
   priority: string;
-  estimateMinutes: number;
+  estimateMinutes: number | null;
   status: string;
   tag: string;
   progress: number;
@@ -388,14 +388,6 @@ export async function apiUpdateUserStats(): Promise<UserStatsDTO> {
     throw new Error('Failed to update user stats');
   }
   return res.json() as Promise<UserStatsDTO>;
-}
-
-export async function apiExportUserData(): Promise<Blob> {
-  const res = await apiFetch('/user/export');
-  if (!res.ok) {
-    throw new Error('Failed to export user data');
-  }
-  return res.blob();
 }
 
 export async function apiDeleteAccount(): Promise<void> {

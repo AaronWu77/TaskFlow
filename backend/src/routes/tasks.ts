@@ -166,10 +166,16 @@ function parseTaskPayload(input: unknown, res: Response, partial: boolean) {
     data.priority = input.priority;
   }
 
-  if (!partial || input.estimateMinutes !== undefined) {
-    const estimateMinutes = parseInteger(input.estimateMinutes, 'estimateMinutes', res, 1, 1440);
-    if (estimateMinutes === undefined) return null;
-    data.estimateMinutes = estimateMinutes;
+  if (input.estimateMinutes !== undefined) {
+    if (input.estimateMinutes === null || input.estimateMinutes === '') {
+      data.estimateMinutes = null;
+    } else {
+      const estimateMinutes = parseInteger(input.estimateMinutes, 'estimateMinutes', res, 1, 1440);
+      if (estimateMinutes === undefined) return null;
+      data.estimateMinutes = estimateMinutes;
+    }
+  } else if (!partial) {
+    data.estimateMinutes = null;
   }
 
   if (input.status !== undefined) {
@@ -206,11 +212,18 @@ function parseTaskPayload(input: unknown, res: Response, partial: boolean) {
 
   const dueDate = normalizeNullableString(input.dueDate, 'dueDate', res, 10);
   if (input.dueDate !== undefined) {
-    if (dueDate !== null && dueDate !== undefined && !isValidDateOnly(dueDate)) {
+    if (dueDate === null || dueDate === undefined) {
+      validationError(res, 'dueDate', 'dueDate is required');
+      return null;
+    }
+    if (!isValidDateOnly(dueDate)) {
       validationError(res, 'dueDate', 'dueDate must be YYYY-MM-DD');
       return null;
     }
-    data.dueDate = dueDate ?? null;
+    data.dueDate = dueDate;
+  } else if (!partial) {
+    validationError(res, 'dueDate', 'dueDate is required');
+    return null;
   }
 
   const reminderAt = normalizeNullableString(input.reminderAt, 'reminderAt', res, 64);
@@ -279,7 +292,7 @@ router.post('/', asyncHandler(async (req, res) => {
           userId: req.userId!,
           title: data.title as string,
           priority: data.priority as string,
-          estimateMinutes: data.estimateMinutes as number,
+          estimateMinutes: data.estimateMinutes as number | null,
           status: data.status as string,
           tag: data.tag as string | null | undefined,
           progress: data.progress as number,

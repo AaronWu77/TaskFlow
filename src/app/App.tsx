@@ -11,10 +11,12 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
 import { storageGet, storageSet, storageRemove, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, apiGetDeletedTasks, apiRestoreTask, apiPermanentDeleteTask, apiExportUserData, apiDeleteAccount, isTaskConflictError, type AuthUser, type TaskDTO } from './api';
+import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, apiGetDeletedTasks, apiRestoreTask, apiPermanentDeleteTask, apiDeleteAccount, isTaskConflictError, type AuthUser, type TaskDTO } from './api';
 import { toast, Toaster } from 'sonner';
 import { cn } from './components/ui/utils';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
+import { Capacitor } from '@capacitor/core';
+import { LocalNotifications } from '@capacitor/local-notifications';
 
 // --- Types ---
 type Priority = 'P1' | 'P2' | 'P3';
@@ -22,12 +24,13 @@ type TaskStatus = 'todo' | 'doing' | 'done' | 'snoozed' | 'skipped';
 type ViewMode = 'flow' | 'calendar';
 type ExitAction = 'complete' | 'skip' | 'snooze';
 type TaskActionState = { taskId: string; action: ExitAction };
+type NotificationPermissionState = 'unsupported' | 'prompt' | 'granted' | 'denied';
 
 interface Task {
   id: string;
   title: string;
   priority: Priority;
-  estimateMinutes: number;
+  estimateMinutes: number | null;
   status: TaskStatus;
   tag?: string;
   progress: number;
@@ -189,6 +192,38 @@ function taskPatch(t: Task) {
     deletedAt: t.deletedAt,
     sortOrder: t.sortOrder,
   };
+}
+
+function estimateLabel(minutes: number | null | undefined): string {
+  return Number.isInteger(minutes) && (minutes as number) > 0 ? `${minutes}m` : '--m';
+}
+
+function notificationIdForTask(taskId: string): number {
+  let hash = 0;
+  for (let i = 0; i < taskId.length; i += 1) {
+    hash = ((hash << 5) - hash + taskId.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash % 1_000_000_000) + 10_000;
+}
+
+function canNotifyTask(task: Task): boolean {
+  if (!task.reminderAt || task.deletedAt || task.status === 'done' || task.status === 'skipped') return false;
+  return new Date(task.reminderAt).getTime() > Date.now();
+}
+
+async function getNotificationPermission(request: boolean): Promise<NotificationPermissionState> {
+  if (!Capacitor.isNativePlatform()) return 'unsupported';
+  try {
+    const current = await LocalNotifications.checkPermissions();
+    if (current.display === 'granted') return 'granted';
+    if (request && (current.display === 'prompt' || current.display === 'prompt-with-rationale')) {
+      const requested = await LocalNotifications.requestPermissions();
+      return requested.display === 'granted' ? 'granted' : 'denied';
+    }
+    return current.display === 'denied' ? 'denied' : 'prompt';
+  } catch {
+    return 'unsupported';
+  }
 }
 
 function taskSyncPayload(t: Task) {
@@ -479,7 +514,8 @@ interface AddTaskState {
   repeatRule: 'none' | 'daily' | 'weekly' | 'monthly';
   tag: string;
 }
-const DEFAULT_FORM: AddTaskState = { title: '', minutes: '25', priority: 'P2', dueDate: '', reminderAt: '', repeatRule: 'none', tag: PRESET_TAGS[0] };
+type AddTaskErrors = Partial<Record<'title' | 'dueDate' | 'minutes' | 'reminderAt', string>>;
+const DEFAULT_FORM: AddTaskState = { title: '', minutes: '', priority: 'P2', dueDate: '', reminderAt: '', repeatRule: 'none', tag: PRESET_TAGS[0] };
 
 // Returns index at which newTask should be inserted among existing tasks.
 // Only compares against 'todo' tasks; preserves manual ordering otherwise.
@@ -585,7 +621,7 @@ function TaskCard({ task, onAction, onProgressChange, pendingAction = null, acti
         <div className="mt-auto flex flex-col gap-4">
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center text-muted-foreground text-sm gap-1.5 bg-muted/50 backdrop-blur-sm px-3 py-1.5 rounded-lg">
-              <Clock className="w-4 h-4" /><span>{task.estimateMinutes}m</span>
+              <Clock className="w-4 h-4" /><span>{estimateLabel(task.estimateMinutes)}</span>
             </div>
             {task.dueDate && (
               <div className="flex items-center text-muted-foreground text-sm gap-1.5 bg-muted/50 backdrop-blur-sm px-3 py-1.5 rounded-lg">
@@ -722,7 +758,7 @@ function RepeatTaskModal({ task, onClose, onRepeat }: {
                 <div className="flex flex-wrap gap-2 ml-6">
                   <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${PRIORITY_BADGE[task.priority]}`}>{t(PRIORITY_LABEL_KEY[task.priority])}</span>
                   {task.tag && <span className="text-xs text-muted-foreground flex items-center gap-1"><Tag className="w-3 h-3" />{task.tag}</span>}
-                  <span className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" />{task.estimateMinutes}m</span>
+                  <span className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" />{estimateLabel(task.estimateMinutes)}</span>
                 </div>
               </div>
               <div className="flex gap-3">
@@ -811,7 +847,7 @@ function ReorderRow({
               )}
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <span className="rounded-md bg-muted px-2 py-1">{task.estimateMinutes}m</span>
+              <span className="rounded-md bg-muted px-2 py-1">{estimateLabel(task.estimateMinutes)}</span>
               <span className={`rounded-md px-2 py-1 font-semibold ${PRIORITY_BADGE[task.priority]}`}>
                 {task.priority}
               </span>
@@ -1276,7 +1312,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
                             <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                               <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${PRIORITY_BADGE[task.priority]}`}>{t(PRIORITY_LABEL_KEY[task.priority])}</span>
                               {task.tag && <span className="text-xs text-muted-foreground flex items-center gap-1"><Tag className="w-3 h-3" />{task.tag}</span>}
-                              <span className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" />{task.estimateMinutes}m</span>
+                              <span className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" />{estimateLabel(task.estimateMinutes)}</span>
                             </div>
                             {task.progress > 0 && (
                               <div className="mt-2 flex items-center gap-2">
@@ -1302,7 +1338,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
                             <p className="text-sm font-medium text-muted-foreground leading-snug line-through">{task.title}</p>
                             <div className="flex items-center gap-2 mt-1 flex-wrap">
                               {task.tag && <span className="text-xs text-muted-foreground flex items-center gap-1"><Tag className="w-3 h-3" />{task.tag}</span>}
-                              <span className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" />{task.estimateMinutes}m</span>
+                              <span className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" />{estimateLabel(task.estimateMinutes)}</span>
                             </div>
                           </div>
                           <span className="text-xs text-primary font-semibold flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5">
@@ -1324,7 +1360,7 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
                             <p className="text-sm font-medium text-muted-foreground leading-snug">{task.title}</p>
                             <div className="flex items-center gap-2 mt-1 flex-wrap">
                               {task.tag && <span className="text-xs text-muted-foreground flex items-center gap-1"><Tag className="w-3 h-3" />{task.tag}</span>}
-                              <span className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" />{task.estimateMinutes}m</span>
+                              <span className="text-xs text-muted-foreground flex items-center gap-1"><Clock className="w-3 h-3" />{estimateLabel(task.estimateMinutes)}</span>
                             </div>
                           </div>
                           <span className="text-xs text-primary font-semibold flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5">
@@ -1346,16 +1382,20 @@ function CalendarView({ tasks, onAction, onProgressChange, onAddTask, onRepeatTa
 
 // --- Account Page ---
 
-function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogout, onOpenDeletedTasks, deletedCount, onExportData, onDeleteAccount, syncStatus, lastSync, pendingSyncCount }: {
+function AccountPage({ email, emailVerified, notificationPermission, accentTheme, onAccentThemeChange, onClose, onLogout, onOpenDeletedTasks, deletedCount, onDeleteAccount, onRetrySync, onOpenPrivacy, onRequestNotifications, syncStatus, lastSync, pendingSyncCount }: {
   email: string;
+  emailVerified: boolean;
+  notificationPermission: NotificationPermissionState;
   accentTheme: AccentTheme;
   onAccentThemeChange: (theme: AccentTheme) => void;
   onClose: () => void;
   onLogout: () => void;
   onOpenDeletedTasks: () => void;
   deletedCount: number;
-  onExportData: () => void;
   onDeleteAccount: () => void;
+  onRetrySync: () => void;
+  onOpenPrivacy: () => void;
+  onRequestNotifications: () => void;
   syncStatus: 'idle' | 'syncing' | 'offline' | 'pending' | 'conflict' | 'error';
   lastSync: string;
   pendingSyncCount: number;
@@ -1383,7 +1423,8 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
       </button>
 
       {/* Content */}
-      <div className="flex-1 flex flex-col items-center justify-center px-6 w-full max-w-md">
+      <div className="flex-1 w-full overflow-y-auto px-6 pt-safe pb-6">
+      <div className="mx-auto flex w-full max-w-md flex-col items-center pt-16">
         {/* Avatar */}
         <div className="w-24 h-24 rounded-full bg-muted flex items-center justify-center mb-6">
           <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='1.5'%3E%3Cpath d='M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='12' cy='7' r='4'/%3E%3C/svg%3E"
@@ -1392,13 +1433,17 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
 
         {/* Username */}
         <h2 className="text-xl font-bold text-foreground mb-1">{displayName}</h2>
-        <p className="text-sm text-muted-foreground mb-8">{email}</p>
+        <p className="text-sm text-muted-foreground">{email}</p>
+        <span className={cn('mt-2 rounded-full px-2.5 py-1 text-xs font-semibold', emailVerified ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600')}>
+          {emailVerified ? t('account.emailVerified') : t('account.emailUnverified')}
+        </span>
 
         {/* Settings */}
-        <div className="w-full space-y-5 mb-6">
+        <div className="mt-8 w-full space-y-5">
           {/* Accent color */}
           <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.accentColor')}</p>
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.preferences')}</p>
+            <p className="text-sm font-semibold text-foreground">{t('account.accentColor')}</p>
             <div className="grid grid-cols-5 gap-2">
               {(Object.keys(ACCENT_THEME_PRESETS) as AccentTheme[]).map((theme) => (
                 <button
@@ -1419,7 +1464,7 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
 
           {/* Language */}
           <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.language')}</p>
+            <p className="text-sm font-semibold text-foreground">{t('account.language')}</p>
             <div className="flex bg-muted rounded-xl p-1">
               <button
                 onClick={() => { i18n.changeLanguage('zh'); try { localStorage.setItem('taskflow_lang', 'zh'); } catch { /**/ } }}
@@ -1457,6 +1502,14 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
                 <span>{t('account.lastSync')}</span>
                 <span className="text-right">{lastSyncLabel}</span>
               </div>
+              <button
+                type="button"
+                onClick={onRetrySync}
+                className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-muted px-3 py-2 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <RotateCw className={cn('h-3.5 w-3.5', syncStatus === 'syncing' && 'animate-spin')} />
+                {t('account.retrySync')}
+              </button>
             </div>
           </div>
 
@@ -1472,12 +1525,37 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
             </button>
             <button
               type="button"
-              onClick={onExportData}
+              onClick={onOpenPrivacy}
               className="flex w-full items-center justify-between rounded-xl border border-border bg-card px-4 py-3 text-left text-sm font-semibold text-foreground transition-colors hover:bg-muted/50"
             >
-              <span>{t('account.exportData')}</span>
+              <span>{t('account.privacyPolicy')}</span>
               <ChevronRight className="h-4 w-4 text-muted-foreground" />
             </button>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.reminders')}</p>
+            <div className="rounded-xl border border-border bg-card px-4 py-3 text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-semibold text-foreground">{t('account.notificationPermission')}</span>
+                <span className={cn('rounded-full px-2 py-0.5 text-xs font-semibold', notificationPermission === 'granted' ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600')}>
+                  {t(`notifications.permission.${notificationPermission}`)}
+                </span>
+              </div>
+              {notificationPermission !== 'unsupported' && notificationPermission !== 'granted' && (
+                <button
+                  type="button"
+                  onClick={onRequestNotifications}
+                  className="mt-3 flex w-full items-center justify-center rounded-lg bg-muted px-3 py-2 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  {t('account.enableNotifications')}
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.security')}</p>
             <button
               type="button"
               onClick={onDeleteAccount}
@@ -1486,18 +1564,16 @@ function AccountPage({ email, accentTheme, onAccentThemeChange, onClose, onLogou
               <span>{t('account.deleteAccount')}</span>
               <ChevronRight className="h-4 w-4" />
             </button>
+            <button
+              type="button"
+              onClick={onLogout}
+              className="flex w-full items-center justify-center rounded-xl bg-destructive/10 px-4 py-3 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/20 active:scale-95"
+            >
+              {t('account.signOut')}
+            </button>
           </div>
         </div>
       </div>
-
-      {/* Logout button */}
-      <div className="w-full max-w-md px-6 pb-safe mb-6">
-        <button
-          onClick={onLogout}
-          className="w-full py-3.5 bg-destructive/10 text-destructive rounded-xl font-semibold text-base hover:bg-destructive/20 transition-colors active:scale-95"
-        >
-          {t('account.signOut')}
-        </button>
       </div>
     </motion.div>
   );
@@ -1515,8 +1591,8 @@ function DeletedTasksDialog({ open, tasks, loading, onClose, onRestore, onPerman
   return (
     <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 backdrop-blur-md z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-        <Dialog.Content className="fixed left-[50%] top-[50%] z-50 flex max-h-[78vh] w-[calc(100%-2rem)] max-w-md translate-x-[-50%] translate-y-[-50%] flex-col rounded-3xl border border-border bg-card p-5 shadow-2xl focus:outline-none">
+        <Dialog.Overlay className="fixed inset-0 z-[60] backdrop-blur-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Content className="fixed left-[50%] top-[50%] z-[61] flex max-h-[78vh] w-[calc(100%-2rem)] max-w-md translate-x-[-50%] translate-y-[-50%] flex-col rounded-3xl border border-border bg-card p-5 shadow-2xl focus:outline-none">
           <div className="mb-4 flex items-start justify-between gap-4">
             <div>
               <Dialog.Title className="text-lg font-bold">{t('task.recentlyDeleted')}</Dialog.Title>
@@ -1550,7 +1626,7 @@ function DeletedTasksDialog({ open, tasks, loading, onClose, onRestore, onPerman
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-semibold text-foreground">{task.title}</p>
                         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                          <span>{task.estimateMinutes}m</span>
+                          <span>{estimateLabel(task.estimateMinutes)}</span>
                           <span>{task.priority}</span>
                           {task.deletedAt && <span>{new Date(task.deletedAt).toLocaleDateString()}</span>}
                         </div>
@@ -1576,6 +1652,36 @@ function DeletedTasksDialog({ open, tasks, loading, onClose, onRestore, onPerman
                 ))}
               </div>
             )}
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function PrivacyPolicyDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { t } = useTranslation();
+  const items = t('privacy.items', { returnObjects: true }) as string[];
+  return (
+    <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-[60] backdrop-blur-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Content className="fixed left-[50%] top-[50%] z-[61] max-h-[78vh] w-[calc(100%-2rem)] max-w-md translate-x-[-50%] translate-y-[-50%] overflow-y-auto rounded-3xl border border-border bg-card p-5 shadow-2xl focus:outline-none">
+          <div className="mb-4 flex items-start justify-between gap-4">
+            <div>
+              <Dialog.Title className="text-lg font-bold">{t('privacy.title')}</Dialog.Title>
+              <Dialog.Description className="mt-1 text-sm text-muted-foreground">{t('privacy.description')}</Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button type="button" className="rounded-full bg-muted p-2 text-muted-foreground hover:text-foreground">
+                <X className="h-4 w-4" />
+              </button>
+            </Dialog.Close>
+          </div>
+          <div className="space-y-3">
+            {items.map((item, index) => (
+              <p key={index} className="rounded-xl bg-muted/50 px-4 py-3 text-sm leading-relaxed text-muted-foreground">{item}</p>
+            ))}
           </div>
         </Dialog.Content>
       </Dialog.Portal>
@@ -1610,6 +1716,7 @@ function AppShell({
   const hasInteractedRef = React.useRef(false);
   const actionLocksRef = React.useRef(new Set<string>());
   const syncInFlightRef = React.useRef(false);
+  const scheduledNotificationIdsRef = React.useRef(new Set<number>());
   const [tasksLoading, setTasksLoading] = useState(true);
   const [exitAction, setExitAction] = useState<TaskActionState | null>(null);
   const [actingTaskIds, setActingTaskIds] = useState<Set<string>>(() => new Set());
@@ -1619,16 +1726,28 @@ function AppShell({
   const [accountOpen, setAccountOpen] = useState(false);
   const [flowDetailTaskId, setFlowDetailTaskId] = useState<string | null>(null);
   const [manageTaskId, setManageTaskId] = useState<string | null>(null);
+  const [privacyOpen, setPrivacyOpen] = useState(false);
 
   const [isAddingTask, setIsAddingTask] = useState(false);
   const [isRepeatMode, setIsRepeatMode] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [showTaskOptions, setShowTaskOptions] = useState(false);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'offline' | 'pending' | 'conflict' | 'error'>('idle');
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermissionState>('unsupported');
   const [form, setForm] = useState<AddTaskState>(DEFAULT_FORM);
+  const [formErrors, setFormErrors] = useState<AddTaskErrors>({});
   const [deletedTasksOpen, setDeletedTasksOpen] = useState(false);
   const [deletedTasks, setDeletedTasks] = useState<Task[]>([]);
   const [deletedTasksLoading, setDeletedTasksLoading] = useState(false);
+
+  const refreshNotificationPermission = React.useCallback(async (request = false) => {
+    const permission = await getNotificationPermission(request);
+    setNotificationPermission(permission);
+    if (request && permission !== 'granted' && permission !== 'unsupported') {
+      toast.error(t('notifications.permissionDenied'));
+    }
+    return permission;
+  }, [t]);
 
   const toTask = React.useCallback((t: TaskDTO): Task => ({
     id: t.id,
@@ -1672,6 +1791,40 @@ function AppShell({
     const hasDirty = nextTasks.some(task => task._dirty);
     setSyncStatus(hasDirty ? (navigator.onLine ? 'pending' : 'offline') : 'idle');
   }, [cloudSyncEnabled]);
+
+  useEffect(() => {
+    refreshNotificationPermission(true);
+  }, [refreshNotificationPermission]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function syncReminderNotifications() {
+      if (notificationPermission !== 'granted') return;
+      const candidates = tasks.filter(canNotifyTask);
+      const nextIds = new Set(candidates.map(task => notificationIdForTask(task.id)));
+      const cancelIds = new Set([...scheduledNotificationIdsRef.current, ...nextIds]);
+      if (cancelIds.size > 0) {
+        await LocalNotifications.cancel({
+          notifications: [...cancelIds].map(id => ({ id })),
+        }).catch(() => undefined);
+      }
+      if (cancelled || candidates.length === 0) {
+        scheduledNotificationIdsRef.current = new Set();
+        return;
+      }
+      await LocalNotifications.schedule({
+        notifications: candidates.map(task => ({
+          id: notificationIdForTask(task.id),
+          title: task.title,
+          body: t('notifications.reminderBody'),
+          schedule: { at: new Date(task.reminderAt!) },
+        })),
+      }).catch(() => undefined);
+      if (!cancelled) scheduledNotificationIdsRef.current = nextIds;
+    }
+    syncReminderNotifications();
+    return () => { cancelled = true; };
+  }, [notificationPermission, tasks, t]);
 
   const buildTaskSyncPatch = React.useCallback((id: string, data: Partial<Task>, operationId?: string) => {
     const current = tasksRef.current.find(task => task.id === id);
@@ -2095,12 +2248,13 @@ function AppShell({
     setEditingTaskId(null);
     setShowTaskOptions(false);
     setForm(DEFAULT_FORM);
+    setFormErrors({});
   };
 
   const openEditTask = (task: Task) => {
     setForm({
       title: task.title,
-      minutes: String(task.estimateMinutes),
+      minutes: task.estimateMinutes ? String(task.estimateMinutes) : '',
       priority: task.priority,
       dueDate: task.dueDate || '',
       reminderAt: task.reminderAt || '',
@@ -2182,23 +2336,6 @@ function AppShell({
     });
   }, [cloudSyncEnabled, refreshDeletedTasks, setTasksAndCache, t]);
 
-  const handleExportData = React.useCallback(async () => {
-    try {
-      const blob = await apiExportUserData();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `taskflow-export-${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-      toast.success(t('account.exportStarted'));
-    } catch {
-      toast.error(t('account.exportFailed'));
-    }
-  }, [t]);
-
   const handleDeleteAccount = React.useCallback(async () => {
     const confirmed = window.confirm(t('account.deleteAccountConfirm'));
     if (!confirmed) return;
@@ -2219,6 +2356,7 @@ function AppShell({
     setTasksAndCache(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt } : t), task.id, 'update', operationId));
     persistTaskUpdate(task.id, { deletedAt }, operationId);
     toast(t('task.deleted'), {
+      description: t('task.deletedDesc'),
       action: {
         label: t('task.undo'),
         onClick: () => {
@@ -2233,7 +2371,7 @@ function AppShell({
   const handleRepeatTask = (task: Task) => {
     setForm({
       title: task.title,
-      minutes: String(task.estimateMinutes),
+      minutes: task.estimateMinutes ? String(task.estimateMinutes) : '',
       priority: task.priority,
       dueDate: '',
       reminderAt: '',
@@ -2248,14 +2386,35 @@ function AppShell({
 
   const openAddTask = () => { setForm(DEFAULT_FORM); setIsRepeatMode(false); setEditingTaskId(null); setShowTaskOptions(false); setIsAddingTask(true); };
 
+  const validateTaskForm = (): AddTaskErrors => {
+    const errors: AddTaskErrors = {};
+    if (!form.title.trim()) errors.title = t('task.errors.titleRequired');
+    if (!form.dueDate) errors.dueDate = t('task.errors.dueDateRequired');
+    const minutes = form.minutes.trim() ? Number.parseInt(form.minutes, 10) : null;
+    if (minutes !== null && (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440)) {
+      errors.minutes = t('task.errors.minutesRange');
+    }
+    if (form.reminderAt) {
+      const reminderTime = new Date(form.reminderAt).getTime();
+      if (Number.isNaN(reminderTime)) {
+        errors.reminderAt = t('task.errors.reminderInvalid');
+      } else if (reminderTime <= Date.now()) {
+        errors.reminderAt = t('task.errors.reminderPast');
+      }
+    }
+    return errors;
+  };
+
   const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.title.trim()) return;
+    const errors = validateTaskForm();
+    setFormErrors(errors);
+    if (Object.keys(errors).length > 0) return;
     if (editingTaskId) {
       const patch: Partial<Task> = {
         title: form.title.trim(),
         priority: form.priority,
-        estimateMinutes: parseInt(form.minutes) || 15,
+        estimateMinutes: form.minutes.trim() ? Number.parseInt(form.minutes, 10) : null,
         dueDate: form.dueDate || null,
         reminderAt: form.reminderAt || null,
         repeatRule: form.repeatRule,
@@ -2269,15 +2428,15 @@ function AppShell({
     }
     const tempId = localTaskId();
 
-    const idx = insertIndex(tasks, { id: tempId, title: '', priority: form.priority, estimateMinutes: 0, status: 'todo', progress: 0, dueDate: form.dueDate || null, sortOrder: 0 } as Task);
+    const idx = insertIndex(tasks, { id: tempId, title: '', priority: form.priority, estimateMinutes: null, status: 'todo', progress: 0, dueDate: form.dueDate, sortOrder: 0 } as Task);
 
     const optimisticTask: Task = {
       id: tempId, _dirty: true, _syncState: 'create',
       _operationId: syncOperationId(),
       title: form.title, priority: form.priority,
-      estimateMinutes: parseInt(form.minutes) || 15,
+      estimateMinutes: form.minutes.trim() ? Number.parseInt(form.minutes, 10) : null,
       status: 'todo', progress: 0,
-      dueDate: form.dueDate || null, reminderAt: form.reminderAt || null,
+      dueDate: form.dueDate, reminderAt: form.reminderAt || null,
       repeatRule: form.repeatRule, deletedAt: null, tag: form.tag,
       sortOrder: idx,
       updatedAt: new Date().toISOString(),
@@ -2317,22 +2476,27 @@ function AppShell({
         onPermanentDelete={handlePermanentDeleteTask}
       />
 
+      <PrivacyPolicyDialog open={privacyOpen} onClose={() => setPrivacyOpen(false)} />
+
       {/* Account Page */}
       <AnimatePresence>
         {accountOpen && (
           <AccountPage
             email={user.email}
+            emailVerified={!!(user.emailVerifiedAt || user.emailVerified)}
+            notificationPermission={notificationPermission}
             accentTheme={accentTheme}
             onAccentThemeChange={onAccentThemeChange}
             onClose={() => setAccountOpen(false)}
             onLogout={onLogout}
             onOpenDeletedTasks={() => {
-              setAccountOpen(false);
               openDeletedTasks();
             }}
             deletedCount={tasks.filter(task => !!task.deletedAt).length || deletedTasks.length}
-            onExportData={handleExportData}
             onDeleteAccount={handleDeleteAccount}
+            onRetrySync={retryDirtyTasks}
+            onOpenPrivacy={() => setPrivacyOpen(true)}
+            onRequestNotifications={() => refreshNotificationPermission(true)}
             syncStatus={syncStatus}
             lastSync={lastSync}
             pendingSyncCount={pendingSyncCount}
@@ -2370,14 +2534,17 @@ function AppShell({
         <div className="w-full max-w-md px-4 sm:px-6 mb-3">
           <button
             onClick={retryDirtyTasks}
-            className={`w-full flex items-center justify-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold ${
+            className={`w-full flex flex-col items-center justify-center gap-1 rounded-xl border px-3 py-2 text-xs font-semibold ${
               syncStatus === 'error' || syncStatus === 'conflict'
                 ? 'border-destructive/30 bg-destructive/10 text-destructive'
                 : 'border-border bg-card text-muted-foreground'
             }`}
           >
-            <RotateCw className={`w-3.5 h-3.5 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
-            {t(`sync.${syncStatus}`)}
+            <span className="flex items-center gap-2">
+              <RotateCw className={`w-3.5 h-3.5 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
+              {t(`sync.${syncStatus}`)}
+            </span>
+            <span className="font-normal opacity-80">{t(`syncDetails.${syncStatus}`)}</span>
           </button>
         </div>
       )}
@@ -2470,7 +2637,7 @@ function AppShell({
                         <span className="w-5 text-right text-[11px] font-semibold text-muted-foreground tabular-nums">{index + 2}</span>
                         <span className={`w-2 h-2 rounded-full flex-shrink-0 ${DOT_COLOR[task.priority]}`} />
                         <span className="min-w-0 truncate text-sm font-medium text-foreground">{task.title}</span>
-                        <span className="rounded-md bg-card/70 px-1.5 py-0.5 text-xs text-muted-foreground">{task.estimateMinutes}m</span>
+                        <span className="rounded-md bg-card/70 px-1.5 py-0.5 text-xs text-muted-foreground">{estimateLabel(task.estimateMinutes)}</span>
                       </div>
                     ))}
                     {pendingTasks.length === 1 && (
@@ -2491,8 +2658,8 @@ function AppShell({
                 <div className="w-16 h-16 bg-muted text-muted-foreground rounded-2xl flex items-center justify-center mb-5">
                   <CheckCircle2 className="w-8 h-8" />
                 </div>
-                <h2 className="text-xl font-semibold mb-2">{t('task.allCaughtUp')}</h2>
-                <p className="text-sm text-muted-foreground mb-7">{t('task.allCaughtUpDesc')}</p>
+                <h2 className="text-xl font-semibold mb-2">{activeTasks.length === 0 ? t('task.emptyNewTitle') : t('task.allCaughtUp')}</h2>
+                <p className="text-sm text-muted-foreground mb-7">{activeTasks.length === 0 ? t('task.emptyNewDesc') : t('task.allCaughtUpDesc')}</p>
                 <button onClick={openAddTask} className="w-full py-3 bg-primary text-primary-foreground font-semibold rounded-xl">{t('task.addNewTask')}</button>
               </motion.div>
             )}
@@ -2583,20 +2750,21 @@ function AppShell({
                 <div className="space-y-2">
                   <label htmlFor="title" className="text-sm font-medium leading-none">{t('task.taskName')}</label>
                   <input id="title" type="text" autoFocus placeholder={t('task.titlePlaceholder')}
-                    className="flex h-11 w-full rounded-xl border border-input bg-input-background px-3 py-2 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    value={form.title} onChange={(e) => setForm(f => ({ ...f, title: e.target.value }))} required />
+                    aria-invalid={!!formErrors.title}
+                    className={cn('flex h-11 w-full rounded-xl border bg-input-background px-3 py-2 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', formErrors.title ? 'border-destructive' : 'border-input')}
+                    value={form.title} onChange={(e) => { setForm(f => ({ ...f, title: e.target.value })); setFormErrors(prev => ({ ...prev, title: undefined })); }} required />
+                  {formErrors.title && <p className="text-xs font-medium text-destructive">{formErrors.title}</p>}
                 </div>
 
                 <div className="space-y-2">
                   <label htmlFor="dueDate" className="text-sm font-medium leading-none">{t('task.deadline')}</label>
-                  <div className="grid grid-cols-4 gap-2">
+                  <div className="grid grid-cols-3 gap-2">
                     {[
                       { key: 'today', offset: 0 },
                       { key: 'tomorrow', offset: 1 },
                       { key: 'week', offset: 7 },
-                      { key: 'none', offset: null },
                     ].map(item => {
-                      const value = item.offset === null ? '' : quickDueDate(item.offset);
+                      const value = quickDueDate(item.offset);
                       const selected = form.dueDate === value;
                       return (
                         <button
@@ -2613,8 +2781,10 @@ function AppShell({
                     })}
                   </div>
                   <input id="dueDate" type="date"
-                    className="flex h-10 w-full appearance-none rounded-xl border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    value={form.dueDate} onChange={(e) => setForm(f => ({ ...f, dueDate: e.target.value }))} />
+                    aria-invalid={!!formErrors.dueDate}
+                    className={cn('flex h-10 w-full appearance-none rounded-xl border bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', formErrors.dueDate ? 'border-destructive' : 'border-input')}
+                    value={form.dueDate} onChange={(e) => { setForm(f => ({ ...f, dueDate: e.target.value })); setFormErrors(prev => ({ ...prev, dueDate: undefined })); }} />
+                  {formErrors.dueDate && <p className="text-xs font-medium text-destructive">{formErrors.dueDate}</p>}
                 </div>
 
                 <div className="space-y-2">
@@ -2660,8 +2830,12 @@ function AppShell({
                           <div className="space-y-2">
                             <label htmlFor="minutes" className="text-sm font-medium leading-none">{t('task.estMinutes')}</label>
                             <input id="minutes" type="number" min="1"
-                              className="flex h-10 w-full rounded-xl border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                              value={form.minutes} onChange={(e) => setForm(f => ({ ...f, minutes: e.target.value }))} />
+                              max="1440"
+                              aria-invalid={!!formErrors.minutes}
+                              className={cn('flex h-10 w-full rounded-xl border bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', formErrors.minutes ? 'border-destructive' : 'border-input')}
+                              value={form.minutes} onChange={(e) => { setForm(f => ({ ...f, minutes: e.target.value })); setFormErrors(prev => ({ ...prev, minutes: undefined })); }} />
+                            {formErrors.minutes && <p className="text-xs font-medium text-destructive">{formErrors.minutes}</p>}
+                            <p className="text-xs text-muted-foreground">{t('task.minutesHint')}</p>
                           </div>
                           <div className="space-y-2">
                             <label htmlFor="tag" className="text-sm font-medium leading-none">{t('task.categoryTag')}</label>
@@ -2675,8 +2849,11 @@ function AppShell({
                         <div className="space-y-2">
                           <label htmlFor="reminderAt" className="text-sm font-medium leading-none flex items-center gap-1.5"><Bell className="w-4 h-4" />{t('task.reminderAt')}</label>
                           <input id="reminderAt" type="datetime-local"
-                            className="flex h-10 w-full appearance-none rounded-xl border border-input bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                            value={form.reminderAt} onChange={(e) => setForm(f => ({ ...f, reminderAt: e.target.value }))} />
+                            aria-invalid={!!formErrors.reminderAt}
+                            className={cn('flex h-10 w-full appearance-none rounded-xl border bg-input-background px-3 py-2 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', formErrors.reminderAt ? 'border-destructive' : 'border-input')}
+                            value={form.reminderAt} onChange={(e) => { setForm(f => ({ ...f, reminderAt: e.target.value })); setFormErrors(prev => ({ ...prev, reminderAt: undefined })); }} />
+                          <p className="text-xs text-muted-foreground">{t('task.reminderHint')}</p>
+                          {formErrors.reminderAt && <p className="text-xs font-medium text-destructive">{formErrors.reminderAt}</p>}
                         </div>
                         <div className="space-y-2">
                           <label htmlFor="repeatRule" className="text-sm font-medium leading-none">{t('task.repeatRule')}</label>

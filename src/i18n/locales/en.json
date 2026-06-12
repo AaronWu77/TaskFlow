@@ -73,7 +73,7 @@
     "taskName": "Task Name",
     "estMinutes": "Est. Minutes",
     "priority": "Priority",
-    "deadline": "Deadline (Optional)",
+    "deadline": "Deadline",
     "categoryTag": "Category Tag",
     "moreOptions": "More settings",
     "titlePlaceholder": "e.g., Draft weekly update",
@@ -81,6 +81,8 @@
     "addTaskPrompt": "Add a task",
     "allCaughtUp": "All caught up!",
     "allCaughtUpDesc": "You've cleared your task flow. Take a break or add something new.",
+    "emptyNewTitle": "Plan your first task",
+    "emptyNewDesc": "Add one thing you want to finish next. TaskFlow will keep the queue focused.",
     "addNewTask": "Add a new task",
     "upNext": "Up Next",
     "noMoreTasks": "No more queued tasks.",
@@ -98,6 +100,16 @@
     "tasksInFlow": "task(s) in flow · first card = next to focus",
     "snoozeHint": "Snooze — re-queues to end",
     "skipHint": "Skip — removes from flow",
+    "deletedDesc": "You can restore it from Recently Deleted.",
+    "minutesHint": "Optional. Leave empty to show --m.",
+    "reminderHint": "Choose a future time to schedule a system notification.",
+    "errors": {
+      "titleRequired": "Task name is required.",
+      "dueDateRequired": "Deadline is required.",
+      "minutesRange": "Estimated minutes must be between 1 and 1440.",
+      "reminderInvalid": "Reminder time is invalid.",
+      "reminderPast": "Reminder time cannot be in the past."
+    },
     "tasksDoneToday_one": "{{count}} task done today",
     "tasksDoneToday_other": "{{count}} tasks done today"
   },
@@ -135,17 +147,39 @@
     "resending": "Sending...",
     "backToSignIn": "Back to sign in",
     "devCode": "Development code: {{code}}",
+    "passwordRules": {
+      "passed": "OK",
+      "pending": "Need",
+      "length": "at least 8 characters",
+      "letter": "one letter",
+      "number": "one number"
+    },
+    "errors": {
+      "invalidEmail": "Enter a valid email address.",
+      "weakPassword": "Password must be at least 8 characters.",
+      "invalidCredentials": "Email or password is incorrect.",
+      "emailExists": "This email is already registered.",
+      "invalidCode": "Verification code is invalid or expired.",
+      "emailDelivery": "Email delivery is not configured. Please try again later.",
+      "generic": "Something went wrong. Please try again."
+    },
     "privacyNote": "Your tasks stay private and sync across devices."
   },
   "account": {
     "signOut": "Sign Out",
     "data": "Data",
-    "exportData": "Export Data",
-    "exportStarted": "Export started",
-    "exportFailed": "Could not export data",
     "deleteAccount": "Delete Account",
     "deleteAccountConfirm": "Permanently delete your TaskFlow account and all synced data? This cannot be undone.",
     "deleteAccountFailed": "Could not delete account",
+    "emailVerified": "Email verified",
+    "emailUnverified": "Email not verified",
+    "preferences": "Preferences",
+    "security": "Security",
+    "reminders": "Reminders",
+    "notificationPermission": "Notifications",
+    "enableNotifications": "Enable notifications",
+    "privacyPolicy": "Privacy Policy",
+    "retrySync": "Retry sync",
     "accentColor": "Accent Color",
     "accent": {
       "tcx111400": "11-1400 TCX",
@@ -178,5 +212,34 @@
     "conflict": "Sync conflict — cloud version changed",
     "error": "Sync failed — tap to retry",
     "idle": "Synced"
+  },
+  "syncDetails": {
+    "syncing": "Saving your latest changes.",
+    "pending": "Your changes are local. Tap to push them now.",
+    "offline": "Reconnect to sync these changes to the cloud.",
+    "conflict": "Another device changed a task. Review before overwriting.",
+    "error": "Server sync failed. Tap to retry.",
+    "idle": "Everything is up to date."
+  },
+  "privacy": {
+    "title": "Privacy Policy",
+    "description": "A concise in-app summary. The public policy URL will be finalized before App Store submission.",
+    "items": [
+      "We store your email address, hashed password, tasks, tags, due dates, reminders, sync metadata, and productivity stats so TaskFlow can work across devices.",
+      "Passwords are stored as hashes. We do not store your plain text password.",
+      "Your tasks are private to your account and are not shared with other users.",
+      "You can delete your account from this app. Deleting an account removes synced tasks, stats, and sessions.",
+      "Reminder times schedule local system notifications when notification permission is enabled."
+    ]
+  },
+  "notifications": {
+    "reminderBody": "Time to focus on this task.",
+    "permissionDenied": "Notification permission is not enabled.",
+    "permission": {
+      "unsupported": "Not available",
+      "prompt": "Needs permission",
+      "granted": "Enabled",
+      "denied": "Disabled"
+    }
   }
 }

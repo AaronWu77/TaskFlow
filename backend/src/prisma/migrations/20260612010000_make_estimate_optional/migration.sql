@@ -1,0 +1,1 @@
+ALTER TABLE "Task" ALTER COLUMN "estimateMinutes" DROP NOT NULL;

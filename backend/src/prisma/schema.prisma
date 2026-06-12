@@ -34,7 +34,7 @@ model Task {
   userId          String
   title           String
   priority        String   // P1 | P2 | P3
-  estimateMinutes Int
+  estimateMinutes Int?
   status          String   // todo | doing | done | snoozed | skipped
   tag             String?
   progress        Int      @default(0)

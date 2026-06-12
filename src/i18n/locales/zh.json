@@ -73,7 +73,7 @@
     "taskName": "任务名称",
     "estMinutes": "预估时长（分钟）",
     "priority": "优先级",
-    "deadline": "截止日期（可选）",
+    "deadline": "截止日期",
     "categoryTag": "分类标签",
     "moreOptions": "更多设置",
     "titlePlaceholder": "例如：撰写周报",
@@ -81,6 +81,8 @@
     "addTaskPrompt": "添加任务",
     "allCaughtUp": "暂无待办任务",
     "allCaughtUpDesc": "当前任务流已清空。可以休息一下，或添加下一项任务。",
+    "emptyNewTitle": "规划你的第一个任务",
+    "emptyNewDesc": "先添加下一件想完成的事，TaskFlow 会帮你保持任务队列清晰。",
     "addNewTask": "添加新任务",
     "upNext": "下一个",
     "noMoreTasks": "没有更多排队任务。",
@@ -98,6 +100,16 @@
     "tasksInFlow": "个任务在流中 · 第一张卡片 = 下一个焦点",
     "snoozeHint": "延后 — 移到队尾",
     "skipHint": "跳过 — 移出任务流",
+    "deletedDesc": "你可以在最近删除中恢复它。",
+    "minutesHint": "可留空，留空时显示 --m。",
+    "reminderHint": "选择未来时间后会创建系统本地通知。",
+    "errors": {
+      "titleRequired": "请填写任务名称。",
+      "dueDateRequired": "请选择截止日期。",
+      "minutesRange": "预计时间必须在 1 到 1440 分钟之间。",
+      "reminderInvalid": "提醒时间格式不正确。",
+      "reminderPast": "提醒时间不能早于当前时间。"
+    },
     "tasksDoneToday_one": "{{count}} 个任务今日已完成",
     "tasksDoneToday_other": "{{count}} 个任务今日已完成"
   },
@@ -135,17 +147,39 @@
     "resending": "发送中...",
     "backToSignIn": "返回登录",
     "devCode": "开发环境验证码：{{code}}",
+    "passwordRules": {
+      "passed": "已满足",
+      "pending": "需要",
+      "length": "至少 8 个字符",
+      "letter": "包含 1 个字母",
+      "number": "包含 1 个数字"
+    },
+    "errors": {
+      "invalidEmail": "请输入有效邮箱地址。",
+      "weakPassword": "密码至少需要 8 个字符。",
+      "invalidCredentials": "邮箱或密码不正确。",
+      "emailExists": "该邮箱已经注册。",
+      "invalidCode": "验证码错误或已过期。",
+      "emailDelivery": "邮件发送尚未配置，请稍后再试。",
+      "generic": "操作失败，请稍后再试。"
+    },
     "privacyNote": "你的任务数据仅自己可见，跨设备同步。"
   },
   "account": {
     "signOut": "退出登录",
     "data": "数据",
-    "exportData": "导出数据",
-    "exportStarted": "已开始导出",
-    "exportFailed": "导出数据失败",
     "deleteAccount": "删除账号",
     "deleteAccountConfirm": "确定永久删除你的 TaskFlow 账号和所有已同步数据吗？此操作无法撤销。",
     "deleteAccountFailed": "删除账号失败",
+    "emailVerified": "邮箱已验证",
+    "emailUnverified": "邮箱未验证",
+    "preferences": "偏好设置",
+    "security": "安全",
+    "reminders": "提醒",
+    "notificationPermission": "通知权限",
+    "enableNotifications": "开启通知",
+    "privacyPolicy": "隐私政策",
+    "retrySync": "重新同步",
     "accentColor": "主色调",
     "accent": {
       "tcx111400": "11-1400 TCX",
@@ -178,5 +212,34 @@
     "conflict": "同步冲突 — 云端版本已变化",
     "error": "同步失败 — 点击重试",
     "idle": "已同步"
+  },
+  "syncDetails": {
+    "syncing": "正在保存最新修改。",
+    "pending": "修改仍在本地，点击可立即同步。",
+    "offline": "重新联网后会同步到云端。",
+    "conflict": "其他设备修改了任务，请先检查再覆盖。",
+    "error": "服务器同步失败，点击重试。",
+    "idle": "所有内容均已同步。"
+  },
+  "privacy": {
+    "title": "隐私政策",
+    "description": "这是 App 内简版说明，正式公开 URL 会在提交 App Store 前补齐。",
+    "items": [
+      "我们会保存你的邮箱、密码哈希、任务、标签、截止日期、提醒时间、同步信息和统计数据，用于跨设备使用 TaskFlow。",
+      "密码会以哈希形式保存，我们不会保存明文密码。",
+      "你的任务只属于当前账号，不会公开给其他用户。",
+      "你可以在 App 内删除账号。删除账号会移除已同步任务、统计数据和登录会话。",
+      "开启通知权限后，提醒时间会创建系统本地通知。"
+    ]
+  },
+  "notifications": {
+    "reminderBody": "该专注这项任务了。",
+    "permissionDenied": "通知权限未开启。",
+    "permission": {
+      "unsupported": "不可用",
+      "prompt": "需要授权",
+      "granted": "已开启",
+      "denied": "已关闭"
+    }
   }
 }

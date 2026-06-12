@@ -22,9 +22,26 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
   const [resending, setResending] = useState(false);
   const [error, setError] = useState('');
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const passwordChecks = [
+    { key: 'length', passed: password.length >= 8 },
+    { key: 'letter', passed: /[A-Za-z]/.test(password) },
+    { key: 'number', passed: /\d/.test(password) },
+  ];
 
   const inputClass =
     'flex h-11 w-full rounded-xl border border-input bg-input-background px-4 py-2 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-colors';
+
+  function authErrorMessage(err: unknown): string {
+    const message = err instanceof Error ? err.message : '';
+    const normalized = message.toLowerCase();
+    if (normalized.includes('invalid email') || normalized.includes('valid email')) return t('auth.errors.invalidEmail');
+    if (normalized.includes('password') && normalized.includes('8')) return t('auth.errors.weakPassword');
+    if (normalized.includes('invalid credentials')) return t('auth.errors.invalidCredentials');
+    if (normalized.includes('already registered') || normalized.includes('already exists')) return t('auth.errors.emailExists');
+    if (normalized.includes('verification') || normalized.includes('code')) return t('auth.errors.invalidCode');
+    if (normalized.includes('delivery') || normalized.includes('configured')) return t('auth.errors.emailDelivery');
+    return t('auth.errors.generic');
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -48,7 +65,7 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
       }
       onAuth(result.user);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong');
+      setError(authErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -64,7 +81,7 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
       setDevCode(result.devCode || '');
       if (result.devCode) setVerificationCode(result.devCode);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong');
+      setError(authErrorMessage(err));
     } finally {
       setResending(false);
     }
@@ -199,6 +216,15 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
                   {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
+              {mode === 'register' && (
+                <div className="grid grid-cols-1 gap-1 text-xs">
+                  {passwordChecks.map(check => (
+                    <span key={check.key} className={check.passed ? 'text-emerald-600' : 'text-muted-foreground'}>
+                      {check.passed ? t('auth.passwordRules.passed') : t('auth.passwordRules.pending')} {t(`auth.passwordRules.${check.key}`)}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
               </>
             )}
