@@ -192,8 +192,6 @@ function parseTaskPayload(input: unknown, res: Response, partial: boolean) {
     const progress = parseInteger(input.progress, 'progress', res, 0, 100);
     if (progress === undefined) return null;
     data.progress = progress;
-  } else if (!partial) {
-    data.progress = 0;
   }
 
   if (input.sortOrder !== undefined) {
@@ -246,6 +244,17 @@ function parseTaskPayload(input: unknown, res: Response, partial: boolean) {
     data.repeatRule = null;
   }
 
+  const repeatUntilDate = normalizeNullableString(input.repeatUntilDate, 'repeatUntilDate', res, 10);
+  if (input.repeatUntilDate !== undefined) {
+    if (repeatUntilDate !== null && repeatUntilDate !== undefined && !isValidDateOnly(repeatUntilDate)) {
+      validationError(res, 'repeatUntilDate', 'repeatUntilDate must be YYYY-MM-DD');
+      return null;
+    }
+    data.repeatUntilDate = repeatUntilDate ?? null;
+  } else if (!partial) {
+    data.repeatUntilDate = null;
+  }
+
   const deletedAt = normalizeNullableString(input.deletedAt, 'deletedAt', res, 64);
   if (input.deletedAt !== undefined) {
     if (deletedAt !== null && deletedAt !== undefined && !isValidIsoDateTime(deletedAt)) {
@@ -295,10 +304,11 @@ router.post('/', asyncHandler(async (req, res) => {
           estimateMinutes: data.estimateMinutes as number | null,
           status: data.status as string,
           tag: data.tag as string | null | undefined,
-          progress: data.progress as number,
+          ...(data.progress !== undefined ? { progress: data.progress as number } : {}),
           dueDate: data.dueDate as string | null | undefined,
           reminderAt: data.reminderAt as string | null | undefined,
           repeatRule: data.repeatRule as string | null | undefined,
+          repeatUntilDate: data.repeatUntilDate as string | null | undefined,
           completedAt: data.status === 'done' ? new Date().toISOString() : null,
           deletedAt: data.deletedAt as string | null | undefined,
           sortOrder: data.sortOrder as number,
@@ -344,7 +354,7 @@ router.put('/reorder', asyncHandler(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// PATCH /tasks/:id — update task fields (status, progress, sortOrder, etc.)
+// PATCH /tasks/:id — update task fields (status, sortOrder, etc.)
 router.patch('/:id', asyncHandler(async (req, res) => {
   const id = String(req.params.id);
   const operationId = isObject(req.body) ? normalizeOperationId(req.body.operationId) : null;

@@ -6,7 +6,8 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "check": "npm run build && npm --prefix backend run build",
+    "test": "node --test scripts/*.test.mjs",
+    "check": "npm run build && npm --prefix backend run build && npm test",
     "ios": "npm run build && npx cap sync ios && npx cap open ios",
     "cap:sync": "npm run build && npx cap sync ios",
     "cap:open": "npx cap open ios"
@@ -38,7 +39,6 @@
     "@radix-ui/react-menubar": "1.1.6",
     "@radix-ui/react-navigation-menu": "1.2.5",
     "@radix-ui/react-popover": "1.1.6",
-    "@radix-ui/react-progress": "1.1.2",
     "@radix-ui/react-radio-group": "1.2.3",
     "@radix-ui/react-scroll-area": "1.2.3",
     "@radix-ui/react-select": "2.1.6",

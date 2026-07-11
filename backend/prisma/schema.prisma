@@ -38,6 +38,7 @@ model Task {
   dueDate         String?
   reminderAt      String?
   repeatRule      String?
+  repeatUntilDate String?
   completedAt     String?
   deletedAt       String?
   sortOrder       Int      @default(0)

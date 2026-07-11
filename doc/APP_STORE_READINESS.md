@@ -13,11 +13,16 @@ Current data handled by the app:
 | Email address | Account registration, login, sync identity | Yes | No |
 | Email verification code | Account verification during signup/login | Yes | No |
 | Password | Authentication only; hashed on server | Yes | No |
-| Tasks, tags, due dates, progress, reminders | Core task management and sync | Yes | No |
+| Tasks, tags, due dates, reminders | Core task management and sync | Yes | No |
 | Streak and completion counts | Productivity stats | Yes | No |
 | Diagnostic sync state | Troubleshooting sync/auth failures | No advertising use | No |
 
 Do not claim the app collects analytics or tracking data unless an analytics SDK is added later.
+
+Public URLs:
+
+- Privacy Policy: `https://taskflow.top/privacy`
+- Support: `https://taskflow.top/support`
 
 ## Review Notes
 
@@ -25,7 +30,8 @@ Do not claim the app collects analytics or tracking data unless an analytics SDK
 - New accounts must verify email before cloud sync is enabled.
 - Provide Apple Review with a test account before submission.
 - The app does not include user-generated public content, social feeds, messaging, or third-party advertising.
-- If notification reminders are enabled in a future native build, explain that notifications are local task reminders requested by the user.
+- Notification reminders are local task reminders requested by the user.
+- The iOS app includes `PrivacyInfo.xcprivacy`; keep App Store privacy labels aligned with that file and the public privacy policy.
 
 ## Test Account
 
@@ -70,9 +76,13 @@ Prepare screenshots for required iPhone sizes in both English and Chinese if bot
 - Chinese and English UI have no missing translation keys in core flows.
 - App icon and launch screen render correctly.
 - Privacy policy URL is live and matches actual data handling.
+- Support URL is live and explains account deletion.
+- `PrivacyInfo.xcprivacy` is included in the app target resources.
+- Native quick create, task details, due date, reminder, and repeat controls work on a real iPhone.
+- TestFlight checklist in `doc/TESTFLIGHT_RELEASE_CHECKLIST.md` is complete.
 
 ## Release Notes Template
 
 ```
-TaskFlow Phase 10 improves account security, sync reliability, task editing, search filters, reminders metadata, repeating tasks, and App Store readiness.
+TaskFlow 1.0.1 focuses the task flow experience, adds native iOS controls for the main workflow, improves sync reliability, and completes App Store privacy and support readiness.
 ```

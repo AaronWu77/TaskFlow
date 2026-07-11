@@ -4,8 +4,14 @@ node_modules/
 # Build output
 dist/
 
-# Capacitor iOS generated project (regenerated via `npx cap add ios`)
-ios/
+# iOS build output and user-local Xcode state
+ios/App/build/
+ios/App/DerivedData/
+ios/App/App/public/
+ios/App/App.xcodeproj/xcuserdata/
+ios/App/App.xcworkspace/xcuserdata/
+ios/App/App.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
 android/
 
 # Environment files

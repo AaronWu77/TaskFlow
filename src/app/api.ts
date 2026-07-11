@@ -12,6 +12,7 @@ let accessToken: string | null = null;
 const REFRESH_TOKEN_KEY = 'taskflow_refresh_token';
 export type RefreshResult = 'ok' | 'unauthorized' | 'network';
 const IS_NATIVE_PLATFORM = Capacitor.isNativePlatform();
+const REQUEST_TIMEOUT_MS = 15000;
 let refreshedUser: AuthUser | null = null;
 
 export class ApiError extends Error {
@@ -69,6 +70,16 @@ function setStoredRefreshToken(token: string | null): void {
   }
 }
 
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = REQUEST_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 /** Attempt a silent token refresh using the httpOnly refresh cookie plus a stored fallback token.
  *  The fallback keeps dev web and Capacitor sessions alive when cookies are not persisted. */
 export async function apiRefreshDetailed(): Promise<RefreshResult> {
@@ -77,7 +88,7 @@ export async function apiRefreshDetailed(): Promise<RefreshResult> {
     const headers: Record<string, string> = {};
     if (storedRefreshToken) headers.Authorization = `Bearer ${storedRefreshToken}`;
 
-    const res = await fetch(`${BASE_URL}/auth/refresh`, {
+    const res = await fetchWithTimeout(`${BASE_URL}/auth/refresh`, {
       method: 'POST',
       credentials: 'include',
       headers,
@@ -113,14 +124,14 @@ export async function apiFetch(path: string, options: RequestInit = {}): Promise
   };
   if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
 
-  let res = await fetch(`${BASE_URL}${path}`, { ...options, headers, credentials: 'include' });
+  let res = await fetchWithTimeout(`${BASE_URL}${path}`, { ...options, headers, credentials: 'include' });
 
   // Auto-refresh on 401 and retry once
   if (res.status === 401) {
     const refreshResult = await apiRefreshDetailed();
     if (refreshResult === 'ok' && accessToken) {
       headers['Authorization'] = `Bearer ${accessToken}`;
-      res = await fetch(`${BASE_URL}${path}`, { ...options, headers, credentials: 'include' });
+      res = await fetchWithTimeout(`${BASE_URL}${path}`, { ...options, headers, credentials: 'include' });
     } else if (refreshResult === 'unauthorized') {
       onAuthFailure?.();
     }
@@ -242,10 +253,10 @@ export interface TaskDTO {
   estimateMinutes: number | null;
   status: string;
   tag: string | null;
-  progress: number;
   dueDate: string | null;
   reminderAt: string | null;
   repeatRule: string | null;
+  repeatUntilDate: string | null;
   completedAt: string | null;
   deletedAt: string | null;
   sortOrder: number;
@@ -276,11 +287,11 @@ export async function apiCreateTask(task: {
   priority: string;
   estimateMinutes?: number | null;
   status?: string;
-  tag?: string;
-  progress?: number;
+  tag?: string | null;
   dueDate?: string | null;
   reminderAt?: string | null;
   repeatRule?: string | null;
+  repeatUntilDate?: string | null;
   deletedAt?: string | null;
   sortOrder?: number;
   operationId?: string;
@@ -301,11 +312,11 @@ export async function apiUpdateTask(id: string, data: Partial<{
   priority: string;
   estimateMinutes: number | null;
   status: string;
-  tag: string;
-  progress: number;
+  tag: string | null;
   dueDate: string | null;
   reminderAt: string | null;
   repeatRule: string | null;
+  repeatUntilDate: string | null;
   deletedAt: string | null;
   sortOrder: number;
   lastKnownUpdatedAt: string | null;

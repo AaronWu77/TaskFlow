@@ -10,7 +10,6 @@ TaskFlow 用卡片堆叠界面取代了永无止境的清单，让你每次只�
 - **日历视图** — 月度网格，按天展示任务列表，点击任务打开详情弹窗
 - **拖拽排序** — 底部抽屉支持通过拖拽手柄对待办队列重新排序
 - **智能插入** — 新任务按截止日期和优先级自动插入到正确位置
-- **进度追踪** — 每个任务附带进度滑块（0–100%），实时波浪填充动效
 - **连续打卡** — 统计连续完成任务的天数（Streak），跨设备同步
 - **重复任务** — 在日历视图中一键将已完成任务重新加入队列
 - **账号系统** — 邮箱 + 密码注册/登录，JWT 访问令牌 + httpOnly 刷新 Cookie
@@ -112,7 +111,6 @@ interface Task {
   estimateMinutes: number;
   status: 'todo' | 'doing' | 'done' | 'snoozed' | 'skipped';
   tag?: string;                    // Work | Personal | Study | Planning | Health | Other
-  progress: number;                // 0–100
   dueDate?: string | null;         // 'YYYY-MM-DD'
   sortOrder: number;               // 用户自定义顺序
 }
@@ -207,6 +205,6 @@ UI 设计与资产生成由 [Figma Make](https://www.figma.com/design/qG1eukwOvw
 ## 版本
 
 ### 1.0.0 — 前后端流程测试
-### 1.1.0 — 修复 Progress Slider 不实时更新、任务数据迁移到服务器
+### 1.1.0 — 任务数据迁移到服务器并修复同步体验
 ### 1.2.0 — 新增账户界面
 ### 2.0.0 — 功能完善

@@ -1,0 +1,401 @@
+
+===== PAGE 1 =====
+浙江大学 2024–2025 学年春夏学期 
+《普通物理学Ⅰ（H）》课程期末考试试卷 
+课程号： 061R0060_，开课学院：_物理学系__ 
+考试试卷： √A 卷、B 卷（请在选定项上打√） 
+考试形式：√闭、开卷（请在选定项上打√） ，允许带_纸质词典，计算器入场 
+考试日期： 2025 年 6 月 16  日,考试时间： 120  分钟 
+诚信考试，沉着应考，杜绝违纪。 
+考生姓名：              学号：              所属院系：            _ 
+题序 一 二 三 四 五 六 七 八 总 分 
+得分          
+评卷人          
+ 
+I. Multiple Choice Questions (5 questions, each question 4 points, total 20 
+points) 
+1. (Rigid Body Rotation) A homogeneous cylinder with mass 
+m  and radius 
+R  
+is rolling without slipping on an inclined plane with an angle of 
+ . If the top of 
+the inclined plane is rel eased, when the cylinder rolls down a height of 
+h , the 
+velocity of its center of mass is:  
+A. 
+4 / 3gh     B. 
+2gh         C. 
+3 / 4gh      D. 
+/2gh  
+ 
+2. A plane harmonic wave propagates along the positive direction of the 
+x  axis 
+with a wave speed of 
+20 /u m s= . The vibration curve of the particle at 
+0x =  
+is 
+0.1cos(10 / 2)yt =+ . At 
+1ts= , the phase of the particle at the position 
+5xm=
+ is:  
+A. 
+3 / 2−        B. 
+−      C. 
+/2        D. 
+0  
+ 
+3. A stationary spaceship with a length of 
+0L  travels through a tunnel at a speed 
+of 
+0.8vc= . The ground observer measures the length of the tunnel to be exactly 
+0L
+. From the ground observer’s point of view, the time interval from the moment 
+the tail of the spaceship enters the tunnel until the head of the spaceship leaves 
+===== PAGE 2 =====
+the tunnel is:  
+A. 
+0 /Lc       B. 
+03 / 4Lc           C. 
+02 / 3Lc        D. 
+0 /2Lc  
+ 
+4. For 1 mole of a van der Waals gas  
+2[ /  ] ( )P a V V b RT+ − =   undergoing 
+isothermal expansion (from volume 
+12VV→  ), the entropy change  
+21ln[( - ) / ( )]S R V b V b = −
+. The condition for the validity of this result is: 
+A. Applicable only to ideal gases     
+B. The intermolecular attractions can be neglected 
+C. The volume of the molecules themselves can be neglected      
+D. Always holds true  
+ 
+5. A cylindrical container rotates uniformly around its central axis at an angular 
+velocity of 
+ . The liquid surface forms a parabolic shape, with the liquid level 
+at the edge being higher than the center by 
+H . If the rotational speed is doubled 
+to 
+2 , then 
+H  becomes: 
+A. 
+2H        B. 
+4H         C. 
+8H         D. 
+16H  
+ 
+2. Fill-in-the-blank questions (5 questions, each 4 points, total 20 points) 
+1. There is an transmitter (发射器) fixed on the seabed, emitting (发射) a beam 
+of ultrasound (超声波 ) with a frequency of 𝑓 = 30000 Hz . The wave is 
+reflected (反射) back by an approaching submarine (正在接近的潜艇 ). The 
+reflected wave and the initial wave combine to form a "beat" frequency of 
+𝑓beat = 241 Hz. Then the approaching speed of the submarine is 𝑣 = 6𝑚/𝑠_. 
+The speed of ultrasound in seawater is known to be 𝑐s = 1500 m/s. 
+ 
+2. A bullet of mass 
+m  and 
+0v  is horizontally shot into a uniform slender 
+rod (mass 
+M , length
+L ) at the lower end and embeds itself. The rod can freely 
+rotate around its upper end. The maximum swing angle 
+max  after the collision 
+satisfies 
+maxcos =1−3𝑚2𝑣02/(𝑀+3𝑚)(2𝑚+𝑀)𝑔𝐿. 
+ 
+3. A standing wave forms on a string, and the wave function is
+0.04cos(60 )sin(3 )y t x =
+ (SI). The maximum velocity on the string is 
+ 2.4π(7.54)  m/s. 
+ 
+===== PAGE 3 =====
+4. A heat engine operates between 
+500highTK =  and 
+300lowTK = . Each 
+cycle absorbs heat 
+1 1000QJ=  from the high-temperature heat source and 
+does work 
+300WJ= . This heat engine  can  (fill in "can" or "cannot") be 
+realized because  
+ Carnot's theorem or Second law of thermodynamics 40%>30% . 
+ 
+5. A rocket is vertically launched in a gravitational field, with a constant 
+jet velocity 
+u . If its mass variation law is 
+0 ( 0)tm m e  −= , then its 
+acceleration 
+a =   𝑢α−𝑔 (expressed in terms of 
+,,ug ).  
+ 
+III. Calculations (5 questions, total 60 points) 
+1. (15 points)  The fig ure shows two 22.7kg ice sleds that are placed a short 
+distance apart, one directly behind the other. A 3.63kg cat initially standing on 
+one sled jumps to another one and then back to the first. Both jumps are made at 
+a speed of 3.05m/s relative to the ice. W hat are the final speeds of (a) the first 
+sled and (b) another one.  
+ 
+ 
+ 
+ 
+ 
+ 1. 从左到右：  
+𝑚𝑣0+𝑀𝑣1=0⇒𝑣1=−𝑚𝑣0/𝑀（3分）  
+𝑚𝑣0=(𝑚+𝑀)𝑣2⇒𝑣2=𝑚𝑣0/(𝑀+𝑚)（3分）  
+从右到左：  
+(𝑚+𝑀)𝑣2=−m𝑣0+M𝑣2′（3分）⇒𝑣2′=2𝑚𝑣0/𝑀=0.975𝑚/𝑠（1分）  
+−𝑚𝑣0+𝑀𝑣1=(𝑚+𝑀)𝑣1′（3分）⇒𝑣1′=−2𝑚𝑣0/(𝑀+𝑚)=−0.841𝑚/𝑠（1分）  
+方向全对得 1 分 
+ 
+ 
+ 
+2. (15 points) A block of mass 4m is attached to a vertical spring or elastic string 
+with rest length 
+0l  and spring or string constant k. The block is made by glueing 
+two blocks of mass 3 m and m, respectively. Initially, the block is in equilibrium 
+and at rest (as shown in Figure 2). At t=0, the bottom block with mass 3 m falls 
+down. Considering hanging point on ceiling as x=0 and down-ward direction as 
+positive x,  
+(a) find the x-coordinate of the remaining block with mass m as a function of time 
+for the spring； 
+(b) give the period of the oscillation for the string. 
+                 
+
+===== PAGE 4 =====
+                              
+ 
+                                  Figure 2 
+For the Spring: Initially  k(x0 − l0) = 4𝑚𝑔 → 𝑥0 =
+4𝑚𝑔
+𝑘 + 𝑙0 by Hooke’s law,  
+(1 point)        
+where x0 is the initial position of the bucket. And after the 3m block falls, the position 
+where  the block is in equilibrium is x′ =
+𝑚𝑔
+𝑘 + 𝑙0 by the combined force of the 
+gravity and the elasticity of the spring.   (3 points) 
+So the amplitude of the simple harmonic motion is A = x0 − x′ =
+3𝑚𝑔
+𝑘 ; (1 point) 
+and a restoring force of kΔx will obviously lead to an oscillation frequency of ω =
+k
+m ; 
+(1 point)  
+So we can easily get the function of displacement 
+x(t) =
+mg
+k + 𝑙0 +
+3𝑚𝑔
+𝑘 cos (√ k
+m 𝑡)  (3 points) 
+the phase is 0 when we choose a cosine function. 
+For the String: the motion of the string is the same as the spring when x>𝑙0. MENTION: 
+x=𝑙0 is NOT the equilibrium position. (You would get at most 2 points in this part if 
+you take this mistake.) 
+And when x<𝑙0 the block do a vertical throwing motion. 
+The time for the block to rise from the bottom to x=𝑙0 is t0 = √
+𝑚
+𝑘 cos−1 (
+1
+3) using the 
+displacement function above.  (2 points) 
+ And the velocity at x= 𝑙0 is 
+dx
+dt |𝑥=𝑡0 = −2√2𝑔√𝑚/𝑘 and obviously the throwing 
+motion takes tthrow =
+4√2𝑚
+𝑘 .   (2 points) 
+So the total time of one period is 
+tsum = 2𝑡0 + 𝑡𝑡ℎ𝑟𝑜𝑤 = (2 cos−1 (
+1
+3) + 4√2)√
+𝑚
+𝑘    (2 points) 
+ 
+ 
+3. (10 points)1 mole of a diatomic ideal gas undergoes the following cycle: 
+(I) A→B: Isothermal expansion to 
+2BVV=  
+(II) B→C: constant pressure compression to 
+V  
+(III) C→A: Adiabatic compression back to the initial state 
+Given 
+600ATK= and 
+1.4 = . 
+(a) Find the entropy changes for each process; 
+(b) Calculate the cycle efficiency 
+  (accurate to 1%).  
+ 
+V
+p
+A
+B
+C
+T
+V
+2V
+===== PAGE 5 =====
+Answer:  
+7
+2
+5
+2
+7 1.45
+p
+V
+C R
+CR = = = =
+ （1 分） 
+11' 2
+TTV V−− =
+    
+5/21' ( ) 2VV=      （1 分） 
+22
+1
+27ln( ) ln 2 2
+VV
+VV
+dQ pdV RdV VS R R T T V V
+ = = = = =   
+    （2 分） 
+2
+77 ln( ) ln 222
+T p
+T
+C dTdQ TS R R T T T
+  = = = = −
+            （2 分） 
+3 0S=
+                            （1 分） 
+1
+7 ln 22Q RT=
+                     （1 分） 
+2
+7( ' ) 4
+pQ C T T RT= − = −
+             （1 分） 
+12
+1
+(7 / 2)ln 2 (7 / 4) 27.9%(7 / 2)ln 2
+QQ
+Q − −= = =
+     （1 分） 
+ 
+4. (10 points) Two particles with the same rest mass of 
+0m , particle I moving at 
+0.8c
+ in the positive 
+x  direction and particle II moving at 
+0.6c  in the negative 
+x
+ direction, collide head-on and combine into a composite particle. 
+(a) Calculate the rest mass 
+0m  of the composite particle; 
+(b) Determine the speed magnitude 
+v  of the composite particle.  
+ 
+(a) 
+22
+1 0 1 0 / 1 / 5 / 3m m v c m= − =     （1分） 
+22
+2 0 2 0 / 1 / 5 / 4m m v c m= − =
+    （1分） 
+1 1 1 0 0 (5 / 3)(4 / 5) 4 / 3p m v m c m c= = =
+      （1分）   
+2 2 2 0 0 (5 / 4)(3 / 5) 3 / 4p m v m c m c= = =
+       （1分） 
+ 
+能量守恒：  
+  
+2 2 2 2
+1 2 0 35 /12m c m c mc m c+ = =       （2分） 
+ 
+动量守恒： 
+1 2 0 7 /12p p p m c− = =
+                   （1分） 
+2 2 2 2 2
+00( ) ( ) 7 / 6 7 / 6Mc mc pc m c M m= − =  =
+       （1分） 
+V 
+ 
+===== PAGE 6 =====
+ 
+(b)  
+2 2 2
+2 2 2 2 2 2
+00
+/ 1 /
+1 ( / ) 1 (7 / 6) / (35 /12) 0.2
+E Mc v c
+v c Mc E c m c m c c
+= − 
+= − = − = （2分） 
+ 
+===== PAGE 7 =====
+5. (10 points)As shown in the figure, sound of frequency  
+   is emitted by 
+plane wave source 
+ . Sound ray 
+  extends directly to detector (接收器) 
+ , at distance 
+. Sound ray  
+  extends to 
+  via a reflection of the sound at a flat surface. 
+That reflection occurs on a perpendicular bisector (中垂线) to the 
+  line, at distance 
+ from the line. When the two waves arrive at the 
+  point, they will interfere (干涉). 
+The reflective surface can be seen as a fixed boundary (固定边界). The sound speed in 
+the air is 
+ . Ignore any attenuation (衰减).  
+(a) Find the minimum  
+   (other than zero) that maximizes the intensity of the 
+interference wave at point 
+ . 
+(b) Find the minimum  
+   (other than zero) that minimizes the intensity of the 
+interference wave at point 
+ . 
+ 
+ 
+ 
+ 
+Solution: (a) First, calculate the wavelength of the sound wave. 
+= / 0.858u f m =
+ (2 points) 
+In the direct path (as shown in the figure), the distance traveled by the sound wave. 
+1 10.0l L m==
+ 
+In the reflected path (as shown in the figure), the distance traveled by the sound wave 
+(and due to the reflecting surface being a fixed end, there will be half-wave loss, which 
+equivalently increases (or decreases) the distance by a certain amount) 
+22
+2 4 / 2l L d = + +
+ 
+When the two waves interfere constructively (that is, when they reach the same point 
+and superimpose, the intensity is the maximum), it requires that the difference in wave 
+path of the two waves be an integer multiple. If we denote the integer as n, then it is 
+22
+21 4 / 2l l l L d L n  = − = + + − =
+ (3 points)  
+That is to say 
+22{[( 1/ 2) ] }/ 4d n L L = − + −
+ 
+To make d the minimum, we can take n=1. Therefore, the solution is as follows, 
+1.48md =
+                (1 point) 
+
+===== PAGE 8 =====
+(b) Similar to the previous question, but since it is required that the two waves interfere 
+destructively (that is, the intensity is the minimum when they superimpose at the 
+destination), therefore, the path difference of the two w aves should be a  half integer 
+multiple of 
+ , if n is used to represent the integer, then it is  
+22
+21 4 / 2 ( 1/ 2)l l l L d L n  = − = + + − = +
+ (3 point) 
+That is to say 
+22[( ) ] / 4d n L L = + −
+ 
+To make d the minimum, we can take n=1. Therefore, the solution is as follows: 
+2.12md =
+         (1 point) 

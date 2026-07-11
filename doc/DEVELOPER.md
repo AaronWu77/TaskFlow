@@ -237,13 +237,14 @@ PUT    /tasks/reorder     → 批量更新 sortOrder（拖拽排序）
 ```
 priority: P1 | P2 | P3
 status: todo | doing | done | snoozed | skipped
-progress: 0-100 integer
 estimateMinutes: 1-1440 integer
 sortOrder: 0-1000000 integer
 dueDate: YYYY-MM-DD
 reminderAt/deletedAt: valid ISO datetime
 repeatRule: none | daily | weekly | monthly
 ```
+
+旧客户端传入的 `progress` 仍会被后端校验并接受，用于一个兼容版本；v1 客户端不再读取、展示或写入该字段。
 
 普通 `GET /tasks` 默认排除 `deletedAt != null` 的软删除任务。
 
@@ -338,7 +339,7 @@ model Task {
   estimateMinutes Int
   status          String   // "todo" | "doing" | "done" | "snoozed" | "skipped"
   tag             String?
-  progress        Int      @default(0)   // 0–100
+  progress        Int      @default(0)   // legacy compatibility
   dueDate         String?  // "YYYY-MM-DD"
   sortOrder       Int      @default(0)   // 用户自定义位置
   createdAt       DateTime @default(now())

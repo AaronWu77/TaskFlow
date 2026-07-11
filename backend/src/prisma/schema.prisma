@@ -41,6 +41,7 @@ model Task {
   dueDate         String?  // YYYY-MM-DD
   reminderAt      String?  // ISO datetime
   repeatRule      String?  // none | daily | weekly | monthly
+  repeatUntilDate String?  // YYYY-MM-DD
   completedAt     String?  // ISO datetime set by server when completed
   deletedAt       String?  // ISO datetime for soft delete / undo
   sortOrder       Int      @default(0)

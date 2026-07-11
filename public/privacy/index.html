@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TaskFlow Privacy Policy</title>
+    <style>
+      body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17202a; background: #f7f8fa; line-height: 1.65; }
+      main { max-width: 920px; margin: 0 auto; padding: 32px 18px 56px; }
+      section { background: #fff; border: 1px solid #e6e8ec; border-radius: 8px; padding: 22px; margin: 16px 0; }
+      h1, h2, h3 { line-height: 1.25; margin: 0 0 12px; }
+      h1 { font-size: 30px; }
+      h2 { font-size: 20px; margin-top: 4px; }
+      h3 { font-size: 16px; }
+      p, li { font-size: 15px; }
+      a { color: #2563eb; }
+      table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
+      th, td { border: 1px solid #e6e8ec; padding: 10px; text-align: left; vertical-align: top; }
+      th { background: #f1f3f5; }
+      .meta { color: #667085; font-size: 14px; }
+      .lang { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+      .lang a { font-weight: 700; text-decoration: none; }
+      @media (max-width: 640px) { main { padding: 22px 12px 44px; } section { padding: 16px; } table { display: block; overflow-x: auto; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section>
+        <h1>TaskFlow 隐私政策</h1>
+        <p class="meta">版本：1.0.1 | 更新日期：2026-07-10 | 生效日期：2026-07-10</p>
+        <p>TaskFlow 是一个面向个人的任务记录、聚焦和跨设备同步工具。本政策说明我们收集哪些数据、如何使用、保存多久，以及你如何删除账号和数据。</p>
+        <div class="lang"><a href="#en">English version</a><a href="/support/">支持与账号删除</a></div>
+      </section>
+
+      <section>
+        <h2>我们收集的数据</h2>
+        <ul>
+          <li>账号数据：邮箱地址、邮箱验证状态、密码哈希、登录会话和刷新令牌。</li>
+          <li>任务内容：任务标题、优先级、标签、截止日期、估时、提醒时间、重复设置、完成或跳过状态、排序和更新时间。</li>
+          <li>同步和必要诊断数据：同步操作 ID、版本冲突信息、创建/更新时间、请求限流和安全日志。</li>
+          <li>本地通知数据：你设置的提醒时间会保存在本机，用于触发系统通知。</li>
+        </ul>
+        <p>我们不会收集通讯录、精确位置、相册、广告标识符或跨 App 追踪数据。</p>
+      </section>
+
+      <section>
+        <h2>用途、关联性和保留期限</h2>
+        <table>
+          <thead><tr><th>数据项</th><th>用途</th><th>是否关联账号</th><th>是否追踪</th><th>保存位置与期限</th></tr></thead>
+          <tbody>
+            <tr><td>邮箱地址</td><td>登录、验证、账号支持</td><td>是</td><td>否</td><td>服务器；账号存在期间保留，删除账号后按删除流程移除。</td></tr>
+            <tr><td>密码哈希</td><td>账号认证</td><td>是</td><td>否</td><td>服务器；不保存明文密码。</td></tr>
+            <tr><td>任务标题、标签、日期、提醒、重复设置</td><td>任务管理、日历展示、跨设备同步</td><td>是</td><td>否</td><td>服务器与本地缓存；账号删除后删除服务器数据，本地数据在退出或删除账号时清理。</td></tr>
+            <tr><td>完成记录和统计</td><td>今日完成数、连续完成天数和同步一致性</td><td>是</td><td>否</td><td>服务器与本地缓存；账号删除后删除。</td></tr>
+            <tr><td>同步操作和必要安全日志</td><td>离线同步、冲突恢复、防滥用和排障</td><td>可能关联</td><td>否</td><td>服务器；只在服务运行和安全排查所需期限内保留。</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>服务提供商</h2>
+        <p>TaskFlow 使用 Resend 发送邮箱验证码和必要账号邮件。Resend 只接收发送邮件所需的邮箱地址、邮件主题和邮件内容。我们没有接入广告 SDK、第三方分析 SDK 或跨站追踪服务。</p>
+      </section>
+
+      <section>
+        <h2>账号删除</h2>
+        <p>你可以在 App 的账号页选择“删除账号”。删除会移除你的账号、已同步任务、完成统计、刷新会话和服务器端任务数据。删除请求通常会立即执行；备份或安全日志中的残留记录会在例行保留周期内清除，法律要求保留的记录除外。</p>
+        <p>如果你无法登录，可以通过 <a href="mailto:support@taskflow.top">support@taskflow.top</a> 请求协助删除。</p>
+      </section>
+
+      <section>
+        <h2>App Store Connect 隐私标签映射</h2>
+        <table>
+          <thead><tr><th>代码/服务数据项</th><th>App Store Connect 标签</th><th>关联账号</th><th>用于追踪</th><th>用途</th></tr></thead>
+          <tbody>
+            <tr><td>Auth API、用户表、Resend 邮件</td><td>Email Address, User ID</td><td>是</td><td>否</td><td>App Functionality, Account Management</td></tr>
+            <tr><td>任务 API、本地缓存、WebView 内容</td><td>Other User Content</td><td>是</td><td>否</td><td>App Functionality</td></tr>
+            <tr><td>完成记录、同步状态、冲突版本</td><td>Product Interaction</td><td>是</td><td>否</td><td>App Functionality, Diagnostics</td></tr>
+            <tr><td>本地通知计划</td><td>Other User Content</td><td>仅本机</td><td>否</td><td>App Functionality</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="en" lang="en">
+        <h1>TaskFlow Privacy Policy</h1>
+        <p class="meta">Version 1.0.1 | Last updated July 10, 2026 | Effective July 10, 2026</p>
+        <p>TaskFlow is a personal task capture, focus, and sync app. We collect account data, task content, completion history, sync metadata, and the minimum diagnostic data needed to operate the service. We do not use advertising SDKs, analytics SDKs, advertising identifiers, or cross-app tracking.</p>
+        <h2>Data We Collect and Why</h2>
+        <ul>
+          <li>Email address, verification state, password hash, and sessions: account login, verification, and support.</li>
+          <li>Task title, priority, tag, due date, estimate, reminder time, repeat setting, status, order, and timestamps: task management and cross-device sync.</li>
+          <li>Sync operation IDs, conflict metadata, rate-limit and security logs: offline sync, recovery, abuse prevention, and troubleshooting.</li>
+          <li>Local notification schedules: device reminders selected by you.</li>
+        </ul>
+        <h2>Providers, Retention, and Deletion</h2>
+        <p>We use Resend to send verification and account emails. Resend receives the email address and message content needed to deliver those emails. Account and task data is retained while your account exists. You can delete your account in the app account page; synced tasks, stats, sessions, and account records are deleted, except where law or security obligations require limited retention.</p>
+        <p>Contact: <a href="mailto:support@taskflow.top">support@taskflow.top</a></p>
+      </section>
+    </main>
+  </body>
+</html>

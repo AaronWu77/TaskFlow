@@ -10,7 +10,6 @@ TaskFlow replaces the anxiety of a never-ending list with a card-stack interface
 - **Calendar view** — monthly grid with per-day task lists and inline task detail modal
 - **Drag-to-reorder** — bottom sheet with grip handles to reprioritize your queue
 - **Smart insertion** — new tasks are automatically placed at the right position by deadline then priority
-- **Progress tracking** — per-task progress slider (0–100 %) with a live wave fill animation
 - **Daily streak** — consecutive completion days tracked and synced
 - **Repeat task** — re-queue a completed task with one tap from the calendar
 - **Auth** — email + password registration/login; JWT access token + httpOnly refresh cookie
@@ -112,7 +111,6 @@ interface Task {
   estimateMinutes: number;
   status: 'todo' | 'doing' | 'done' | 'snoozed' | 'skipped';
   tag?: string;                    // Work | Personal | Study | Planning | Health | Other
-  progress: number;                // 0–100
   dueDate?: string | null;         // 'YYYY-MM-DD'
   sortOrder: number;               // user-defined position in flow
 }
@@ -201,4 +199,3 @@ TaskFlow/
 
 UI design and asset generation by [Figma Make](https://www.figma.com/design/qG1eukwOvwztxOcpCx1h5j/).  
 Third-party attributions are listed in [ATTRIBUTIONS.md](./ATTRIBUTIONS.md).
-
