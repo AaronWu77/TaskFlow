@@ -2,6 +2,7 @@
 // in production set VITE_API_URL to your server (e.g. https://yourdomain.com/api)
 import { Preferences } from '@capacitor/preferences';
 import { Capacitor } from '@capacitor/core';
+import { createSingleFlight } from './sync-core.mjs';
 
 const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || 'http://localhost:3000';
 
@@ -82,7 +83,7 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}
 
 /** Attempt a silent token refresh using the httpOnly refresh cookie plus a stored fallback token.
  *  The fallback keeps dev web and Capacitor sessions alive when cookies are not persisted. */
-export async function apiRefreshDetailed(): Promise<RefreshResult> {
+async function performRefresh(): Promise<RefreshResult> {
   try {
     const storedRefreshToken = await getStoredRefreshToken();
     const headers: Record<string, string> = {};
@@ -102,6 +103,12 @@ export async function apiRefreshDetailed(): Promise<RefreshResult> {
   } catch {
     return 'network';
   }
+}
+
+const runRefreshSingleFlight = createSingleFlight(performRefresh);
+
+export async function apiRefreshDetailed(): Promise<RefreshResult> {
+  return runRefreshSingleFlight();
 }
 
 export function getRefreshedUser(): AuthUser | null {
@@ -260,8 +267,86 @@ export interface TaskDTO {
   completedAt: string | null;
   deletedAt: string | null;
   sortOrder: number;
+  version: number;
+  lastChangedByDeviceId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SyncChangeDTO {
+  id: string;
+  userId: string;
+  seq: number;
+  taskId: string | null;
+  operationId: string | null;
+  deviceId: string | null;
+  type: string;
+  snapshot: TaskDTO | { order?: Array<{ id: string; sortOrder: number }>; taskOrderVersion?: number } | null;
+  tombstone: { taskId?: string; deletedAt?: string | null; permanentlyDeletedAt?: string; version?: number } | null;
+  createdAt: string;
+}
+
+export interface UserStatsDTO {
+  streak: number;
+  streakDate: string | null;
+  completedToday: string;
+  todayCount: number;
+}
+
+export interface SyncBootstrapDTO {
+  tasks: TaskDTO[];
+  deletedTasks: TaskDTO[];
+  userStats: UserStatsDTO | null;
+  currentCursor: number;
+  taskOrderVersion: number;
+  serverTime: string;
+}
+
+export interface PendingSyncOperationDTO {
+  operationId: string;
+  type: string;
+  taskId?: string;
+  clientTaskId?: string;
+  baseVersion?: number | null;
+  baseOrderVersion?: number | null;
+  payload?: unknown;
+}
+
+export interface SyncPushResponseDTO {
+  accepted: Array<{ operationId: string; task?: TaskDTO; change?: SyncChangeDTO; clientTaskId?: string; order?: { order: Array<{ id: string; sortOrder: number }>; taskOrderVersion: number }; tombstone?: unknown; replayed?: boolean }>;
+  conflicts: Array<{ operationId: string; code: string; serverTask?: TaskDTO; serverVersion?: number; clientOperation?: PendingSyncOperationDTO; serverOrderVersion?: number }>;
+  rejected: Array<{ operationId?: string; code: string; error: string }>;
+  nextCursorHint: number;
+}
+
+export async function apiSyncBootstrap(): Promise<SyncBootstrapDTO> {
+  const res = await apiFetch('/sync/bootstrap');
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to bootstrap sync' })) as { error?: string; code?: string };
+    throw new ApiError(err.error || 'Failed to bootstrap sync', res.status, err.code, err);
+  }
+  return res.json() as Promise<SyncBootstrapDTO>;
+}
+
+export async function apiPullChanges(cursor: number, limit = 500): Promise<{ changes: SyncChangeDTO[]; nextCursor: number; hasMore: boolean; serverTime: string }> {
+  const res = await apiFetch(`/sync?cursor=${encodeURIComponent(String(cursor))}&limit=${encodeURIComponent(String(limit))}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to pull sync changes' })) as { error?: string; code?: string };
+    throw new ApiError(err.error || 'Failed to pull sync changes', res.status, err.code, err);
+  }
+  return res.json() as Promise<{ changes: SyncChangeDTO[]; nextCursor: number; hasMore: boolean; serverTime: string }>;
+}
+
+export async function apiPushOperations(deviceId: string, operations: PendingSyncOperationDTO[]): Promise<SyncPushResponseDTO> {
+  const res = await apiFetch('/sync/push', {
+    method: 'POST',
+    body: JSON.stringify({ deviceId, operations }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to push sync operations' })) as { error?: string; code?: string };
+    throw new ApiError(err.error || 'Failed to push sync operations', res.status, err.code, err);
+  }
+  return res.json() as Promise<SyncPushResponseDTO>;
 }
 
 export async function apiGetTasks(): Promise<TaskDTO[]> {
@@ -358,8 +443,8 @@ export async function apiRestoreTask(id: string, data?: { operationId?: string; 
 export async function apiPermanentDeleteTask(id: string): Promise<void> {
   const res = await apiFetch(`/tasks/${encodeURIComponent(id)}/permanent`, { method: 'DELETE' });
   if (!res.ok && res.status !== 404) {
-    const err = await res.json().catch(() => ({ error: 'Failed to permanently delete task' })) as { error: string };
-    throw new Error(err.error || 'Failed to permanently delete task');
+    const err = await res.json().catch(() => ({ error: 'Failed to permanently delete task' })) as { error?: string; code?: string };
+    throw new ApiError(err.error || 'Failed to permanently delete task', res.status, err.code, err);
   }
 }
 
@@ -374,13 +459,6 @@ export async function apiReorderTasks(order: Array<{ id: string; sortOrder: numb
 }
 
 // ── User Stats ──
-
-export interface UserStatsDTO {
-  streak: number;
-  streakDate: string | null;
-  completedToday: string;
-  todayCount: number;
-}
 
 export async function apiGetUserStats(): Promise<UserStatsDTO> {
   const res = await apiFetch('/user/stats');

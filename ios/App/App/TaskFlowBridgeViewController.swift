@@ -2,7 +2,7 @@ import Capacitor
 import SwiftUI
 import WebKit
 
-private let taskFlowBridgeVersion = 1
+private let taskFlowBridgeVersion = 2
 
 struct TaskFlowNativeTask: Equatable {
     let id: String
@@ -17,6 +17,7 @@ struct TaskFlowNativeTask: Equatable {
 }
 
 final class TaskFlowNativeBridgeCoordinator: NSObject, ObservableObject, WKScriptMessageHandler {
+    @Published var appState = "loading"
     @Published var currentView = "flow"
     @Published var currentTask: TaskFlowNativeTask?
     @Published var pendingCount = 0
@@ -100,6 +101,16 @@ final class TaskFlowNativeBridgeCoordinator: NSObject, ObservableObject, WKScrip
     private func applyReactState(_ payload: [String: Any]) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            appState = payload["appState"] as? String ?? "loading"
+            if appState != "app" {
+                currentView = "flow"
+                currentTask = nil
+                pendingCount = 0
+                canComplete = false
+                isSyncing = false
+                isSheetOpen = false
+                return
+            }
             currentView = payload["currentView"] as? String ?? "flow"
             pendingCount = intValue(from: payload["pendingCount"]) ?? 0
             canComplete = boolValue(from: payload["canComplete"]) ?? false
@@ -214,9 +225,16 @@ struct TaskFlowNativeOverlay: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, max(10, coordinator.keyboardOffset))
         }
-        .opacity(coordinator.isSheetOpen ? 0 : 1)
-        .allowsHitTesting(!coordinator.isSheetOpen)
+        .opacity(coordinator.appState == "app" && !coordinator.isSheetOpen ? 1 : 0)
+        .allowsHitTesting(coordinator.appState == "app" && !coordinator.isSheetOpen)
+        .accessibilityHidden(coordinator.appState != "app" || coordinator.isSheetOpen)
         .animation(.easeOut(duration: 0.16), value: coordinator.isSheetOpen)
+        .animation(.easeOut(duration: 0.16), value: coordinator.appState)
+        .onChange(of: coordinator.appState) { _, state in
+            if state != "app" {
+                activeSheet = nil
+            }
+        }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .quickCreate:

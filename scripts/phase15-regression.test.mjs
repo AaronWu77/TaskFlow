@@ -22,8 +22,8 @@ test('SwiftUI native shell owns iOS add and details sheets', () => {
   const swift = read('ios/App/App/TaskFlowBridgeViewController.swift');
   assert.match(swift, /private var topNavigation: some View/);
   assert.match(swift, /private var bottomActions: some View/);
-  assert.match(swift, /\.opacity\(coordinator\.isSheetOpen \? 0 : 1\)/);
-  assert.match(swift, /\.allowsHitTesting\(!coordinator\.isSheetOpen\)/);
+  assert.match(swift, /coordinator\.appState == "app" && !coordinator\.isSheetOpen/);
+  assert.match(swift, /\.accessibilityHidden\(coordinator\.appState != "app" \|\| coordinator\.isSheetOpen\)/);
   assert.match(swift, /TaskFlowQuickCreateSheet/);
   assert.match(swift, /TaskFlowTaskDetailsSheet/);
   assert.match(swift, /DatePicker\("Due date"/);
@@ -42,9 +42,32 @@ test('core task behavior paths remain covered by regression checks', () => {
   assert.match(app, /case 'snoozeCurrent':/);
   assert.match(app, /handleAction\(current\.id, 'snooze'\)/);
   assert.match(app, /if \(!cloudSyncEnabled\)/);
-  assert.match(app, /isTaskConflictError\(error\)/);
-  assert.match(app, /TASK_CONFLICT|sync\.conflict|_conflict/);
+  assert.match(app, /isOperationReady/);
+  assert.match(app, /remapOperationIds/);
+  assert.match(app, /removeTaskFromOperation/);
+  assert.match(app, /ConflictResolutionPage/);
+  assert.match(app, /conflictFieldsFor/);
+  assert.match(app, /type:\s*'resolve-conflict'/);
+  assert.match(app, /syncConflict\.open/);
+  assert.match(app, /apiPushOperations\(getDeviceId\(user\.id\), readyPending\)/);
+  assert.match(app, /apiPullChanges\(cursor\)/);
+  assert.match(app, /status === 'conflict'/);
   assert.match(app, /normalizeCachedTask/);
+});
+
+test('Flow card position and task exit motion stay tuned for Phase 16', () => {
+  const app = read('src/app/App.tsx');
+  assert.match(app, /isNativeShell \? 'mt-\[clamp\(4\.25rem,9vh,6rem\)\]' : 'mt-\[clamp\(1\.75rem,5vh,3\.25rem\)\]'/);
+  assert.match(app, /offset=\{\{ top: isNativeShell \? 'calc\(env\(safe-area-inset-top\) \+ 28px\)' : '10px' \}\}/);
+  assert.match(app, /mobileOffset=\{\{[\s\S]*left: '16px'[\s\S]*right: '16px'[\s\S]*\}\}/);
+  assert.match(app, /style=\{\{ '--width': '360px' \} as React\.CSSProperties\}/);
+  assert.match(app, /minHeight: '42px'/);
+  assert.match(app, /borderRadius: '24px'/);
+  assert.match(app, /isNativeShell \? 'pb-\[calc\(env\(safe-area-inset-bottom\)\+8\.5rem\)\]' : 'pb-4'/);
+  assert.match(app, /if \(action === 'complete'\)[\s\S]*y: -82[\s\S]*scale: 0\.94/);
+  assert.match(app, /if \(action === 'skip'\)[\s\S]*x: -132[\s\S]*rotate: -4/);
+  assert.match(app, /if \(action === 'snooze'\)[\s\S]*y: 112[\s\S]*x: 72/);
+  assert.match(app, /stiffness: 340, damping: 34, mass: 0\.72/);
 });
 
 test('iOS release scope remains iPhone portrait on iOS 17 with privacy manifest', () => {
@@ -76,12 +99,55 @@ test('public privacy and support pages contain App Store required disclosures', 
   assert.match(support, /Account deletion/);
 });
 
-test('plan is closed after Phase 15 and no longer lists stale phase work', () => {
+test('plan tracks the new multi-device sync architecture without legacy compatibility requirements', () => {
   const plan = read('doc/plan.md');
-  assert.match(plan, /T6：.*\[x\]|- \[x\] T6/);
-  assert.match(plan, /T7：.*\[x\]|- \[x\] T7/);
-  assert.match(plan, /T8：.*\[x\]|- \[x\] T8/);
-  assert.doesNotMatch(plan, /### Phase 13/);
-  assert.doesNotMatch(plan, /### Phase 14/);
-  assert.doesNotMatch(plan, /### Phase 15/);
+  assert.match(plan, /TaskFlow 多端同步完善计划/);
+  assert.match(plan, /不要求前向兼容旧同步协议/);
+  assert.match(plan, /TaskChange/);
+  assert.match(plan, /pendingOperations/);
+  assert.match(plan, /\/sync\/push/);
+  assert.doesNotMatch(plan, /Phase 17：/);
+});
+
+test('Phase 17 adopts UIScene and gates native controls on authenticated app state', () => {
+  const info = read('ios/App/App/Info.plist');
+  const project = read('ios/App/App.xcodeproj/project.pbxproj');
+  const scene = read('ios/App/App/SceneDelegate.swift');
+  const app = read('src/app/App.tsx');
+  const swift = read('ios/App/App/TaskFlowBridgeViewController.swift');
+  assert.match(info, /UIApplicationSceneManifest/);
+  assert.match(info, /UISceneDelegateClassName/);
+  assert.match(info, /UISceneStoryboardFile/);
+  assert.doesNotMatch(info, /UIMainStoryboardFile/);
+  assert.match(project, /SceneDelegate\.swift in Sources/);
+  assert.match(scene, /UIWindowSceneDelegate/);
+  assert.match(scene, /ApplicationDelegateProxy\.shared\.application/);
+  assert.match(app, /protocolVersion:\s*2/);
+  assert.match(app, /appState:\s*'app'/);
+  assert.match(swift, /taskFlowBridgeVersion = 2/);
+  assert.match(swift, /if appState != "app"/);
+});
+
+test('new sync engine uses cursor-based push-pull instead of legacy dirty flush', () => {
+  const app = read('src/app/App.tsx');
+  const api = read('src/app/api.ts');
+  const backend = read('backend/src/routes/sync.ts');
+  const schema = read('backend/src/prisma/schema.prisma');
+  assert.match(app, /syncInFlightRef\.current/);
+  assert.match(app, /syncRequestedRef\.current/);
+  assert.match(app, /pendingOperationsRef\.current/);
+  assert.match(app, /apiPushOperations/);
+  assert.match(app, /apiPullChanges/);
+  assert.match(app, /syncCursor/);
+  assert.doesNotMatch(app, /flushDirtyTasks/);
+  assert.doesNotMatch(app, /apiReorderTasks/);
+  assert.doesNotMatch(app, /apiCreateTask/);
+  assert.doesNotMatch(app, /apiUpdateTask/);
+  assert.match(api, /createSingleFlight\(performRefresh\)/);
+  assert.match(api, /apiSyncBootstrap/);
+  assert.match(api, /apiPushOperations/);
+  assert.match(backend, /router\.post\('\/push'/);
+  assert.match(backend, /recordChange/);
+  assert.match(schema, /model TaskChange/);
+  assert.match(schema, /model UserSyncState/);
 });

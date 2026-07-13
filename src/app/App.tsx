@@ -11,7 +11,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
 import { storageGet, storageSet, storageRemove, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetTasks, apiCreateTask, apiUpdateTask, apiReorderTasks, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, apiGetDeletedTasks, apiRestoreTask, apiPermanentDeleteTask, apiDeleteAccount, isTaskConflictError, type AuthUser, type TaskDTO } from './api';
+import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, apiDeleteAccount, apiSyncBootstrap, apiPullChanges, apiPushOperations, type AuthUser, type TaskDTO, type PendingSyncOperationDTO, type SyncChangeDTO } from './api';
 import { toast, Toaster } from 'sonner';
 import { cn } from './components/ui/utils';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
@@ -22,6 +22,7 @@ import { LocalNotifications } from '@capacitor/local-notifications';
 type Priority = 'P1' | 'P2' | 'P3';
 type TaskStatus = 'todo' | 'doing' | 'done' | 'snoozed' | 'skipped';
 type ViewMode = 'flow' | 'calendar';
+type AppState = 'loading' | 'auth' | 'app';
 type ExitAction = 'complete' | 'skip' | 'snooze';
 type TaskActionState = { taskId: string; action: ExitAction };
 type NotificationPermissionState = 'unsupported' | 'prompt' | 'granted' | 'denied';
@@ -56,9 +57,10 @@ type NativeBridgeActionMessage = {
 type NativeBridgeState = {
   source: 'taskflow.react';
   type: 'uiState';
-  protocolVersion: 1;
+  protocolVersion: 2;
   sequence: number;
   payload: {
+    appState: AppState;
     currentView: ViewMode;
     currentTask: {
       id: string;
@@ -106,16 +108,33 @@ interface Task {
   completedAt?: string | null;
   deletedAt?: string | null;
   sortOrder: number;
+  version?: number;
+  lastChangedByDeviceId?: string | null;
   updatedAt?: string;
   _dirty?: boolean; // local-only: true if pending sync to server
-  _syncState?: 'create' | 'update'; // local-only: tells sync whether to POST or PATCH
+  _syncState?: 'create' | 'update' | 'permanent-delete'; // local-only: operation to replay
   _operationId?: string; // local-only: stable idempotency key for retries
   _conflict?: boolean; // local-only: true when server rejected update due to a newer version
+  _syncError?: boolean; // local-only: non-retryable operation needs a new user edit
   _clientKey?: string; // local-only: stable reference while a local id is replaced during sync
 }
 
 // Sync metadata
-type SyncMeta = { lastSync: string };
+type SyncMeta = { syncCursor: number; lastSuccessfulSyncAt: string; taskOrderVersion: number };
+type ConflictType = 'field' | 'delete-edit' | 'order' | 'permanent-delete';
+type PendingOperation = PendingSyncOperationDTO & {
+  createdAt: string;
+  retryCount: number;
+  status: 'pending' | 'conflict' | 'failed';
+  conflictType?: ConflictType;
+  serverTask?: TaskDTO;
+  serverVersion?: number;
+  serverOrderVersion?: number;
+  clientPayload?: unknown;
+  baseTaskSnapshot?: Record<string, unknown>;
+  conflictedFields?: string[];
+  detectedAt?: string;
+};
 const SESSION_KEY = 'taskflow_session';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -155,6 +174,7 @@ function clearUserLocalCache(userId: string): void {
   storageRemove(userStorageKey(userId, 'streak'));
   storageRemove(userStorageKey(userId, 'completed_today'));
   storageRemove(userStorageKey(userId, 'sync_meta'));
+  storageRemove(userStorageKey(userId, 'pending_operations'));
 }
 
 function loadSession(): SessionMeta | null {
@@ -219,23 +239,107 @@ function isSessionExpired(session: SessionMeta): boolean {
 function loadSyncMeta(userId: string): SyncMeta {
   try {
     const raw = storageGet(userStorageKey(userId, 'sync_meta'));
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<SyncMeta> & { lastSync?: string };
+      return {
+        syncCursor: Number.isInteger(parsed.syncCursor) ? parsed.syncCursor as number : 0,
+        lastSuccessfulSyncAt: parsed.lastSuccessfulSyncAt || parsed.lastSync || '',
+        taskOrderVersion: Number.isInteger(parsed.taskOrderVersion) ? parsed.taskOrderVersion as number : 1,
+      };
+    }
   } catch { /**/ }
-  return { lastSync: '' };
+  return { syncCursor: 0, lastSuccessfulSyncAt: '', taskOrderVersion: 1 };
 }
 
 function saveSyncMeta(userId: string, meta: SyncMeta) {
   storageSet(userStorageKey(userId, 'sync_meta'), JSON.stringify(meta));
 }
 
-/** Mark a task as dirty (in-memory only — cache save via useEffect) */
-function markDirty(tasks: Task[], id: string, syncState: Task['_syncState'] = 'update', operationId?: string): Task[] {
-  return tasks.map(t => t.id === id ? { ...t, _dirty: true, _conflict: false, _operationId: operationId || t._operationId || syncOperationId(), _syncState: t.id.startsWith('local-') ? 'create' : syncState } : t);
+function loadPendingOperations(userId: string): PendingOperation[] {
+  try {
+    const raw = storageGet(userStorageKey(userId, 'pending_operations'));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((operation): operation is PendingOperation =>
+      !!operation
+      && typeof operation === 'object'
+      && typeof (operation as PendingOperation).operationId === 'string'
+      && typeof (operation as PendingOperation).type === 'string'
+    );
+  } catch { /**/ }
+  return [];
 }
 
-/** Mark a task as clean (in-memory only — cache save via useEffect) */
-function markClean(tasks: Task[], id: string): Task[] {
-  return tasks.map(t => t.id === id ? { ...t, _dirty: false, _syncState: undefined, _operationId: undefined, _conflict: false } : t);
+function savePendingOperations(userId: string, operations: PendingOperation[]) {
+  storageSet(userStorageKey(userId, 'pending_operations'), JSON.stringify(operations));
+}
+
+function getDeviceId(userId: string): string {
+  const key = userStorageKey(userId, 'device_id');
+  const existing = storageGet(key);
+  if (existing) return existing;
+  const next = `device-${syncOperationId()}`;
+  storageSet(key, next);
+  return next;
+}
+
+function isLocalTaskId(id: string | null | undefined): boolean {
+  return !!id && id.startsWith('local-');
+}
+
+function hasOrderPayload(payload: unknown): payload is { order: Array<{ id: string; sortOrder: number }> } {
+  return !!payload
+    && typeof payload === 'object'
+    && Array.isArray((payload as { order?: unknown }).order);
+}
+
+function isOperationReady(operation: PendingOperation): boolean {
+  if (operation.type === 'create') return true;
+  if (isLocalTaskId(operation.taskId)) return false;
+  if (hasOrderPayload(operation.payload)) {
+    return !operation.payload.order.some(item => isLocalTaskId(item.id));
+  }
+  return true;
+}
+
+function remapOperationIds(operation: PendingOperation, replacements: Map<string, string>): PendingOperation {
+  const nextTaskId = operation.taskId && replacements.has(operation.taskId)
+    ? replacements.get(operation.taskId)
+    : operation.taskId;
+  const nextPayload = hasOrderPayload(operation.payload)
+    ? {
+      ...operation.payload,
+      order: operation.payload.order.map(item => ({
+        ...item,
+        id: replacements.get(item.id) ?? item.id,
+      })),
+    }
+    : operation.payload;
+  return {
+    ...operation,
+    taskId: nextTaskId,
+    payload: nextPayload,
+  };
+}
+
+function removeTaskFromOperation(operation: PendingOperation, taskId: string): PendingOperation | null {
+  if (operation.taskId === taskId || operation.clientTaskId === taskId) return null;
+  if (hasOrderPayload(operation.payload)) {
+    return {
+      ...operation,
+      payload: {
+        ...operation.payload,
+        order: operation.payload.order.filter(item => item.id !== taskId),
+      },
+    };
+  }
+  return operation;
+}
+
+/** Mark a task as dirty (in-memory only — cache save via useEffect) */
+function markDirty(tasks: Task[], id: string, syncState: Task['_syncState'] = 'update', operationId?: string): Task[] {
+  return tasks.map(t => t.id === id ? { ...t, _dirty: true, _conflict: false, _syncError: false, _operationId: operationId || t._operationId || syncOperationId(), _syncState: t.id.startsWith('local-') ? 'create' : syncState } : t);
 }
 
 function syncOperationId(): string {
@@ -259,6 +363,68 @@ function taskPatch(t: Task) {
     deletedAt: t.deletedAt,
     sortOrder: t.sortOrder,
   };
+}
+
+const MERGE_FIELDS = [
+  'title',
+  'priority',
+  'estimateMinutes',
+  'status',
+  'tag',
+  'dueDate',
+  'reminderAt',
+  'repeatRule',
+  'repeatUntilDate',
+  'deletedAt',
+] as const;
+
+type MergeField = typeof MERGE_FIELDS[number];
+
+const FIELD_LABEL_KEY: Record<MergeField, string> = {
+  title: 'task.taskName',
+  priority: 'task.priority',
+  estimateMinutes: 'task.estMinutes',
+  status: 'account.syncStatus',
+  tag: 'task.categoryTag',
+  dueDate: 'task.deadline',
+  reminderAt: 'task.reminderAt',
+  repeatRule: 'task.repeatRule',
+  repeatUntilDate: 'task.repeatUntilDate',
+  deletedAt: 'task.recentlyDeleted',
+};
+
+function isMergeField(value: string): value is MergeField {
+  return (MERGE_FIELDS as readonly string[]).includes(value);
+}
+
+function payloadObject(payload: unknown): Record<string, unknown> {
+  return !!payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : {};
+}
+
+function taskFieldValue(task: Task | TaskDTO | Record<string, unknown> | null | undefined, field: MergeField): unknown {
+  return task ? (task as unknown as Record<MergeField, unknown>)[field] ?? null : null;
+}
+
+function valuesEqual(left: unknown, right: unknown): boolean {
+  return (left ?? null) === (right ?? null);
+}
+
+function conflictFieldsFor(operation: PendingSyncOperationDTO & { baseTaskSnapshot?: Record<string, unknown> }, serverTask?: TaskDTO): MergeField[] {
+  if (!serverTask) return [];
+  const payload = payloadObject(operation.payload);
+  return Object.keys(payload)
+    .filter(isMergeField)
+    .filter(field => !valuesEqual(payload[field], taskFieldValue(serverTask, field)))
+    .filter(field => !operation.baseTaskSnapshot || !valuesEqual(taskFieldValue(serverTask, field), taskFieldValue(operation.baseTaskSnapshot, field)));
+}
+
+function conflictTypeFor(code: string, operation: PendingSyncOperationDTO, serverTask?: TaskDTO): ConflictType {
+  if (code === 'ORDER_CONFLICT' || operation.type === 'reorder') return 'order';
+  if (serverTask?.deletedAt && (operation.type === 'update' || operation.type === 'resolve-conflict')) return 'delete-edit';
+  if (code === 'TASK_NOT_FOUND') return 'permanent-delete';
+  return 'field';
 }
 
 function estimateLabel(minutes: number | null | undefined): string {
@@ -353,68 +519,22 @@ async function getNotificationPermission(request: boolean): Promise<Notification
   }
 }
 
-function taskSyncPayload(t: Task) {
+function markOrderDirty(task: Task, sortOrder: number): Task {
+  if (task.id.startsWith('local-')) return { ...task, sortOrder };
   return {
-    ...taskPatch(t),
-    operationId: t._operationId || syncOperationId(),
-    lastKnownUpdatedAt: t.updatedAt ?? null,
+    ...task,
+    sortOrder,
+    _dirty: true,
+    _syncState: 'update',
+    _operationId: syncOperationId(),
+    _conflict: false,
+    _syncError: false,
   };
-}
-
-function applySavedTaskMeta(tasks: Task[], saved: TaskDTO): Task[] {
-  return tasks.map(t => t.id === saved.id ? { ...t, completedAt: saved.completedAt, updatedAt: saved.updatedAt } : t);
-}
-
-/** Push all dirty tasks to server, returning tasks with clean flags */
-async function flushDirtyTasks(tasks: Task[]): Promise<Task[]> {
-  const dirty = tasks.filter(t => t._dirty);
-  if (dirty.length === 0) return tasks;
-
-  let updated = [...tasks];
-  let remoteIds: Set<string>;
-  try {
-    const remote = await apiGetTasks();
-    remoteIds = new Set(remote.map(r => r.id));
-  } catch {
-    return tasks;
-  }
-
-  for (const t of dirty) {
-    try {
-      const shouldCreate = t._syncState === 'create' || t.id.startsWith('local-');
-      if (shouldCreate) {
-        const created = await apiCreateTask({ ...taskPatch(t), operationId: t._operationId || syncOperationId() });
-        updated = updated.map(x => x.id === t.id ? {
-          ...x,
-          id: created.id,
-          completedAt: created.completedAt,
-          updatedAt: created.updatedAt,
-          _dirty: false,
-          _syncState: undefined,
-          _operationId: undefined,
-          _conflict: false,
-        } : x);
-        continue;
-      }
-      if (!remoteIds.has(t.id)) {
-        updated = updated.filter(x => x.id !== t.id);
-        continue;
-      }
-      const saved = await apiUpdateTask(t.id, taskSyncPayload(t));
-      updated = updated.map(x => x.id === t.id ? { ...x, completedAt: saved.completedAt, updatedAt: saved.updatedAt } : x);
-      updated = markClean(updated, t.id);
-    } catch (error) {
-      if (isTaskConflictError(error)) {
-        updated = updated.map(x => x.id === t.id ? { ...x, _dirty: true, _conflict: true } : x);
-      }
-      // Keep dirty, will retry later
-    }
-  }
-  return updated;
 }
 
 // --- Constants ---
 const PRESET_TAGS = ['Work', 'Personal', 'Study', 'Planning', 'Health', 'Other'];
+const STATUSES_FOR_CLIENT = new Set(['todo', 'doing', 'done', 'snoozed', 'skipped']);
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
@@ -521,7 +641,10 @@ async function restoreNativeStorageWithTimeout(keys: string[], timeoutMs = 3000)
 
 function normalizeCachedTask(task: Task): Task {
   const { progress: _legacyProgress, ...rest } = task as Task & { progress?: unknown };
-  return rest;
+  return {
+    ...rest,
+    version: Number.isInteger(rest.version) ? rest.version : 1,
+  };
 }
 
 function loadTasks(userId: string): Task[] {
@@ -629,6 +752,7 @@ function buildRepeatedTasks(source: Task, dueDates: string[], sortOrderStart: nu
     deletedAt: null,
     completedAt: null,
     sortOrder: sortOrderStart + offset,
+    version: 1,
     updatedAt: now,
     _dirty: true,
     _syncState: 'create',
@@ -651,41 +775,41 @@ function taskExitMotion(action: ExitAction | null, shouldReduceMotion = false) {
   if (action === 'complete') {
     return {
       opacity: 0,
-      y: -190,
-      x: 18,
-      rotate: 7,
-      scale: 0.88,
-      filter: 'blur(2px)',
-      transition: { duration: 0.42, ease: [0.22, 1, 0.36, 1] },
+      y: -82,
+      x: 0,
+      rotate: 0,
+      scale: 0.94,
+      filter: 'blur(0.5px)',
+      transition: { duration: 0.32, ease: [0.16, 1, 0.3, 1] },
     };
   }
   if (action === 'skip') {
     return {
       opacity: 0,
-      y: 170,
-      x: -140,
-      rotate: -13,
-      scale: 0.86,
-      filter: 'blur(1px)',
-      transition: { duration: 0.46, ease: [0.22, 1, 0.36, 1] },
+      y: 18,
+      x: -132,
+      rotate: -4,
+      scale: 0.93,
+      filter: 'blur(0.5px)',
+      transition: { duration: 0.34, ease: [0.2, 0.9, 0.25, 1] },
     };
   }
   if (action === 'snooze') {
     return {
       opacity: 0,
-      y: 85,
-      x: 150,
-      rotate: 11,
-      scale: 0.9,
-      filter: 'blur(1px)',
-      transition: { duration: 0.44, ease: [0.22, 1, 0.36, 1] },
+      y: 112,
+      x: 72,
+      rotate: 3,
+      scale: 0.92,
+      filter: 'blur(0.5px)',
+      transition: { duration: 0.38, ease: [0.22, 1, 0.36, 1] },
     };
   }
   return {
     opacity: 0,
-    y: 60,
-    scale: 0.92,
-    transition: { duration: 0.28, ease: 'easeOut' },
+    y: 36,
+    scale: 0.96,
+    transition: { duration: 0.24, ease: 'easeOut' },
   };
 }
 
@@ -1573,7 +1697,7 @@ function CalendarView({ tasks, onAction, onAddTask, onRepeatTask, onManageTask, 
   showAddTaskPrompt?: boolean;
   nativeControls?: boolean;
 }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const today = new Date();
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth());
@@ -1849,7 +1973,235 @@ function CalendarView({ tasks, onAction, onAddTask, onRepeatTask, onManageTask, 
 
 // --- Account Page ---
 
-function AccountPage({ email, emailVerified, notificationPermission, accentTheme, onAccentThemeChange, onClose, onLogout, isLoggingOut, onOpenDeletedTasks, deletedCount, onDeleteAccount, onRetrySync, onOpenPrivacy, onRequestNotifications, syncStatus, lastSync, pendingSyncCount }: {
+type FieldChoice = 'local' | 'cloud' | 'custom';
+
+function ConflictResolutionPage({
+  operations,
+  tasks,
+  onClose,
+  onUseCloud,
+  onResolveFieldConflict,
+  onReapplyOrder,
+  onCopyAsNewTask,
+}: {
+  operations: PendingOperation[];
+  tasks: Task[];
+  onClose: () => void;
+  onUseCloud: (operation: PendingOperation) => void;
+  onResolveFieldConflict: (operation: PendingOperation, payload: Record<string, unknown>) => void;
+  onReapplyOrder: (operation: PendingOperation) => void;
+  onCopyAsNewTask: (operation: PendingOperation) => void;
+}) {
+  const { t } = useTranslation();
+  const [selectedId, setSelectedId] = React.useState<string | null>(operations[0]?.operationId ?? null);
+  const selected = operations.find(operation => operation.operationId === selectedId) ?? operations[0] ?? null;
+  const serverTask = selected?.serverTask ?? null;
+  const payload = payloadObject(selected?.clientPayload ?? selected?.payload);
+  const payloadFields = Object.keys(payload).filter(isMergeField);
+  const fields = (selected?.conflictType === 'delete-edit' && selected.conflictedFields?.length === 0
+    ? payloadFields
+    : selected?.conflictedFields ?? payloadFields) as MergeField[];
+  const [choices, setChoices] = React.useState<Record<string, FieldChoice>>({});
+  const [customValues, setCustomValues] = React.useState<Record<string, string>>({});
+
+  React.useEffect(() => {
+    if (!selected) return;
+    const nextChoices: Record<string, FieldChoice> = {};
+    for (const field of fields) nextChoices[field] = 'local';
+    setChoices(nextChoices);
+    setCustomValues({});
+  }, [selected?.operationId]);
+
+  const formatValue = (value: unknown): string => {
+    if (value === null || value === undefined || value === '') return t('syncConflict.emptyValue');
+    if (typeof value === 'number') return String(value);
+    if (typeof value === 'string') {
+      if (value === 'P1' || value === 'P2' || value === 'P3') return t(PRIORITY_LABEL_KEY[value as Priority]);
+      if (value === 'todo') return t('view.toDo');
+      if (value === 'done') return t('view.completed');
+      if (value === 'skipped') return t('task.skipped');
+      return value;
+    }
+    return JSON.stringify(value);
+  };
+
+  const buildResolvedPayload = (overrideChoice?: FieldChoice): Record<string, unknown> => {
+    const next: Record<string, unknown> = {};
+    for (const field of fields) {
+      const choice = overrideChoice ?? choices[field] ?? 'local';
+      if (choice === 'cloud') next[field] = taskFieldValue(serverTask, field);
+      else if (choice === 'custom') next[field] = customValues[field] ?? '';
+      else next[field] = payload[field];
+    }
+    if (selected?.conflictType === 'delete-edit') next.deletedAt = null;
+    return next;
+  };
+
+  const conflictTitle = (operation: PendingOperation): string => {
+    if (operation.conflictType === 'order') return t('syncConflict.orderTitle');
+    if (operation.conflictType === 'delete-edit') return t('syncConflict.deleteEditTitle');
+    const taskTitle = operation.serverTask?.title
+      ?? (operation.taskId ? tasks.find(task => task.id === operation.taskId)?.title : null)
+      ?? t('syncConflict.unknownTask');
+    return taskTitle;
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-[60] flex flex-col bg-background"
+    >
+      <div className="flex shrink-0 items-center justify-between border-b border-border px-4 pb-3 pt-[max(1rem,env(safe-area-inset-top))]">
+        <button type="button" onClick={onClose} className="flex h-10 w-10 items-center justify-center rounded-full text-muted-foreground hover:bg-muted">
+          <ChevronLeft className="h-5 w-5" />
+        </button>
+        <div className="min-w-0 text-center">
+          <h2 className="text-base font-bold">{t('syncConflict.title')}</h2>
+          <p className="text-xs text-muted-foreground">{t('syncConflict.subtitle', { count: operations.length })}</p>
+        </div>
+        <div className="h-10 w-10" />
+      </div>
+
+      <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[320px_minmax(0,1fr)]">
+        <div className="border-b border-border p-4 md:border-b-0 md:border-r">
+          <div className="space-y-2">
+            {operations.map(operation => (
+              <button
+                key={operation.operationId}
+                type="button"
+                onClick={() => setSelectedId(operation.operationId)}
+                className={cn(
+                  'w-full rounded-xl border px-3 py-3 text-left transition-colors',
+                  selected?.operationId === operation.operationId ? 'border-primary/40 bg-primary/10' : 'border-border bg-card hover:bg-muted/50'
+                )}
+              >
+                <p className="truncate text-sm font-semibold text-foreground">{conflictTitle(operation)}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {operation.conflictType === 'order'
+                    ? t('syncConflict.orderConflict')
+                    : t('syncConflict.fieldCount', { count: operation.conflictedFields?.length || 1 })}
+                </p>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="min-h-0 overflow-y-auto px-4 py-4">
+          {!selected ? (
+            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{t('syncConflict.none')}</div>
+          ) : selected.conflictType === 'order' ? (
+            <div className="mx-auto max-w-xl space-y-4">
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+                <h3 className="font-semibold text-foreground">{t('syncConflict.orderTitle')}</h3>
+                <p className="mt-1 text-sm text-muted-foreground">{t('syncConflict.orderDesc')}</p>
+              </div>
+              <button type="button" onClick={() => onUseCloud(selected)} className="w-full rounded-lg border border-border bg-card px-4 py-3 text-sm font-semibold">
+                {t('syncConflict.useCloudOrder')}
+              </button>
+              <button type="button" onClick={() => onReapplyOrder(selected)} className="w-full rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground">
+                {t('syncConflict.reapplyLocalOrder')}
+              </button>
+            </div>
+          ) : selected.conflictType === 'permanent-delete' ? (
+            <div className="mx-auto max-w-xl space-y-4">
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+                <h3 className="font-semibold text-foreground">{t('syncConflict.permanentDeleteTitle')}</h3>
+                <p className="mt-1 text-sm text-muted-foreground">{t('syncConflict.permanentDeleteDesc')}</p>
+              </div>
+              <button type="button" onClick={() => onUseCloud(selected)} className="w-full rounded-lg border border-border bg-card px-4 py-3 text-sm font-semibold">
+                {t('syncConflict.discardLocal')}
+              </button>
+              <button type="button" onClick={() => onCopyAsNewTask(selected)} className="w-full rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground">
+                {t('syncConflict.copyAsNew')}
+              </button>
+            </div>
+          ) : (
+            <div className="mx-auto max-w-2xl space-y-4 pb-24">
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+                <h3 className="font-semibold text-foreground">{selected.conflictType === 'delete-edit' ? t('syncConflict.deleteEditTitle') : t('syncConflict.fieldTitle')}</h3>
+                <p className="mt-1 text-sm text-muted-foreground">{t('syncConflict.fieldDesc')}</p>
+              </div>
+
+              {fields.map(field => {
+                const localValue = payload[field];
+                const cloudValue = taskFieldValue(serverTask, field);
+                const canCustom = field === 'title' || field === 'tag';
+                return (
+                  <div key={field} className="rounded-xl border border-border bg-card px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-semibold text-foreground">{t(FIELD_LABEL_KEY[field])}</p>
+                      <div className="flex rounded-lg bg-muted p-1 text-xs font-semibold">
+                        {(['local', 'cloud'] as FieldChoice[]).map(choice => (
+                          <button
+                            key={choice}
+                            type="button"
+                            onClick={() => setChoices(current => ({ ...current, [field]: choice }))}
+                            className={cn('rounded-md px-2 py-1', (choices[field] ?? 'local') === choice ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground')}
+                          >
+                            {choice === 'local' ? t('syncConflict.local') : t('syncConflict.cloud')}
+                          </button>
+                        ))}
+                        {canCustom && (
+                          <button
+                            type="button"
+                            onClick={() => setChoices(current => ({ ...current, [field]: 'custom' }))}
+                            className={cn('rounded-md px-2 py-1', choices[field] === 'custom' ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground')}
+                          >
+                            {t('syncConflict.custom')}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      <div className="rounded-lg bg-muted/70 px-3 py-2">
+                        <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{t('syncConflict.local')}</p>
+                        <p className="mt-1 break-words text-sm text-foreground">{formatValue(localValue)}</p>
+                      </div>
+                      <div className="rounded-lg bg-muted/70 px-3 py-2">
+                        <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{t('syncConflict.cloud')}</p>
+                        <p className="mt-1 break-words text-sm text-foreground">{formatValue(cloudValue)}</p>
+                      </div>
+                    </div>
+                    {canCustom && choices[field] === 'custom' && (
+                      <input
+                        value={customValues[field] ?? ''}
+                        onChange={(event) => setCustomValues(current => ({ ...current, [field]: event.target.value }))}
+                        placeholder={formatValue(localValue)}
+                        className="mt-3 h-11 w-full rounded-lg border border-input bg-input-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                      />
+                    )}
+                  </div>
+                );
+              })}
+
+              <div className="fixed inset-x-0 bottom-0 z-10 border-t border-border bg-background/95 px-4 py-3 backdrop-blur md:left-[320px]">
+                <div className="mx-auto grid max-w-2xl grid-cols-3 gap-2">
+                  <button type="button" onClick={() => onUseCloud(selected)} className="rounded-lg border border-border px-3 py-3 text-xs font-semibold">
+                    {t('syncConflict.allCloud')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onResolveFieldConflict(selected, buildResolvedPayload('local'))}
+                    className="rounded-lg border border-border px-3 py-3 text-xs font-semibold"
+                  >
+                    {t('syncConflict.allLocal')}
+                  </button>
+                  <button type="button" onClick={() => onResolveFieldConflict(selected, buildResolvedPayload())} className="rounded-lg bg-primary px-3 py-3 text-xs font-semibold text-primary-foreground">
+                    {t('syncConflict.saveMerge')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+function AccountPage({ email, emailVerified, notificationPermission, accentTheme, onAccentThemeChange, onClose, onLogout, isLoggingOut, onOpenDeletedTasks, deletedCount, onDeleteAccount, onRetrySync, onOpenPrivacy, onRequestNotifications, onOpenConflicts, syncStatus, lastSync, pendingSyncCount, conflictCount }: {
   email: string;
   emailVerified: boolean;
   notificationPermission: NotificationPermissionState;
@@ -1864,9 +2216,11 @@ function AccountPage({ email, emailVerified, notificationPermission, accentTheme
   onRetrySync: () => void;
   onOpenPrivacy: () => void;
   onRequestNotifications: () => void;
+  onOpenConflicts: () => void;
   syncStatus: 'idle' | 'syncing' | 'offline' | 'pending' | 'conflict' | 'error';
   lastSync: string;
   pendingSyncCount: number;
+  conflictCount: number;
 }) {
   const { t, i18n } = useTranslation();
   const displayName = email.split('@')[0];
@@ -1978,9 +2332,22 @@ function AccountPage({ email, emailVerified, notificationPermission, accentTheme
                 <span>{pendingSyncCount}</span>
               </div>
               <div className="mt-1 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                <span>{t('syncConflict.countLabel')}</span>
+                <span>{conflictCount}</span>
+              </div>
+              <div className="mt-1 flex items-center justify-between gap-3 text-xs text-muted-foreground">
                 <span>{t('account.lastSync')}</span>
                 <span className="text-right">{lastSyncLabel}</span>
               </div>
+              {conflictCount > 0 && (
+                <button
+                  type="button"
+                  onClick={onOpenConflicts}
+                  className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-500/15"
+                >
+                  {t('syncConflict.open')}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={onRetrySync}
@@ -2193,15 +2560,21 @@ function AppShell({
   const [tasks, setTasks] = useState<Task[]>(() => loadTasks(user.id));
   const [streak, setStreak] = useState(() => loadStatsFromCache(user.id).streak);
   const [completedToday, setCompletedToday] = useState(() => loadStatsFromCache(user.id).completedToday);
-  const [lastSync, setLastSync] = useState(() => loadSyncMeta(user.id).lastSync);
+  const [syncMeta, setSyncMeta] = useState(() => loadSyncMeta(user.id));
+  const [pendingOperations, setPendingOperations] = useState<PendingOperation[]>(() => loadPendingOperations(user.id));
   const tasksRef = React.useRef(tasks);
+  const pendingOperationsRef = React.useRef(pendingOperations);
+  const syncMetaRef = React.useRef(syncMeta);
   const completedTodayRef = React.useRef(completedToday);
   completedTodayRef.current = completedToday;
+  pendingOperationsRef.current = pendingOperations;
+  syncMetaRef.current = syncMeta;
   const hasInteractedRef = React.useRef(false);
   const actionLocksRef = React.useRef(new Set<string>());
   const nativeActionIdsRef = React.useRef(new Set<string>());
   const nativeStateSequenceRef = React.useRef(0);
   const syncInFlightRef = React.useRef(false);
+  const syncRequestedRef = React.useRef(false);
   const scheduledNotificationIdsRef = React.useRef(new Set<number>());
   const [tasksLoading, setTasksLoading] = useState(true);
   const [exitAction, setExitAction] = useState<TaskActionState | null>(null);
@@ -2210,6 +2583,7 @@ function AppShell({
   const greeting = useMemo(() => getGreeting(t), [t]);
   const [isReordering, setIsReordering] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [conflictsOpen, setConflictsOpen] = useState(false);
   const [flowDetailTaskId, setFlowDetailTaskId] = useState<string | null>(null);
   const [manageTaskId, setManageTaskId] = useState<string | null>(null);
 
@@ -2253,11 +2627,14 @@ function AppShell({
     completedAt: t.completedAt,
     deletedAt: t.deletedAt,
     sortOrder: t.sortOrder,
+    version: t.version,
+    lastChangedByDeviceId: t.lastChangedByDeviceId,
     updatedAt: t.updatedAt,
     _dirty: false,
     _syncState: undefined,
     _operationId: undefined,
     _conflict: false,
+    _syncError: false,
   }), []);
 
   const setTasksAndCache = React.useCallback((updater: React.SetStateAction<Task[]>) => {
@@ -2269,6 +2646,37 @@ function AppShell({
     });
   }, [user.id]);
 
+  const setSyncMetaAndCache = React.useCallback((updater: React.SetStateAction<SyncMeta>) => {
+    setSyncMeta(prev => {
+      const next = typeof updater === 'function' ? (updater as (prev: SyncMeta) => SyncMeta)(prev) : updater;
+      syncMetaRef.current = next;
+      saveSyncMeta(user.id, next);
+      return next;
+    });
+  }, [user.id]);
+
+  const setPendingOperationsAndCache = React.useCallback((updater: React.SetStateAction<PendingOperation[]>) => {
+    setPendingOperations(prev => {
+      const next = typeof updater === 'function' ? (updater as (prev: PendingOperation[]) => PendingOperation[])(prev) : updater;
+      pendingOperationsRef.current = next;
+      savePendingOperations(user.id, next);
+      return next;
+    });
+  }, [user.id]);
+
+  const queueOperation = React.useCallback((operation: PendingSyncOperationDTO) => {
+    const baseTask = operation.taskId ? tasksRef.current.find(task => task.id === operation.taskId) : null;
+    const pending: PendingOperation = {
+      ...operation,
+      baseTaskSnapshot: baseTask ? taskPatch(baseTask) : undefined,
+      createdAt: new Date().toISOString(),
+      retryCount: 0,
+      status: 'pending',
+    };
+    setPendingOperationsAndCache(prev => [...prev.filter(item => item.operationId !== pending.operationId), pending]);
+    return pending.operationId;
+  }, [setPendingOperationsAndCache]);
+
   const updateSyncStatusFromTasks = React.useCallback((nextTasks: Task[]) => {
     if (!cloudSyncEnabled) {
       setSyncStatus('idle');
@@ -2278,8 +2686,12 @@ function AppShell({
       setSyncStatus('conflict');
       return;
     }
-    const hasDirty = nextTasks.some(task => task._dirty);
-    setSyncStatus(hasDirty ? (navigator.onLine ? 'pending' : 'offline') : 'idle');
+    if (nextTasks.some(task => task._syncError)) {
+      setSyncStatus('error');
+      return;
+    }
+    const hasPending = pendingOperationsRef.current.some(operation => operation.status === 'pending');
+    setSyncStatus(hasPending ? (navigator.onLine ? 'pending' : 'offline') : 'idle');
   }, [cloudSyncEnabled]);
 
   useEffect(() => {
@@ -2320,28 +2732,6 @@ function AppShell({
     return () => { cancelled = true; };
   }, [i18n.language, notificationPermission, tasks, t]);
 
-  const buildTaskSyncPatch = React.useCallback((id: string, data: Partial<Task>, operationId?: string) => {
-    const current = tasksRef.current.find(task => task.id === id);
-    return {
-      ...data,
-      operationId: operationId || current?._operationId || syncOperationId(),
-      lastKnownUpdatedAt: current?.updatedAt ?? null,
-    };
-  }, []);
-
-  const handleTaskSyncError = React.useCallback((id: string, error: unknown) => {
-    if (isTaskConflictError(error)) {
-      setTasksAndCache(prev => prev.map(task => task.id === id ? { ...task, _dirty: true, _conflict: true } : task));
-      setSyncStatus('conflict');
-      toast.error(t('sync.conflict'));
-      return;
-    }
-    setTasksAndCache(prev => {
-      updateSyncStatusFromTasks(prev);
-      return prev;
-    });
-  }, [setTasksAndCache, t, updateSyncStatusFromTasks]);
-
   // On mount: pull all tasks from cloud (cloud-primary), fall back to cache
   useEffect(() => {
     let cancelled = false;
@@ -2355,26 +2745,26 @@ function AppShell({
       }
       let serverReachable = false;
       try {
-        const remote = await apiGetTasks();
+        const remote = await apiSyncBootstrap();
         if (!cancelled) {
           serverReachable = true;
-          const cached = loadTasks(user.id);
-          const dirtyById = new Map(cached.filter(t => t._dirty).map(t => [t.id, t]));
-          const remoteTasks: Task[] = remote.map(t => {
-            const normalized = toTask(t);
-            return dirtyById.get(t.id) ?? normalized;
+          const remoteTasks = remote.tasks.map(toTask);
+          setTasksAndCache(remoteTasks);
+          setDeletedTasks(remote.deletedTasks.map(toTask));
+          setSyncMetaAndCache({
+            syncCursor: remote.currentCursor,
+            lastSuccessfulSyncAt: remote.serverTime,
+            taskOrderVersion: remote.taskOrderVersion,
           });
-
-          // Preserve dirty tasks from cache that haven't reached the server yet
-          const remoteIds = new Set(remoteTasks.map(t => t.id));
-          const dirtyTasks = cached.filter(t => t._dirty && !remoteIds.has(t.id));
-
-          const merged = [...remoteTasks, ...dirtyTasks];
-          setTasksAndCache(merged);
-          saveTasksToCache(user.id, merged);
+          if (remote.userStats) {
+            saveStatsToCache(user.id, remote.userStats.streak, remote.userStats.todayCount, remote.userStats.streakDate);
+            if (!hasInteractedRef.current) {
+              setStreak(remote.userStats.streak);
+              setCompletedToday(remote.userStats.todayCount);
+            }
+          }
           const syncedAt = new Date().toISOString();
-          saveSyncMeta(user.id, { lastSync: syncedAt });
-          setLastSync(syncedAt);
+          setSyncMetaAndCache(current => ({ ...current, lastSuccessfulSyncAt: syncedAt }));
         }
       } catch {
         console.warn('TaskFlow: server unreachable, using cached data');
@@ -2415,7 +2805,7 @@ function AppShell({
     init();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cloudSyncEnabled, setTasksAndCache, toTask, user.id]);
+  }, [cloudSyncEnabled, setSyncMetaAndCache, setTasksAndCache, toTask, user.id]);
 
   // On native cold-start, restore data from Capacitor Preferences if localStorage was cleared
   useEffect(() => {
@@ -2446,39 +2836,171 @@ function AppShell({
 
   // Cache tasks to localStorage whenever they change
   useEffect(() => { saveTasksToCache(user.id, tasks); }, [tasks, user.id]);
-
-  const retryDirtyTasks = React.useCallback(async () => {
+  useEffect(() => {
     if (!cloudSyncEnabled) {
       setSyncStatus('idle');
       return;
     }
-    if (syncInFlightRef.current) return;
-    const dirty = loadTasks(user.id).filter(t => t._dirty);
-    if (dirty.length === 0) {
+    if (pendingOperations.some(operation => operation.status === 'conflict')) setSyncStatus('conflict');
+    else if (pendingOperations.some(operation => operation.status === 'failed')) setSyncStatus('error');
+    else if (pendingOperations.some(operation => operation.status === 'pending')) setSyncStatus(navigator.onLine ? 'pending' : 'offline');
+    else setSyncStatus('idle');
+  }, [cloudSyncEnabled, pendingOperations]);
+
+  const applyRemoteChange = React.useCallback((currentTasks: Task[], change: SyncChangeDTO): Task[] => {
+    if (change.type === 'reorder' && change.snapshot && 'order' in change.snapshot && Array.isArray(change.snapshot.order)) {
+      const orderMap = new Map(change.snapshot.order.map(item => [item.id, item.sortOrder]));
+      return currentTasks.map(task => orderMap.has(task.id) ? { ...task, sortOrder: orderMap.get(task.id)! } : task);
+    }
+    if (change.type === 'permanent-delete') {
+      const taskId = change.taskId || change.tombstone?.taskId;
+      return taskId ? currentTasks.filter(task => task.id !== taskId) : currentTasks;
+    }
+    if (!change.snapshot || !('id' in change.snapshot)) return currentTasks;
+    const remoteTask = toTask(change.snapshot as TaskDTO);
+    const existingIndex = currentTasks.findIndex(task => task.id === remoteTask.id);
+    if (existingIndex < 0) return [...currentTasks, remoteTask];
+    return currentTasks.map(task => task.id === remoteTask.id ? { ...task, ...remoteTask } : task);
+  }, [toTask]);
+
+  const runSync = React.useCallback(async () => {
+    if (!cloudSyncEnabled) {
       setSyncStatus('idle');
       return;
     }
+    if (syncInFlightRef.current) {
+      syncRequestedRef.current = true;
+      return;
+    }
     if (!navigator.onLine) {
-      setSyncStatus('offline');
+      setSyncStatus(pendingOperationsRef.current.some(operation => operation.status === 'pending') ? 'offline' : 'idle');
       return;
     }
     syncInFlightRef.current = true;
+    syncRequestedRef.current = false;
     setSyncStatus('syncing');
+    let attemptedOperationIds = new Set<string>();
     try {
-      const flushed = await flushDirtyTasks(loadTasks(user.id));
-      setTasksAndCache(flushed);
-      const stillDirty = flushed.some(t => t._dirty);
-      const hasConflict = flushed.some(t => t._conflict);
-      setSyncStatus(hasConflict ? 'conflict' : stillDirty ? 'error' : 'idle');
-      if (!hasConflict && !stillDirty) {
-        const syncedAt = new Date().toISOString();
-        saveSyncMeta(user.id, { lastSync: syncedAt });
-        setLastSync(syncedAt);
+      const pending = pendingOperationsRef.current.filter(operation => operation.status === 'pending');
+      const readyPending = pending.filter(isOperationReady);
+      if (readyPending.length > 0) {
+        attemptedOperationIds = new Set(readyPending.map(operation => operation.operationId));
+        const response = await apiPushOperations(getDeviceId(user.id), readyPending);
+        const acceptedIds = new Set(response.accepted.map(item => item.operationId));
+        const conflictById = new Map(response.conflicts.map(item => [item.operationId, item]));
+        const rejectedIds = new Set(response.rejected.map(item => item.operationId).filter((id): id is string => !!id));
+        const idReplacements = new Map<string, string>();
+        let autoMergedConflict = false;
+
+        for (const accepted of response.accepted) {
+          if (accepted.task) {
+            const savedTask = toTask(accepted.task);
+            if (accepted.clientTaskId && accepted.clientTaskId !== savedTask.id) {
+              idReplacements.set(accepted.clientTaskId, savedTask.id);
+            }
+            setTasksAndCache(current => current.map(task =>
+              task.id === savedTask.id || (accepted.clientTaskId && task.id === accepted.clientTaskId)
+                ? { ...task, ...savedTask, _dirty: false, _syncState: undefined, _operationId: undefined, _conflict: false }
+                : task
+            ));
+          }
+          if (accepted.order) {
+            setSyncMetaAndCache(current => ({ ...current, taskOrderVersion: accepted.order!.taskOrderVersion }));
+          }
+          if (accepted.tombstone && typeof accepted.tombstone === 'object' && 'taskId' in accepted.tombstone) {
+            const taskId = String((accepted.tombstone as { taskId?: unknown }).taskId);
+            setTasksAndCache(current => current.filter(task => task.id !== taskId));
+          }
+        }
+
+        setPendingOperationsAndCache(current => current
+          .filter(operation => !acceptedIds.has(operation.operationId))
+          .map(operation => idReplacements.size > 0 ? remapOperationIds(operation, idReplacements) : operation)
+          .map(operation => {
+            const conflict = conflictById.get(operation.operationId);
+            if (!conflict) return operation;
+            const clientOperation = conflict.clientOperation ?? operation;
+            const conflictType = conflictTypeFor(conflict.code, clientOperation, conflict.serverTask);
+            const conflictedFields = conflictFieldsFor(operation, conflict.serverTask);
+            if (conflictType === 'field' && conflict.serverTask && conflictedFields.length === 0) {
+              autoMergedConflict = true;
+              return {
+                ...operation,
+                type: 'resolve-conflict',
+                baseVersion: conflict.serverVersion ?? conflict.serverTask.version,
+                payload: clientOperation.payload ?? operation.payload,
+                retryCount: 0,
+                status: 'pending' as const,
+                conflictType: undefined,
+                serverTask: undefined,
+                serverVersion: undefined,
+                clientPayload: undefined,
+                conflictedFields: undefined,
+                detectedAt: undefined,
+              };
+            }
+            return {
+              ...operation,
+              status: 'conflict' as const,
+              conflictType,
+              serverTask: conflict.serverTask,
+              serverVersion: conflict.serverVersion ?? conflict.serverTask?.version,
+              serverOrderVersion: conflict.serverOrderVersion,
+              clientPayload: clientOperation.payload ?? operation.payload,
+              conflictedFields,
+              detectedAt: new Date().toISOString(),
+            };
+          })
+          .map(operation => rejectedIds.has(operation.operationId)
+              ? { ...operation, status: 'failed' as const }
+              : operation));
+
+        if (idReplacements.size > 0 && pendingOperationsRef.current.some(operation => operation.status === 'pending')) {
+          syncRequestedRef.current = true;
+        }
+        if (autoMergedConflict) {
+          syncRequestedRef.current = true;
+        }
       }
+
+      let cursor = syncMetaRef.current.syncCursor;
+      let hasMore = true;
+      let lastServerTime = new Date().toISOString();
+      while (hasMore) {
+        const pulled = await apiPullChanges(cursor);
+        if (pulled.changes.length > 0) {
+          setTasksAndCache(current => pulled.changes.reduce((next, change) => applyRemoteChange(next, change), current));
+        }
+        cursor = pulled.nextCursor;
+        hasMore = pulled.hasMore;
+        lastServerTime = pulled.serverTime;
+      }
+      setSyncMetaAndCache(current => ({ ...current, syncCursor: cursor, lastSuccessfulSyncAt: lastServerTime }));
+      const nextPending = pendingOperationsRef.current;
+      const hasConflict = nextPending.some(operation => operation.status === 'conflict');
+      const hasFailed = nextPending.some(operation => operation.status === 'failed');
+      const hasPending = nextPending.some(operation => operation.status === 'pending');
+      setSyncStatus(hasConflict ? 'conflict' : hasFailed ? 'error' : hasPending ? 'pending' : 'idle');
+    } catch (error) {
+      setSyncStatus(navigator.onLine ? 'error' : 'offline');
+      if (attemptedOperationIds.size > 0) {
+        setPendingOperationsAndCache(current => current.map(operation =>
+          attemptedOperationIds.has(operation.operationId)
+            ? { ...operation, retryCount: operation.retryCount + 1 }
+            : operation
+        ));
+      }
+      void error;
     } finally {
       syncInFlightRef.current = false;
+      if (syncRequestedRef.current) {
+        syncRequestedRef.current = false;
+        window.setTimeout(() => void runSync(), 0);
+      }
     }
-  }, [cloudSyncEnabled, setTasksAndCache, user.id]);
+  }, [applyRemoteChange, cloudSyncEnabled, setPendingOperationsAndCache, setSyncMetaAndCache, setTasksAndCache, toTask, user.id]);
+
+  const retryDirtyTasks = runSync;
 
   useEffect(() => {
     retryDirtyTasks();
@@ -2488,7 +3010,7 @@ function AppShell({
         setSyncStatus('idle');
         return;
       }
-      if (loadTasks(user.id).some(t => t._dirty)) setSyncStatus('offline');
+      if (pendingOperationsRef.current.some(operation => operation.status === 'pending')) setSyncStatus('offline');
       else setSyncStatus('idle');
     };
     const handleFocus = () => retryDirtyTasks();
@@ -2504,15 +3026,120 @@ function AppShell({
 
   const activeTasks = useMemo(() => tasks.filter(t => !t.deletedAt), [tasks]);
   const pendingTasks = useMemo(() => activeTasks.filter(t => t.status === 'todo'), [activeTasks]);
-  const pendingSyncCount = useMemo(() => tasks.filter(t => t._dirty).length, [tasks]);
+  const pendingSyncCount = useMemo(() => pendingOperations.length, [pendingOperations]);
+  const conflictOperations = useMemo(() => pendingOperations.filter(operation => operation.status === 'conflict'), [pendingOperations]);
   const flowDetailTask = flowDetailTaskId ? activeTasks.find(t => t.id === flowDetailTaskId) ?? null : null;
   const manageTask = manageTaskId ? activeTasks.find(t => t.id === manageTaskId) ?? null : null;
 
+  const removeConflictOperation = React.useCallback((operationId: string) => {
+    setPendingOperationsAndCache(prev => prev.filter(operation => operation.operationId !== operationId));
+  }, [setPendingOperationsAndCache]);
+
+  const handleUseCloudConflict = React.useCallback((operation: PendingOperation) => {
+    if (operation.conflictType === 'permanent-delete' && operation.taskId) {
+      setTasksAndCache(prev => prev.filter(task => task.id !== operation.taskId));
+      removeConflictOperation(operation.operationId);
+      return;
+    }
+    if (operation.serverTask) {
+      const cloudTask = toTask(operation.serverTask);
+      setTasksAndCache(prev => {
+        const exists = prev.some(task => task.id === cloudTask.id);
+        return exists
+          ? prev.map(task => task.id === cloudTask.id ? cloudTask : task)
+          : [...prev, cloudTask];
+      });
+    }
+    if (operation.conflictType === 'order' && operation.serverOrderVersion) {
+      setSyncMetaAndCache(current => ({ ...current, taskOrderVersion: operation.serverOrderVersion! }));
+    }
+    removeConflictOperation(operation.operationId);
+  }, [removeConflictOperation, setSyncMetaAndCache, setTasksAndCache, toTask]);
+
+  const handleResolveFieldConflict = React.useCallback((operation: PendingOperation, payload: Record<string, unknown>) => {
+    if (!operation.taskId) return;
+    const nextOperation: PendingOperation = {
+      operationId: syncOperationId(),
+      type: 'resolve-conflict',
+      taskId: operation.taskId,
+      baseVersion: operation.serverVersion ?? operation.serverTask?.version ?? null,
+      payload,
+      createdAt: new Date().toISOString(),
+      retryCount: 0,
+      status: 'pending',
+    };
+    setPendingOperationsAndCache(prev => [...prev.filter(item => item.operationId !== operation.operationId), nextOperation]);
+    setTasksAndCache(prev => prev.map(task => task.id === operation.taskId ? {
+      ...task,
+      ...payload,
+      _dirty: true,
+      _syncState: 'update',
+      _operationId: nextOperation.operationId,
+      _conflict: false,
+      _syncError: false,
+    } as Task : task));
+    if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
+  }, [cloudSyncEnabled, retryDirtyTasks, setPendingOperationsAndCache, setTasksAndCache]);
+
+  const handleReapplyOrderConflict = React.useCallback((operation: PendingOperation) => {
+    const nextOperation: PendingOperation = {
+      ...operation,
+      operationId: syncOperationId(),
+      baseOrderVersion: operation.serverOrderVersion ?? syncMetaRef.current.taskOrderVersion,
+      createdAt: new Date().toISOString(),
+      retryCount: 0,
+      status: 'pending',
+      conflictType: undefined,
+      serverOrderVersion: undefined,
+      detectedAt: undefined,
+    };
+    setPendingOperationsAndCache(prev => [...prev.filter(item => item.operationId !== operation.operationId), nextOperation]);
+    if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
+  }, [cloudSyncEnabled, retryDirtyTasks, setPendingOperationsAndCache]);
+
+  const handleCopyConflictAsNewTask = React.useCallback((operation: PendingOperation) => {
+    const sourceTask = operation.taskId ? tasksRef.current.find(task => task.id === operation.taskId) : null;
+    const tempId = localTaskId();
+    const payload = sourceTask ? taskPatch({ ...sourceTask, id: tempId, deletedAt: null }) : payloadObject(operation.clientPayload ?? operation.payload);
+    const newTask: Task = {
+      id: tempId,
+      title: String(payload.title || 'Recovered task'),
+      priority: (payload.priority === 'P1' || payload.priority === 'P2' || payload.priority === 'P3') ? payload.priority : 'P2',
+      estimateMinutes: typeof payload.estimateMinutes === 'number' ? payload.estimateMinutes : null,
+      status: (typeof payload.status === 'string' && STATUSES_FOR_CLIENT.has(payload.status)) ? payload.status as TaskStatus : 'todo',
+      tag: typeof payload.tag === 'string' ? payload.tag : null,
+      dueDate: typeof payload.dueDate === 'string' ? payload.dueDate : quickDueDate(0),
+      reminderAt: typeof payload.reminderAt === 'string' ? payload.reminderAt : null,
+      repeatRule: (payload.repeatRule === 'daily' || payload.repeatRule === 'weekly' || payload.repeatRule === 'monthly') ? payload.repeatRule : 'none',
+      repeatUntilDate: typeof payload.repeatUntilDate === 'string' ? payload.repeatUntilDate : null,
+      deletedAt: null,
+      completedAt: null,
+      sortOrder: tasksRef.current.filter(task => task.status === 'todo' && !task.deletedAt).length,
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      _dirty: true,
+      _syncState: 'create',
+      _operationId: syncOperationId(),
+      _conflict: false,
+    };
+    setTasksAndCache(prev => [...prev, newTask]);
+    setPendingOperationsAndCache(prev => [
+      ...prev.filter(item => item.operationId !== operation.operationId),
+      {
+        operationId: newTask._operationId || syncOperationId(),
+        type: 'create',
+        clientTaskId: newTask.id,
+        payload: taskPatch(newTask),
+        createdAt: new Date().toISOString(),
+        retryCount: 0,
+        status: 'pending' as const,
+      },
+    ]);
+    if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
+  }, [cloudSyncEnabled, retryDirtyTasks, setPendingOperationsAndCache, setTasksAndCache]);
+
   const applyPendingOrder = React.useCallback((orderedIds: string[]) => {
     const idRank = new Map(orderedIds.map((id, index) => [id, index]));
-    const remoteOrder = orderedIds
-      .map((id, sortOrder) => ({ id, sortOrder }))
-      .filter(item => !item.id.startsWith('local-'));
 
     setTasksAndCache(prev => {
       const pending = prev.filter(task => task.status === 'todo' && !task.deletedAt);
@@ -2523,34 +3150,20 @@ function AppShell({
       const newlyAddedPending = pending.filter(task => !idRank.has(task.id));
       const nonPending = prev.filter(task => task.status !== 'todo' || task.deletedAt);
       let sortOrder = 0;
-      const nextPending = [...orderedPending, ...newlyAddedPending].map(task => {
-        const next = { ...task, sortOrder: sortOrder++ };
-        return next.id.startsWith('local-') ? next : { ...next, _dirty: true, _syncState: 'update' as const };
-      });
+      const nextPending = [...orderedPending, ...newlyAddedPending].map(task => markOrderDirty(task, sortOrder++));
       const next = [...nextPending, ...nonPending];
       updateSyncStatusFromTasks(next);
       return next;
     });
+    queueOperation({
+      operationId: syncOperationId(),
+      type: 'reorder',
+      baseOrderVersion: syncMetaRef.current.taskOrderVersion,
+      payload: { order: orderedIds.map((id, index) => ({ id, sortOrder: index })) },
+    });
 
-    if (!cloudSyncEnabled) {
-      window.setTimeout(() => retryDirtyTasks(), 0);
-      return;
-    }
-    const syncOrder = remoteOrder.length > 0 ? apiReorderTasks(remoteOrder) : Promise.resolve();
-    syncOrder
-      .then(() => {
-        const ids = new Set(remoteOrder.map(item => item.id));
-        setTasksAndCache(prev => {
-          const next = prev.map(task => ids.has(task.id) ? { ...task, _dirty: false, _syncState: undefined } : task);
-          updateSyncStatusFromTasks(next);
-          return next;
-        });
-      })
-      .catch(() => setTasksAndCache(prev => {
-        updateSyncStatusFromTasks(prev);
-        return prev;
-      }));
-  }, [cloudSyncEnabled, retryDirtyTasks, setTasksAndCache, updateSyncStatusFromTasks]);
+    if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
+  }, [cloudSyncEnabled, queueOperation, retryDirtyTasks, setTasksAndCache, updateSyncStatusFromTasks]);
 
   const handleAction = (id: string, action: ExitAction) => {
     if (actionLocksRef.current.has(id)) return;
@@ -2585,16 +3198,10 @@ function AppShell({
           .filter(t => t.status === 'todo' && !t.deletedAt)
           .map(t => t.id);
         let sortOrder = 0;
-        const order: Array<{ id: string; sortOrder: number }> = [];
         const normalized = reordered.map(t => {
           if (t.status !== 'todo' || t.deletedAt) return t;
-          const next = { ...t, sortOrder: sortOrder++ };
-          if (!next.id.startsWith('local-')) {
-            order.push({ id: next.id, sortOrder: next.sortOrder });
-          }
-          return next;
+          return markOrderDirty(t, sortOrder++);
         });
-        const remoteOrderIds = new Set(order.map(o => o.id));
         setTasksAndCache(prev => {
           if (!task) return prev;
           if (prev !== latestTasks) {
@@ -2603,11 +3210,10 @@ function AppShell({
             let nextSortOrder = 0;
             return [...prev.filter(t => t.id !== id), nextTask].map(t => {
               if (t.status !== 'todo' || t.deletedAt) return t;
-              const next = { ...t, sortOrder: nextSortOrder++ };
-              return remoteOrderIds.has(next.id) ? { ...next, _dirty: true, _syncState: 'update' } : next;
+              return markOrderDirty(t, nextSortOrder++);
             });
           }
-          return normalized.map(t => remoteOrderIds.has(t.id) ? { ...t, _dirty: true, _syncState: 'update' } : t);
+          return normalized;
         });
         window.setTimeout(() => {
           setExitAction(current => current?.taskId === id && current.action === action ? null : current);
@@ -2622,36 +3228,12 @@ function AppShell({
             },
           },
         });
-        if (!cloudSyncEnabled || id.startsWith('local-')) {
-          window.setTimeout(() => {
-            setExitAction(current => current?.taskId === id && current.action === action ? null : current);
-            unlock();
-            if (!cloudSyncEnabled) {
-              if (!undoRequested) applyPendingOrder(nextPendingIds);
-            } else {
-              retryDirtyTasks();
-            }
-          }, 520);
-          return;
-        }
-        const syncOrder = order.length > 0 ? apiReorderTasks(order) : Promise.resolve();
-        syncOrder
-          .then(() => {
-            const ids = new Set(order.map(o => o.id));
-            setTasksAndCache(prev => {
-              const next = prev.map(task => ids.has(task.id) ? { ...task, _dirty: false, _syncState: undefined } : task);
-              updateSyncStatusFromTasks(next);
-              return next;
-            });
-          })
-          .catch(() => setTasksAndCache(prev => {
-            updateSyncStatusFromTasks(prev);
-            return prev;
-          }))
-          .finally(() => {
-            unlock();
-            if (undoRequested) applyPendingOrder(previousPendingIds);
-          });
+        window.setTimeout(() => {
+          unlock();
+          if (undoRequested) applyPendingOrder(previousPendingIds);
+          else if (!cloudSyncEnabled) applyPendingOrder(nextPendingIds);
+          else void retryDirtyTasks();
+        }, 520);
       }, 170);
     } else {
       const newStatus = action === 'complete' ? 'done' : 'skipped';
@@ -2662,24 +3244,31 @@ function AppShell({
         const legacyRepeatTask = task && legacyRepeatDueDate
           ? buildRepeatedTasks(task, [legacyRepeatDueDate], tasksRef.current.filter(t => t.status === 'todo' && !t.deletedAt).length)[0]
           : null;
-        const syncPatch = buildTaskSyncPatch(id, { status: newStatus });
+        const operationId = syncOperationId();
+        queueOperation({
+          operationId,
+          type: 'update',
+          taskId: id,
+          baseVersion: task?.version ?? 1,
+          payload: { status: newStatus },
+        });
+        if (legacyRepeatTask) {
+          queueOperation({
+            operationId: legacyRepeatTask._operationId || syncOperationId(),
+            type: 'create',
+            clientTaskId: legacyRepeatTask.id,
+            payload: taskPatch(legacyRepeatTask),
+          });
+        }
 
         setTasksAndCache(prev => {
           const updated = prev.map(t => t.id !== id ? t : { ...t, status: newStatus as TaskStatus });
-          return markDirty(legacyRepeatTask ? [...updated, legacyRepeatTask] : updated, id, 'update', syncPatch.operationId);
+          return markDirty(legacyRepeatTask ? [...updated, legacyRepeatTask] : updated, id, 'update', operationId);
         });
-        if (!cloudSyncEnabled || id.startsWith('local-')) {
-          window.setTimeout(() => { retryDirtyTasks().finally(unlock); }, 0);
-        } else {
-          apiUpdateTask(id, syncPatch)
-            .then(saved => setTasksAndCache(prev => {
-              const next = markClean(applySavedTaskMeta(prev, saved), id);
-              updateSyncStatusFromTasks(next);
-              return next;
-            }))
-            .catch(error => handleTaskSyncError(id, error))
-            .finally(unlock);
-        }
+        window.setTimeout(() => {
+          if (cloudSyncEnabled) void retryDirtyTasks();
+          unlock();
+        }, 0);
         if (action === 'complete') {
           const newCount = completedTodayRef.current + 1;
           setCompletedToday(newCount);
@@ -2706,11 +3295,7 @@ function AppShell({
           }
 
           // Ask the server to recompute stats from completed tasks.
-          if (cloudSyncEnabled) {
-            apiUpdateUserStats().catch(() =>
-              toast.error('Stats sync failed — retrying')
-            );
-          }
+          if (cloudSyncEnabled) void retryDirtyTasks();
         }
         window.setTimeout(() => {
           setExitAction(current => current?.taskId === id && current.action === action ? null : current);
@@ -2723,58 +3308,28 @@ function AppShell({
   const handleSaveOrder = (newPendingOrder: Task[]) => {
     setTasksAndCache(prev => {
       const nonPending = prev.filter(t => t.status !== 'todo');
-      const remoteIds = new Set(newPendingOrder.filter(t => !t.id.startsWith('local-')).map(t => t.id));
-      return [...newPendingOrder, ...nonPending].map(t => remoteIds.has(t.id) ? { ...t, _dirty: true, _syncState: 'update' } : t);
+      return [...newPendingOrder.map((task, index) => markOrderDirty(task, index)), ...nonPending];
     });
-    if (!cloudSyncEnabled) return;
-    const order = newPendingOrder
-      .map((t, i) => ({ id: t.id, sortOrder: i }))
-      .filter(t => !t.id.startsWith('local-'));
-    const syncOrder = order.length > 0 ? apiReorderTasks(order) : Promise.resolve();
-    syncOrder
-      .then(() => {
-        const ids = new Set(order.map(t => t.id));
-        setTasksAndCache(prev => {
-          const next = prev.map(t => ids.has(t.id) ? { ...t, _dirty: false, _syncState: undefined } : t);
-          updateSyncStatusFromTasks(next);
-          return next;
-        });
-      })
-      .catch(() => setTasksAndCache(prev => {
-        updateSyncStatusFromTasks(prev);
-        return prev;
-      }));
+    queueOperation({
+      operationId: syncOperationId(),
+      type: 'reorder',
+      baseOrderVersion: syncMetaRef.current.taskOrderVersion,
+      payload: { order: newPendingOrder.map((task, index) => ({ id: task.id, sortOrder: index })) },
+    });
+    if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
   };
 
   const persistTaskUpdate = (id: string, data: Partial<Task>, operationId?: string): Promise<boolean> => {
-    if (!cloudSyncEnabled || id.startsWith('local-')) {
-      window.setTimeout(() => retryDirtyTasks(), 0);
-      return Promise.resolve(true);
-    }
-    setSyncStatus(navigator.onLine ? 'syncing' : 'offline');
-    return apiUpdateTask(id, buildTaskSyncPatch(id, {
-      title: data.title,
-      priority: data.priority,
-      estimateMinutes: data.estimateMinutes,
-      status: data.status,
-      tag: data.tag,
-      dueDate: data.dueDate,
-      reminderAt: data.reminderAt,
-      repeatRule: data.repeatRule,
-      repeatUntilDate: data.repeatUntilDate,
-      deletedAt: data.deletedAt,
-      sortOrder: data.sortOrder,
-    }, operationId)).then(saved => {
-      setTasksAndCache(prev => {
-        const next = markClean(applySavedTaskMeta(prev, saved), id);
-        updateSyncStatusFromTasks(next);
-        return next;
-      });
-      return true;
-    }).catch(error => {
-      handleTaskSyncError(id, error);
-      return false;
+    const task = tasksRef.current.find(item => item.id === id);
+    queueOperation({
+      operationId: operationId || syncOperationId(),
+      type: 'update',
+      taskId: id,
+      baseVersion: task?.version ?? 1,
+      payload: data,
     });
+    if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
+    return Promise.resolve(true);
   };
 
   const resetTaskForm = () => {
@@ -2838,8 +3393,8 @@ function AppShell({
     setDeletedTasksLoading(true);
     try {
       if (cloudSyncEnabled) {
-        const remote = await apiGetDeletedTasks();
-        setDeletedTasks(remote.map(toTask));
+        const remote = await apiSyncBootstrap();
+        setDeletedTasks(remote.deletedTasks.map(toTask));
       } else {
         setDeletedTasks(loadTasks(user.id).filter(task => !!task.deletedAt));
       }
@@ -2857,51 +3412,51 @@ function AppShell({
   }, [refreshDeletedTasks]);
 
   const handleRestoreDeletedTask = React.useCallback((task: Task) => {
-    const operationId = task._operationId || syncOperationId();
+    const operationId = syncOperationId();
+    queueOperation({
+      operationId,
+      type: 'restore',
+      taskId: task.id,
+      baseVersion: task.version ?? 1,
+    });
     setDeletedTasks(prev => prev.filter(t => t.id !== task.id));
     setTasksAndCache(prev => {
-      const restored = { ...task, deletedAt: null, _dirty: !cloudSyncEnabled || task.id.startsWith('local-'), _syncState: 'update' as const, _operationId: operationId };
+      const restored = { ...task, deletedAt: null, _dirty: true, _syncState: 'update' as const, _operationId: operationId, _conflict: false };
       const exists = prev.some(t => t.id === task.id);
       return exists
         ? prev.map(t => t.id === task.id ? { ...t, deletedAt: null, _dirty: restored._dirty, _syncState: restored._syncState, _operationId: operationId } : t)
         : [...prev, restored];
     });
-    if (!cloudSyncEnabled || task.id.startsWith('local-')) {
-      persistTaskUpdate(task.id, { deletedAt: null }, operationId);
-      return;
-    }
-    apiRestoreTask(task.id, {
-      operationId,
-      lastKnownUpdatedAt: task.updatedAt ?? null,
-    })
-      .then(restored => setTasksAndCache(prev => {
-        const nextTask = toTask(restored);
-        const exists = prev.some(t => t.id === nextTask.id);
-        return exists ? prev.map(t => t.id === nextTask.id ? nextTask : t) : [...prev, nextTask];
-      }))
-      .catch(error => {
-        if (isTaskConflictError(error)) {
-          setTasksAndCache(prev => prev.map(t => t.id === task.id ? { ...t, _dirty: true, _conflict: true } : t));
-          setSyncStatus('conflict');
-          toast.error(t('sync.conflict'));
-          return;
-        }
-        toast.error(t('task.restoreFailed'));
-        refreshDeletedTasks();
-      });
-  }, [cloudSyncEnabled, refreshDeletedTasks, setTasksAndCache, t, toTask]);
+    if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
+  }, [cloudSyncEnabled, queueOperation, retryDirtyTasks, setTasksAndCache]);
 
   const handlePermanentDeleteTask = React.useCallback((task: Task) => {
     const confirmed = window.confirm(t('task.deleteForeverConfirm'));
     if (!confirmed) return;
     setDeletedTasks(prev => prev.filter(t => t.id !== task.id));
-    setTasksAndCache(prev => prev.filter(t => t.id !== task.id));
-    if (!cloudSyncEnabled || task.id.startsWith('local-')) return;
-    apiPermanentDeleteTask(task.id).catch(() => {
-      toast.error(t('task.deleteForeverFailed'));
-      refreshDeletedTasks();
+    if (task.id.startsWith('local-')) {
+      setPendingOperationsAndCache(prev => prev
+        .map(operation => removeTaskFromOperation(operation, task.id))
+        .filter((operation): operation is PendingOperation => !!operation));
+      setTasksAndCache(prev => prev.filter(t => t.id !== task.id));
+      return;
+    }
+    const operationId = syncOperationId();
+    queueOperation({
+      operationId,
+      type: 'permanent-delete',
+      taskId: task.id,
+      baseVersion: task.version ?? 1,
     });
-  }, [cloudSyncEnabled, refreshDeletedTasks, setTasksAndCache, t]);
+    setTasksAndCache(prev => prev.map(item => item.id === task.id ? {
+      ...item,
+      _dirty: true,
+      _syncState: 'permanent-delete',
+      _operationId: operationId,
+      _conflict: false,
+    } : item));
+    if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
+  }, [cloudSyncEnabled, queueOperation, retryDirtyTasks, setPendingOperationsAndCache, setTasksAndCache, t]);
 
   const handleDeleteAccount = React.useCallback(async () => {
     const confirmed = window.confirm(t('account.deleteAccountConfirm'));
@@ -2919,20 +3474,32 @@ function AppShell({
 
   const handleDeleteTask = (task: Task) => {
     const deletedAt = new Date().toISOString();
-    const operationId = task._operationId || syncOperationId();
+    const operationId = syncOperationId();
+    queueOperation({
+      operationId,
+      type: 'soft-delete',
+      taskId: task.id,
+      baseVersion: task.version ?? 1,
+    });
     setTasksAndCache(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt } : t), task.id, 'update', operationId));
-    persistTaskUpdate(task.id, { deletedAt }, operationId);
     toast(t('task.deleted'), {
       description: t('task.deletedDesc'),
       action: {
         label: t('task.undo'),
         onClick: () => {
           const undoOperationId = syncOperationId();
+          queueOperation({
+            operationId: undoOperationId,
+            type: 'restore',
+            taskId: task.id,
+            baseVersion: (tasksRef.current.find(item => item.id === task.id)?.version ?? task.version) ?? 1,
+          });
           setTasksAndCache(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt: null } : t), task.id, 'update', undoOperationId));
-          persistTaskUpdate(task.id, { deletedAt: null }, undoOperationId);
+          if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
         },
       },
     });
+    if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
   };
 
   const handleRepeatTask = (task: Task) => {
@@ -3024,6 +3591,7 @@ function AppShell({
       deletedAt: null,
       tag: candidate.tag || null,
       sortOrder: idx,
+      version: 1,
       updatedAt: new Date().toISOString(),
     };
     const repeatedTasks = repeatUntilDate
@@ -3037,6 +3605,20 @@ function AppShell({
       updateSyncStatusFromTasks(next);
       return next;
     });
+    queueOperation({
+      operationId: optimisticTask._operationId || syncOperationId(),
+      type: 'create',
+      clientTaskId: optimisticTask.id,
+      payload: taskPatch(optimisticTask),
+    });
+    for (const repeatedTask of repeatedTasks) {
+      queueOperation({
+        operationId: repeatedTask._operationId || syncOperationId(),
+        type: 'create',
+        clientTaskId: repeatedTask.id,
+        payload: taskPatch(repeatedTask),
+      });
+    }
     if (cloudSyncEnabled) window.setTimeout(() => retryDirtyTasks(), 0);
     return clientKey;
   };
@@ -3098,11 +3680,19 @@ function AppShell({
           tasksRef.current.filter(t => t.status === 'todo' && !t.deletedAt).length
         )
         : [];
-      const operationId = existingTask?._operationId || syncOperationId();
+      const operationId = syncOperationId();
       setTasksAndCache(prev => {
         const updated = prev.map(t => t.id === editingTaskId ? { ...t, ...patch } : t);
         return markDirty([...updated, ...repeatedTasks], editingTaskId, 'update', operationId);
       });
+      for (const repeatedTask of repeatedTasks) {
+        queueOperation({
+          operationId: repeatedTask._operationId || syncOperationId(),
+          type: 'create',
+          clientTaskId: repeatedTask.id,
+          payload: taskPatch(repeatedTask),
+        });
+      }
       persistTaskUpdate(editingTaskId, patch, operationId).then((canFlushRepeatedTasks) => {
         if (canFlushRepeatedTasks && repeatedTasks.length > 0) void retryDirtyTasks();
       });
@@ -3119,9 +3709,10 @@ function AppShell({
     const state: NativeBridgeState = {
       source: 'taskflow.react',
       type: 'uiState',
-      protocolVersion: 1,
+      protocolVersion: 2,
       sequence: nativeStateSequenceRef.current + 1,
       payload: {
+        appState: 'app',
         currentView: viewMode,
         currentTask: topTask ? {
           id: topTask.id,
@@ -3170,7 +3761,7 @@ function AppShell({
     };
     const handleNativeAction = (event: Event) => {
       const detail = (event as CustomEvent<NativeBridgeActionMessage>).detail;
-      if (!detail || detail.source !== 'taskflow.native' || detail.protocolVersion !== 1 || !detail.action) return;
+      if (!detail || detail.source !== 'taskflow.native' || detail.protocolVersion !== 2 || !detail.action) return;
       if (!allowedActions.has(detail.action)) return;
       if (detail.actionId) {
         if (nativeActionIdsRef.current.has(detail.actionId)) return;
@@ -3257,8 +3848,16 @@ function AppShell({
               tasksRef.current.filter(task => task.status === 'todo' && !task.deletedAt).length
             )
             : [];
-          const operationId = current._operationId || syncOperationId();
+          const operationId = syncOperationId();
           setTasksAndCache(prev => markDirty([...prev.map(task => task.id === current.id ? { ...task, ...patch } : task), ...repeatedTasks], current.id, 'update', operationId));
+          for (const repeatedTask of repeatedTasks) {
+            queueOperation({
+              operationId: repeatedTask._operationId || syncOperationId(),
+              type: 'create',
+              clientTaskId: repeatedTask.id,
+              payload: taskPatch(repeatedTask),
+            });
+          }
           persistTaskUpdate(current.id, patch, operationId).then((canFlushRepeatedTasks) => {
             if (canFlushRepeatedTasks && repeatedTasks.length > 0) void retryDirtyTasks();
           });
@@ -3338,9 +3937,25 @@ function AppShell({
             onRetrySync={retryDirtyTasks}
             onOpenPrivacy={openPublicPrivacyPolicy}
             onRequestNotifications={() => refreshNotificationPermission(true)}
+            onOpenConflicts={() => setConflictsOpen(true)}
             syncStatus={syncStatus}
-            lastSync={lastSync}
+            lastSync={syncMeta.lastSuccessfulSyncAt}
             pendingSyncCount={pendingSyncCount}
+            conflictCount={conflictOperations.length}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {conflictsOpen && (
+          <ConflictResolutionPage
+            operations={conflictOperations}
+            tasks={tasks}
+            onClose={() => setConflictsOpen(false)}
+            onUseCloud={handleUseCloudConflict}
+            onResolveFieldConflict={handleResolveFieldConflict}
+            onReapplyOrder={handleReapplyOrderConflict}
+            onCopyAsNewTask={handleCopyConflictAsNewTask}
           />
         )}
       </AnimatePresence>
@@ -3379,7 +3994,7 @@ function AppShell({
           aria-live="polite"
         >
           <button
-            onClick={retryDirtyTasks}
+            onClick={syncStatus === 'conflict' ? () => setConflictsOpen(true) : retryDirtyTasks}
             className={`w-full flex flex-col items-center justify-center gap-1 rounded-xl border px-3 py-2 text-xs font-semibold ${
               syncStatus === 'error' || syncStatus === 'conflict'
                 ? 'border-destructive/30 bg-destructive/10 text-destructive'
@@ -3396,7 +4011,28 @@ function AppShell({
       )}
 
       {/* Toast notifications */}
-      <Toaster position="top-center" closeButton />
+      <Toaster
+        position="top-center"
+        closeButton
+        offset={{ top: isNativeShell ? 'calc(env(safe-area-inset-top) + 28px)' : '10px' }}
+        mobileOffset={{
+          top: isNativeShell ? 'calc(env(safe-area-inset-top) + 28px)' : '10px',
+          left: '16px',
+          right: '16px',
+        }}
+        style={{ '--width': '360px' } as React.CSSProperties}
+        toastOptions={{
+          style: {
+            minHeight: '42px',
+            padding: '10px 14px',
+            borderRadius: '24px',
+            border: '1px solid var(--border)',
+            background: 'var(--card)',
+            color: 'var(--foreground)',
+            boxShadow: '0 12px 30px rgba(15, 23, 42, 0.12)',
+          },
+        }}
+      />
 
       {!isNativeShell && (
         <div className="w-full max-w-md px-4 sm:px-6 flex justify-center mb-5">
@@ -3425,10 +4061,13 @@ function AppShell({
           transition={shouldReduceMotion ? { duration: 0 } : { type: 'spring', stiffness: 360, damping: 36, mass: 0.85 }}
         >
           {/* ── Flow panel ── */}
-          <div className="h-full overflow-y-auto px-4 sm:px-6 pb-4" style={{ width: '50%' }}>
+          <div className={cn('h-full overflow-y-auto px-4 sm:px-6', isNativeShell ? 'pb-[calc(env(safe-area-inset-bottom)+8.5rem)]' : 'pb-4')} style={{ width: '50%' }}>
             {pendingTasks.length > 0 ? (
               <div className="mx-auto flex min-h-full w-full max-w-sm flex-col items-center gap-3">
-                <div className="relative mt-1 h-[clamp(360px,54vh,470px)] w-full max-w-[360px] shrink-0">
+                <div className={cn(
+                  'relative h-[clamp(360px,54vh,470px)] w-full max-w-[360px] shrink-0',
+                  isNativeShell ? 'mt-[clamp(4.25rem,9vh,6rem)]' : 'mt-[clamp(1.75rem,5vh,3.25rem)]'
+                )}>
                   <AnimatePresence custom={exitAction} mode="popLayout">
                     {pendingTasks.slice(0, 3).map((task, index) => {
                       const isTop = index === 0;
@@ -3440,12 +4079,12 @@ function AppShell({
                           initial={shouldReduceMotion ? false : { opacity: 0, y: 50, scale: 0.9 }}
                           animate={{
                             opacity: index > 1 ? 0 : 1 - index * 0.15,
-                            y: index * 16,
-                            scale: 1 - index * 0.04,
+                            y: index * 14,
+                            scale: 1 - index * 0.035,
                             zIndex: 10 - index,
                           }}
                           exit={(custom: TaskActionState | null) => taskExitMotion(custom?.taskId === task.id ? custom.action : null, shouldReduceMotion)}
-                          transition={shouldReduceMotion ? { duration: 0 } : { type: 'spring', stiffness: 300, damping: 25, mass: 0.8 }}
+                          transition={shouldReduceMotion ? { duration: 0 } : { type: 'spring', stiffness: 340, damping: 34, mass: 0.72 }}
                           className={`absolute inset-0 w-full h-full ${!isTop ? 'pointer-events-none' : ''}`}
                         >
                           <TaskCard
@@ -3597,6 +4236,33 @@ export default function App() {
   const [accentTheme, setAccentTheme] = useState<AccentTheme>('tcx111400');
   const [accentThemeReady, setAccentThemeReady] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform() || appState === 'app') return;
+    const state: NativeBridgeState = {
+      source: 'taskflow.react',
+      type: 'uiState',
+      protocolVersion: 2,
+      sequence: Date.now(),
+      payload: {
+        appState,
+        currentView: 'flow',
+        currentTask: null,
+        pendingCount: 0,
+        canComplete: false,
+        isSyncing: false,
+        syncStatus: 'idle',
+        isSheetOpen: false,
+      },
+    };
+    const publishState = () => {
+      window.__taskflowNativeState = state;
+      window.webkit?.messageHandlers?.taskflowNative?.postMessage(state);
+    };
+    publishState();
+    window.addEventListener('taskflow:native-ready', publishState);
+    return () => window.removeEventListener('taskflow:native-ready', publishState);
+  }, [appState]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3762,19 +4428,23 @@ export default function App() {
     if (isLoggingOut) return;
     setIsLoggingOut(true);
     toast(t('account.signingOut'));
-    // Flush dirty tasks to cloud before logout
+    // Do not discard local operations during logout.
     try {
+      const userId = currentUser?.id;
+      const pending = userId ? loadPendingOperations(userId) : [];
+      if (pending.length > 0) {
+        toast.error(t(pending.some(operation => operation.status === 'conflict') ? 'syncDetails.conflict' : 'syncDetails.error'));
+        setIsLoggingOut(false);
+        return;
+      }
       if (cloudSyncEnabled) {
-        const userId = currentUser?.id;
-        const raw = userId ? storageGet(userStorageKey(userId, 'tasks')) : null;
-        if (raw) {
-          const tasks = JSON.parse(raw) as Task[];
-          await flushDirtyTasks(tasks);
-        }
-        // Refresh server-derived stats after flushing pending task changes.
         try { await apiUpdateUserStats(); } catch { /* */ }
       }
-    } catch { /* non-critical */ }
+    } catch {
+      toast.error(t('syncDetails.error'));
+      setIsLoggingOut(false);
+      return;
+    }
 
     try { await apiLogout(); } catch { /* still clean up locally */ }
     if (currentUser?.id) clearUserLocalCache(currentUser.id);

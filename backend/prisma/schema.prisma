@@ -22,6 +22,9 @@ model User {
   updatedAt DateTime @updatedAt
   tasks     Task[]
   stats     UserStats?
+  syncState UserSyncState?
+  devices   Device[]
+  taskChanges TaskChange[]
   refreshSessions RefreshSession[]
   taskOperations TaskOperation[]
 }
@@ -42,6 +45,8 @@ model Task {
   completedAt     String?
   deletedAt       String?
   sortOrder       Int      @default(0)
+  version         Int      @default(1)
+  lastChangedByDeviceId String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -51,6 +56,47 @@ model Task {
   @@index([userId, completedAt])
   @@index([userId, deletedAt])
   @@index([userId, sortOrder])
+  @@index([userId, version])
+}
+
+model Device {
+  id         String   @id
+  userId     String
+  name       String?
+  platform   String?
+  lastSeenAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([lastSeenAt])
+}
+
+model UserSyncState {
+  id               String @id @default(cuid())
+  userId           String @unique
+  nextSeq          Int    @default(1)
+  taskOrderVersion Int    @default(1)
+  user             User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model TaskChange {
+  id          String   @id @default(cuid())
+  userId      String
+  seq         Int
+  taskId      String?
+  operationId String?  @unique
+  deviceId    String?
+  type        String
+  snapshot    Json?
+  tombstone   Json?
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, seq])
+  @@index([userId])
+  @@index([taskId])
+  @@index([createdAt])
 }
 
 model TaskOperation {

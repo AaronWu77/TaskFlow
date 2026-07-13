@@ -5,6 +5,7 @@ import cookieParser from 'cookie-parser';
 import authRouter from './routes/auth';
 import tasksRouter from './routes/tasks';
 import userRouter from './routes/user';
+import syncRouter from './routes/sync';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -31,6 +32,7 @@ app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
 app.use('/auth', authRouter);
 app.use('/tasks', tasksRouter);
+app.use('/sync', syncRouter);
 app.use('/user', userRouter);
 
 app.listen(PORT, () => {
