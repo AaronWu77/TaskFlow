@@ -196,10 +196,15 @@
   "account": {
     "signOut": "退出登录",
     "signingOut": "正在退出登录...",
+    "signOutConfirm": "退出登录后会回到登录页，并清理本机缓存；未上传的本机修改会被丢弃，已同步的数据仍保留在云端。确定退出吗？",
+    "signOutFailed": "退出登录失败，请稍后再试。",
     "data": "数据",
     "deleteAccount": "删除账号",
-    "deleteAccountConfirm": "确定永久删除你的 TaskFlow 账号和所有已同步数据吗？此操作无法撤销。",
+    "deleteAccountConfirm": "确定永久删除你的 TaskFlow 账号和云端数据吗？本机缓存会被清理，未同步修改不会再上传。此操作无法撤销。",
     "deleteAccountFailed": "删除账号失败",
+    "deleteAccountSuccess": "账号已删除",
+    "localCacheNote": "退出登录只清理本机缓存；删除账号会永久移除云端账号和数据，不要求先同步本机修改。",
+    "overview": "账号概览",
     "emailVerified": "邮箱已验证",
     "emailUnverified": "邮箱未验证",
     "preferences": "偏好设置",
@@ -227,6 +232,7 @@
     "sync": "同步",
     "syncHealthy": "同步正常",
     "syncNeedsAttention": "同步需要处理",
+    "syncNotComplete": "同步未完成",
     "syncStatus": "状态",
     "pendingSync": "待同步修改",
     "lastSync": "最近同步",
@@ -282,7 +288,7 @@
   },
   "privacy": {
     "title": "隐私政策",
-    "description": "这是 App 内简版说明，正式公开 URL 会在提交 App Store 前补齐。",
+    "description": "你可以在 App 内直接查看隐私说明，无需打开外部网页。",
     "items": [
       "我们会保存你的邮箱、密码哈希、任务、标签、截止日期、提醒时间、同步信息和统计数据，用于跨设备使用 TaskFlow。",
       "密码会以哈希形式保存，我们不会保存明文密码。",

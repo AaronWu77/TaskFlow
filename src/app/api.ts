@@ -1,10 +1,9 @@
-// API base URL — points to backend. In development use localhost:3000,
-// in production set VITE_API_URL to your server (e.g. https://yourdomain.com/api)
+// API base URL — override with VITE_API_URL when targeting a different backend.
 import { Preferences } from '@capacitor/preferences';
 import { Capacitor } from '@capacitor/core';
 import { createSingleFlight } from './sync-core.mjs';
 
-const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || 'http://localhost:3000';
+const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || 'https://taskflow.top/api';
 
 // Access token stored in memory only (not localStorage) — reduces XSS risk.
 // On page refresh, the token is gone; a silent refresh via stored refreshToken re-issues it.

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { classifySyncError, createSingleFlight, logoutBlockReason, mergeFlushResult } from '../src/app/sync-core.mjs';
+import { classifySyncError, createSingleFlight, mergeFlushResult } from '../src/app/sync-core.mjs';
 
 test('a newer edit keeps its fields and absorbs the server version from the older response', () => {
   const before = [{ id: 'task-1', title: 'first edit', updatedAt: 'T1', _dirty: true, _syncState: 'update', _operationId: 'op-a' }];
@@ -62,12 +62,4 @@ test('single-flight shares one operation across concurrent callers and resets af
   release();
   assert.deepEqual(await Promise.all([first, second]), [1, 1]);
   assert.equal(await run(), 2);
-});
-
-test('logout is blocked whenever unsynced data cannot be confirmed by the server', () => {
-  const clean = [{ id: 'task-1', _dirty: false }];
-  const dirty = [{ id: 'task-1', _dirty: true }];
-  assert.equal(logoutBlockReason(clean, false), null);
-  assert.equal(logoutBlockReason(dirty, false), 'offline');
-  assert.equal(logoutBlockReason(dirty, true), 'pending');
 });

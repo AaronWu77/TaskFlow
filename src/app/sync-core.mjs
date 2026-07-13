@@ -19,11 +19,6 @@ export function createSingleFlight(operation) {
   };
 }
 
-export function logoutBlockReason(tasks, cloudSyncEnabled) {
-  if (!tasks.some(task => task._dirty)) return null;
-  return cloudSyncEnabled ? 'pending' : 'offline';
-}
-
 export function mergeFlushResult(current, before, flushed) {
   const merged = [...current];
   for (const original of before.filter(task => task._dirty)) {

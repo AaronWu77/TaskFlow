@@ -26,7 +26,26 @@ test('React controls are the only task interaction surface', () => {
   assert.match(app, /onClick=\{\(\) => !nativeControls && setDetailTaskId\(task\.id\)\}/);
   assert.match(app, /onClick=\{\(\) => !nativeControls && setRepeatTask\(task\)\}/);
   assert.match(app, /progress:\s*_legacyProgress/);
-  assert.match(app, /Capacitor\.isNativePlatform\(\)\)\s*\{\s*window\.location\.assign\(PRIVACY_POLICY_URL\)/);
+  assert.doesNotMatch(app, /PRIVACY_POLICY_URL/);
+  assert.doesNotMatch(app, /openPublicPrivacyPolicy/);
+  assert.match(app, /onOpenPrivacy=\{\(\) => setPrivacyOpen\(true\)\}/);
+  assert.match(app, /<PrivacyPolicyDialog[\s\S]*open=\{privacyOpen\}/);
+  assert.doesNotMatch(app, /account\.signOutBlockedPending/);
+  assert.doesNotMatch(app, /account\.deleteAccountBlocked/);
+  assert.match(app, /const effectiveSyncStatus = useMemo/);
+  assert.match(app, /visibleSyncStatus\(syncStatus, pendingOperations, syncMeta, cloudSyncEnabled\)/);
+  assert.match(app, /if \(rawStatus === 'error'\) return 'error'/);
+  assert.match(app, /if \(pending\.length > 0 && readyPending\.length === 0\)/);
+  assert.match(app, /const syncRequiresUserAction = effectiveSyncStatus === 'conflict'/);
+  assert.match(app, /const shouldNotify = effectiveSyncStatus === 'error' \|\| effectiveSyncStatus === 'offline' \|\| effectiveSyncStatus === 'conflict'/);
+  assert.match(app, /toast\(t\(`sync\.\$\{effectiveSyncStatus\}`\)/);
+  assert.match(app, /duration: effectiveSyncStatus === 'conflict' \? 6000 : 3500/);
+  assert.match(app, /TaskFlow sync failed/);
+  assert.match(app, /syncStatus=\{effectiveSyncStatus\}/);
+  assert.match(app, /account\.syncNotComplete/);
+  assert.match(app, /const retryAllSyncOperations = React\.useCallback/);
+  assert.match(app, /operation\.status === 'failed'[\s\S]*status: 'pending' as const/);
+  assert.match(app, /onRetrySync=\{retryAllSyncOperations\}/);
 });
 
 test('iOS shell is a thin Capacitor container without SwiftUI native controls', () => {

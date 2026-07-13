@@ -196,10 +196,15 @@
   "account": {
     "signOut": "Sign Out",
     "signingOut": "Signing out...",
+    "signOutConfirm": "Signing out returns to the login screen and clears this device's cache. Unsynced local changes will be discarded, while synced cloud data is kept. Continue?",
+    "signOutFailed": "Could not sign out. Please try again.",
     "data": "Data",
     "deleteAccount": "Delete Account",
-    "deleteAccountConfirm": "Permanently delete your TaskFlow account and all synced data? This cannot be undone.",
+    "deleteAccountConfirm": "Permanently delete your TaskFlow account and cloud data? This device's cache will be cleared, and unsynced changes will not upload. This cannot be undone.",
     "deleteAccountFailed": "Could not delete account",
+    "deleteAccountSuccess": "Account deleted",
+    "localCacheNote": "Signing out only clears this device's cache. Deleting the account permanently removes the cloud account and data without requiring local changes to sync first.",
+    "overview": "Account Overview",
     "emailVerified": "Email verified",
     "emailUnverified": "Email not verified",
     "preferences": "Preferences",
@@ -227,6 +232,7 @@
     "sync": "Sync",
     "syncHealthy": "Sync is healthy",
     "syncNeedsAttention": "Sync needs attention",
+    "syncNotComplete": "Sync is not complete",
     "syncStatus": "Status",
     "pendingSync": "Pending changes",
     "lastSync": "Last synced",
@@ -282,7 +288,7 @@
   },
   "privacy": {
     "title": "Privacy Policy",
-    "description": "A concise in-app summary. The public policy URL will be finalized before App Store submission.",
+    "description": "You can review this privacy summary in the app without opening an external webpage.",
     "items": [
       "We store your email address, hashed password, tasks, tags, due dates, reminders, sync metadata, and productivity stats so TaskFlow can work across devices.",
       "Passwords are stored as hashes. We do not store your plain text password.",

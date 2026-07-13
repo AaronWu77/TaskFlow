@@ -26,6 +26,7 @@ type AppState = 'loading' | 'auth' | 'app';
 type ExitAction = 'complete' | 'skip' | 'snooze';
 type TaskActionState = { taskId: string; action: ExitAction };
 type NotificationPermissionState = 'unsupported' | 'prompt' | 'granted' | 'denied';
+type SyncStatus = 'idle' | 'syncing' | 'offline' | 'pending' | 'conflict' | 'error';
 
 interface Task {
   id: string;
@@ -68,6 +69,22 @@ type PendingOperation = PendingSyncOperationDTO & {
   conflictedFields?: string[];
   detectedAt?: string;
 };
+
+function visibleSyncStatus(rawStatus: SyncStatus, operations: PendingOperation[], meta: SyncMeta, cloudSyncEnabled: boolean): SyncStatus {
+  if (!cloudSyncEnabled) return 'idle';
+  if (operations.some(operation => operation.status === 'conflict')) return 'conflict';
+  if (operations.some(operation => operation.status === 'failed')) return 'error';
+  if (rawStatus === 'error') return 'error';
+  if (rawStatus === 'offline') return 'offline';
+  if (operations.some(operation => operation.status === 'pending')) {
+    if (rawStatus === 'syncing') return 'syncing';
+    return navigator.onLine ? 'pending' : 'offline';
+  }
+  if (rawStatus === 'syncing') return 'syncing';
+  if (!meta.lastSuccessfulSyncAt) return navigator.onLine ? 'pending' : 'offline';
+  if (rawStatus === 'conflict' || rawStatus === 'error' || rawStatus === 'offline') return rawStatus;
+  return 'idle';
+}
 const SESSION_KEY = 'taskflow_session';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -480,7 +497,6 @@ const PRIORITY_LABEL = { P1: 'High Priority', P2: 'Medium Priority', P3: 'Low Pr
 const PRIORITY_LABEL_KEY: Record<Priority, string> = { P1: 'priority.P1', P2: 'priority.P2', P3: 'priority.P3' };
 const DOT_COLOR = { P1: 'bg-rose-500', P2: 'bg-amber-400', P3: 'bg-emerald-500' };
 const ACCENT_THEME_KEY = 'taskflow_accent_theme';
-const PRIVACY_POLICY_URL = 'https://taskflow.top/privacy';
 
 type AccentTheme = 'tcx111400' | 'tcx134306' | 'tcx133802' | 'tcx136006' | 'tcx121107';
 
@@ -2150,7 +2166,7 @@ function AccountPage({ email, emailVerified, notificationPermission, accentTheme
   onOpenPrivacy: () => void;
   onRequestNotifications: () => void;
   onOpenConflicts: () => void;
-  syncStatus: 'idle' | 'syncing' | 'offline' | 'pending' | 'conflict' | 'error';
+  syncStatus: SyncStatus;
   lastSync: string;
   pendingSyncCount: number;
   conflictCount: number;
@@ -2159,6 +2175,16 @@ function AccountPage({ email, emailVerified, notificationPermission, accentTheme
   const displayName = email.split('@')[0];
   const lastSyncLabel = lastSync ? new Date(lastSync).toLocaleString(i18n.language === 'zh' ? 'zh-CN' : 'en-US') : t('account.neverSynced');
   const syncNeedsAttention = syncStatus === 'conflict' || syncStatus === 'error';
+  const syncSummaryLabel = syncStatus === 'idle'
+    ? t('account.syncHealthy')
+    : syncNeedsAttention
+      ? t('account.syncNeedsAttention')
+      : t('account.syncNotComplete');
+  const syncBadgeClass = syncNeedsAttention
+    ? 'bg-destructive/10 text-destructive'
+    : syncStatus === 'syncing' || syncStatus === 'pending'
+      ? 'bg-amber-500/10 text-amber-700'
+      : 'bg-emerald-500/10 text-emerald-600';
 
   return (
     <motion.div
@@ -2180,31 +2206,22 @@ function AccountPage({ email, emailVerified, notificationPermission, accentTheme
 
       {/* Content */}
       <div className="flex-1 w-full overflow-y-auto px-6 pt-safe pb-6">
-      <div className="mx-auto flex w-full max-w-md flex-col items-center pt-16">
-        {/* Avatar */}
-        <div className="w-24 h-24 rounded-full bg-muted flex items-center justify-center mb-6">
-          <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='1.5'%3E%3Cpath d='M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='12' cy='7' r='4'/%3E%3C/svg%3E"
-            alt="Avatar" className="w-10 h-10 opacity-50" />
-        </div>
-
-        {/* Username */}
-        <h2 className="text-xl font-bold text-foreground mb-1">{displayName}</h2>
-        <p className="text-sm text-muted-foreground">{email}</p>
-        <span className={cn('mt-2 rounded-full px-2.5 py-1 text-xs font-semibold', emailVerified ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600')}>
-          {emailVerified ? t('account.emailVerified') : t('account.emailUnverified')}
-        </span>
-        <div className={cn(
-          'mt-5 w-full rounded-2xl border px-4 py-3 text-sm',
-          syncNeedsAttention ? 'border-destructive/30 bg-destructive/10 text-destructive' : 'border-border bg-card text-foreground'
-        )}>
-          <div className="flex items-center justify-between gap-3">
-            <span className="font-semibold">{syncNeedsAttention ? t('account.syncNeedsAttention') : t('account.syncHealthy')}</span>
-            <span className="rounded-full bg-background/70 px-2 py-0.5 text-xs font-semibold">{t(`sync.${syncStatus}`)}</span>
+      <div className="mx-auto flex w-full max-w-md flex-col pt-16">
+        <div className="flex items-center gap-4 rounded-2xl border border-border bg-card px-4 py-4">
+          <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-muted">
+            <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='1.5'%3E%3Cpath d='M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='12' cy='7' r='4'/%3E%3C/svg%3E"
+              alt="Avatar" className="h-9 w-9 opacity-50" />
           </div>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t(`syncDetails.${syncStatus}`)}</p>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.overview')}</p>
+            <h2 className="mt-1 truncate text-xl font-bold text-foreground">{displayName}</h2>
+            <p className="truncate text-sm text-muted-foreground">{email}</p>
+            <span className={cn('mt-2 inline-flex rounded-full px-2.5 py-1 text-xs font-semibold', emailVerified ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600')}>
+              {emailVerified ? t('account.emailVerified') : t('account.emailUnverified')}
+            </span>
+          </div>
         </div>
 
-        {/* Settings */}
         <div className="mt-5 w-full space-y-5">
           {/* Accent color */}
           <div className="space-y-2">
@@ -2255,11 +2272,12 @@ function AccountPage({ email, emailVerified, notificationPermission, accentTheme
             <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.sync')}</p>
             <div className="rounded-xl border border-border bg-card px-4 py-3 text-sm">
               <div className="flex items-center justify-between gap-3">
-                <span className="font-semibold text-foreground">{t('account.syncStatus')}</span>
-                <span className={cn('rounded-full px-2 py-0.5 text-xs font-semibold', syncStatus === 'conflict' || syncStatus === 'error' ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground')}>
+                <span className="font-semibold text-foreground">{syncSummaryLabel}</span>
+                <span className={cn('rounded-full px-2 py-0.5 text-xs font-semibold', syncBadgeClass)}>
                   {t(`sync.${syncStatus}`)}
                 </span>
               </div>
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{t(`syncDetails.${syncStatus}`)}</p>
               <div className="mt-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
                 <span>{t('account.pendingSync')}</span>
                 <span>{pendingSyncCount}</span>
@@ -2335,6 +2353,7 @@ function AccountPage({ email, emailVerified, notificationPermission, accentTheme
 
           <div className="space-y-2">
             <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.security')}</p>
+            <p className="text-xs leading-relaxed text-muted-foreground">{t('account.localCacheNote')}</p>
             <button
               type="button"
               onClick={onDeleteAccount}
@@ -2477,6 +2496,7 @@ function AppShell({
   accentTheme,
   onAccentThemeChange,
   onLogout,
+  onAccountDeleted,
   isLoggingOut,
   cloudSyncEnabled,
 }: {
@@ -2484,6 +2504,7 @@ function AppShell({
   accentTheme: AccentTheme;
   onAccentThemeChange: (theme: AccentTheme) => void;
   onLogout: () => void;
+  onAccountDeleted: () => void;
   isLoggingOut: boolean;
   cloudSyncEnabled: boolean;
 }) {
@@ -2506,6 +2527,7 @@ function AppShell({
   const actionLocksRef = React.useRef(new Set<string>());
   const syncInFlightRef = React.useRef(false);
   const syncRequestedRef = React.useRef(false);
+  const syncNoticeKeyRef = React.useRef('');
   const scheduledNotificationIdsRef = React.useRef(new Set<number>());
   const [tasksLoading, setTasksLoading] = useState(true);
   const [exitAction, setExitAction] = useState<TaskActionState | null>(null);
@@ -2515,6 +2537,7 @@ function AppShell({
   const [isReordering, setIsReordering] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [conflictsOpen, setConflictsOpen] = useState(false);
+  const [privacyOpen, setPrivacyOpen] = useState(false);
   const [flowDetailTaskId, setFlowDetailTaskId] = useState<string | null>(null);
   const [manageTaskId, setManageTaskId] = useState<string | null>(null);
 
@@ -2523,7 +2546,7 @@ function AppShell({
   const [showQuickReminder, setShowQuickReminder] = useState(false);
   const [isRepeatMode, setIsRepeatMode] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
-  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'offline' | 'pending' | 'conflict' | 'error'>('idle');
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermissionState>('unsupported');
   const [form, setForm] = useState<AddTaskState>(() => defaultAddTaskForm());
   const [formErrors, setFormErrors] = useState<AddTaskErrors>({});
@@ -2827,6 +2850,11 @@ function AppShell({
     try {
       const pending = pendingOperationsRef.current.filter(operation => operation.status === 'pending');
       const readyPending = pending.filter(isOperationReady);
+      if (pending.length > 0 && readyPending.length === 0) {
+        console.warn('TaskFlow sync queue has pending operations waiting on unresolved local ids', pending);
+        setSyncStatus('error');
+        return;
+      }
       if (readyPending.length > 0) {
         attemptedOperationIds = new Set(readyPending.map(operation => operation.operationId));
         const response = await apiPushOperations(getDeviceId(user.id), readyPending);
@@ -2930,6 +2958,11 @@ function AppShell({
       const hasPending = nextPending.some(operation => operation.status === 'pending');
       setSyncStatus(hasConflict ? 'conflict' : hasFailed ? 'error' : hasPending ? 'pending' : 'idle');
     } catch (error) {
+      console.error('TaskFlow sync failed', {
+        error,
+        attemptedOperationIds: Array.from(attemptedOperationIds),
+        pendingOperations: pendingOperationsRef.current,
+      });
       setSyncStatus(navigator.onLine ? 'error' : 'offline');
       if (attemptedOperationIds.size > 0) {
         setPendingOperationsAndCache(current => current.map(operation =>
@@ -2949,6 +2982,20 @@ function AppShell({
   }, [applyRemoteChange, cloudSyncEnabled, setPendingOperationsAndCache, setSyncMetaAndCache, setTasksAndCache, toTask, user.id]);
 
   const retryDirtyTasks = runSync;
+  const retryAllSyncOperations = React.useCallback(() => {
+    const failedOperations = pendingOperationsRef.current.filter(operation => operation.status === 'failed');
+    if (failedOperations.length > 0) {
+      const next = pendingOperationsRef.current.map(operation =>
+        operation.status === 'failed'
+          ? { ...operation, status: 'pending' as const, retryCount: 0 }
+          : operation
+      );
+      pendingOperationsRef.current = next;
+      savePendingOperations(user.id, next);
+      setPendingOperations(next);
+    }
+    void runSync();
+  }, [runSync, user.id]);
 
   useEffect(() => {
     retryDirtyTasks();
@@ -2976,8 +3023,31 @@ function AppShell({
   const pendingTasks = useMemo(() => activeTasks.filter(t => t.status === 'todo'), [activeTasks]);
   const pendingSyncCount = useMemo(() => pendingOperations.length, [pendingOperations]);
   const conflictOperations = useMemo(() => pendingOperations.filter(operation => operation.status === 'conflict'), [pendingOperations]);
+  const effectiveSyncStatus = useMemo(
+    () => visibleSyncStatus(syncStatus, pendingOperations, syncMeta, cloudSyncEnabled),
+    [cloudSyncEnabled, pendingOperations, syncMeta, syncStatus]
+  );
+  const syncRequiresUserAction = effectiveSyncStatus === 'conflict';
   const flowDetailTask = flowDetailTaskId ? activeTasks.find(t => t.id === flowDetailTaskId) ?? null : null;
   const manageTask = manageTaskId ? activeTasks.find(t => t.id === manageTaskId) ?? null : null;
+
+  useEffect(() => {
+    const shouldNotify = effectiveSyncStatus === 'error' || effectiveSyncStatus === 'offline' || effectiveSyncStatus === 'conflict';
+    if (!shouldNotify) {
+      if (effectiveSyncStatus === 'idle') syncNoticeKeyRef.current = '';
+      return;
+    }
+    const noticeKey = `${effectiveSyncStatus}:${pendingSyncCount}:${conflictOperations.length}`;
+    if (syncNoticeKeyRef.current === noticeKey) return;
+    syncNoticeKeyRef.current = noticeKey;
+    toast(t(`sync.${effectiveSyncStatus}`), {
+      description: t(`syncDetails.${effectiveSyncStatus}`),
+      duration: effectiveSyncStatus === 'conflict' ? 6000 : 3500,
+      action: effectiveSyncStatus === 'conflict'
+        ? { label: t('syncConflict.open'), onClick: () => setConflictsOpen(true) }
+        : undefined,
+    });
+  }, [conflictOperations.length, effectiveSyncStatus, pendingSyncCount, t]);
 
   useEffect(() => {
     if (conflictsOpen && conflictOperations.length === 0) setConflictsOpen(false);
@@ -3416,13 +3486,12 @@ function AppShell({
     try {
       await apiDeleteAccount();
       clearUserLocalCache(user.id);
-      clearSession();
-      clearLocalAuthTokens();
-      onLogout();
+      onAccountDeleted();
+      toast.success(t('account.deleteAccountSuccess'));
     } catch {
       toast.error(t('account.deleteAccountFailed'));
     }
-  }, [onLogout, t, user.id]);
+  }, [onAccountDeleted, t, user.id]);
 
   const handleDeleteTask = (task: Task) => {
     const deletedAt = new Date().toISOString();
@@ -3478,14 +3547,6 @@ function AppShell({
     setEditingTaskId(null);
     setShowQuickReminder(false);
     setIsAddingTask(true);
-  };
-
-  const openPublicPrivacyPolicy = () => {
-    if (Capacitor.isNativePlatform()) {
-      window.location.assign(PRIVACY_POLICY_URL);
-      return;
-    }
-    window.open(PRIVACY_POLICY_URL, '_blank', 'noopener,noreferrer');
   };
 
   const openDraftDetails = () => {
@@ -3699,17 +3760,22 @@ function AppShell({
             }}
             deletedCount={tasks.filter(task => !!task.deletedAt).length || deletedTasks.length}
             onDeleteAccount={handleDeleteAccount}
-            onRetrySync={retryDirtyTasks}
-            onOpenPrivacy={openPublicPrivacyPolicy}
+            onRetrySync={retryAllSyncOperations}
+            onOpenPrivacy={() => setPrivacyOpen(true)}
             onRequestNotifications={() => refreshNotificationPermission(true)}
             onOpenConflicts={() => setConflictsOpen(true)}
-            syncStatus={syncStatus}
+            syncStatus={effectiveSyncStatus}
             lastSync={syncMeta.lastSuccessfulSyncAt}
             pendingSyncCount={pendingSyncCount}
             conflictCount={conflictOperations.length}
           />
         )}
       </AnimatePresence>
+
+      <PrivacyPolicyDialog
+        open={privacyOpen}
+        onClose={() => setPrivacyOpen(false)}
+      />
 
       <AnimatePresence>
         {conflictsOpen && (
@@ -3750,25 +3816,21 @@ function AppShell({
           </div>
       </header>
 
-      {syncStatus !== 'idle' && (
+      {syncRequiresUserAction && (
         <div
           className="w-full max-w-md px-4 sm:px-6 mb-3"
-          role={syncStatus === 'error' || syncStatus === 'conflict' ? 'alert' : 'status'}
+          role="alert"
           aria-live="polite"
         >
           <button
-            onClick={syncStatus === 'conflict' ? () => setConflictsOpen(true) : retryDirtyTasks}
-            className={`w-full flex flex-col items-center justify-center gap-1 rounded-xl border px-3 py-2 text-xs font-semibold ${
-              syncStatus === 'error' || syncStatus === 'conflict'
-                ? 'border-destructive/30 bg-destructive/10 text-destructive'
-                : 'border-border bg-card text-muted-foreground'
-            }`}
+            onClick={() => setConflictsOpen(true)}
+            className="w-full flex flex-col items-center justify-center gap-1 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs font-semibold text-destructive"
           >
             <span className="flex items-center gap-2">
-              <RotateCw className={`w-3.5 h-3.5 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
-              {t(`sync.${syncStatus}`)}
+              <RotateCw className="w-3.5 h-3.5" />
+              {t(`sync.${effectiveSyncStatus}`)}
             </span>
-            <span className="font-normal opacity-80">{t(`syncDetails.${syncStatus}`)}</span>
+            <span className="font-normal opacity-80">{t(`syncDetails.${effectiveSyncStatus}`)}</span>
           </button>
         </div>
       )}
@@ -4154,36 +4216,27 @@ export default function App() {
     setAppState('app');
   }
 
-  async function handleLogout() {
-    if (isLoggingOut) return;
-    setIsLoggingOut(true);
-    toast(t('account.signingOut'));
-    // Do not discard local operations during logout.
-    try {
-      const userId = currentUser?.id;
-      const pending = userId ? loadPendingOperations(userId) : [];
-      if (pending.length > 0) {
-        toast.error(t(pending.some(operation => operation.status === 'conflict') ? 'syncDetails.conflict' : 'syncDetails.error'));
-        setIsLoggingOut(false);
-        return;
-      }
-      if (cloudSyncEnabled) {
-        try { await apiUpdateUserStats(); } catch { /* */ }
-      }
-    } catch {
-      toast.error(t('syncDetails.error'));
-      setIsLoggingOut(false);
-      return;
-    }
-
-    try { await apiLogout(); } catch { /* still clean up locally */ }
-    if (currentUser?.id) clearUserLocalCache(currentUser.id);
+  function finishSignedOutSession() {
     clearSession();
     clearLocalAuthTokens();
     setCloudSyncEnabled(false);
     setAppState('auth');
     setCurrentUser(null);
     setIsLoggingOut(false);
+  }
+
+  async function handleLogout() {
+    if (isLoggingOut) return;
+    const confirmed = window.confirm(t('account.signOutConfirm'));
+    if (!confirmed) return;
+    setIsLoggingOut(true);
+    toast(t('account.signingOut'));
+    if (cloudSyncEnabled) {
+      try { await apiUpdateUserStats(); } catch { /* signing out is a local user choice */ }
+    }
+    try { await apiLogout(); } catch { /* still clean up locally */ }
+    if (currentUser?.id) clearUserLocalCache(currentUser.id);
+    finishSignedOutSession();
   }
 
   if (appState === 'loading') {
@@ -4208,6 +4261,7 @@ export default function App() {
       accentTheme={accentTheme}
       onAccentThemeChange={setAccentTheme}
       onLogout={handleLogout}
+      onAccountDeleted={finishSignedOutSession}
       isLoggingOut={isLoggingOut}
       cloudSyncEnabled={cloudSyncEnabled}
     />
