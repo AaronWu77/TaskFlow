@@ -26,73 +26,6 @@ type AppState = 'loading' | 'auth' | 'app';
 type ExitAction = 'complete' | 'skip' | 'snooze';
 type TaskActionState = { taskId: string; action: ExitAction };
 type NotificationPermissionState = 'unsupported' | 'prompt' | 'granted' | 'denied';
-type NativeBridgeAction =
-  | 'setView'
-  | 'openAccount'
-  | 'addTask'
-  | 'createTask'
-  | 'updateCurrentTask'
-  | 'completeCurrent'
-  | 'snoozeCurrent'
-  | 'openDate'
-  | 'openReminder'
-  | 'openRepeat';
-type NativeBridgeActionMessage = {
-  source?: string;
-  protocolVersion?: number;
-  action?: NativeBridgeAction;
-  actionId?: string;
-  payload?: {
-    view?: ViewMode;
-    title?: string;
-    priority?: Priority;
-    dueDate?: string | null;
-    estimateMinutes?: number | null;
-    tag?: string | null;
-    reminderAt?: string | null;
-    repeatRule?: 'none' | 'daily' | 'weekly' | 'monthly';
-    repeatUntilDate?: string | null;
-  };
-};
-type NativeBridgeState = {
-  source: 'taskflow.react';
-  type: 'uiState';
-  protocolVersion: 2;
-  sequence: number;
-  payload: {
-    appState: AppState;
-    currentView: ViewMode;
-    currentTask: {
-      id: string;
-      title: string;
-      priority: Priority;
-      dueDate: string | null;
-      estimateMinutes: number | null;
-      tag: string | null;
-      reminderAt: string | null;
-      repeatRule: 'none' | 'daily' | 'weekly' | 'monthly';
-      repeatUntilDate: string | null;
-    } | null;
-    pendingCount: number;
-    canComplete: boolean;
-    isSyncing: boolean;
-    syncStatus: 'idle' | 'syncing' | 'offline' | 'pending' | 'conflict' | 'error';
-    isSheetOpen: boolean;
-  };
-};
-
-declare global {
-  interface Window {
-    webkit?: {
-      messageHandlers?: {
-        taskflowNative?: {
-          postMessage: (message: NativeBridgeState) => void;
-        };
-      };
-    };
-    __taskflowNativeState?: NativeBridgeState;
-  }
-}
 
 interface Task {
   id: string;
@@ -1697,7 +1630,7 @@ function CalendarView({ tasks, onAction, onAddTask, onRepeatTask, onManageTask, 
   showAddTaskPrompt?: boolean;
   nativeControls?: boolean;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const today = new Date();
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth());
@@ -2571,8 +2504,6 @@ function AppShell({
   syncMetaRef.current = syncMeta;
   const hasInteractedRef = React.useRef(false);
   const actionLocksRef = React.useRef(new Set<string>());
-  const nativeActionIdsRef = React.useRef(new Set<string>());
-  const nativeStateSequenceRef = React.useRef(0);
   const syncInFlightRef = React.useRef(false);
   const syncRequestedRef = React.useRef(false);
   const scheduledNotificationIdsRef = React.useRef(new Set<number>());
@@ -2847,6 +2778,19 @@ function AppShell({
     else setSyncStatus('idle');
   }, [cloudSyncEnabled, pendingOperations]);
 
+  useEffect(() => {
+    if (syncStatus !== 'syncing') return;
+    const timer = window.setTimeout(() => {
+      if (syncInFlightRef.current) return;
+      const current = pendingOperationsRef.current;
+      if (current.some(operation => operation.status === 'conflict')) setSyncStatus('conflict');
+      else if (current.some(operation => operation.status === 'failed')) setSyncStatus('error');
+      else if (current.some(operation => operation.status === 'pending')) setSyncStatus(navigator.onLine ? 'pending' : 'offline');
+      else setSyncStatus('idle');
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [syncStatus]);
+
   const applyRemoteChange = React.useCallback((currentTasks: Task[], change: SyncChangeDTO): Task[] => {
     if (change.type === 'reorder' && change.snapshot && 'order' in change.snapshot && Array.isArray(change.snapshot.order)) {
       const orderMap = new Map(change.snapshot.order.map(item => [item.id, item.sortOrder]));
@@ -2965,12 +2909,16 @@ function AppShell({
 
       let cursor = syncMetaRef.current.syncCursor;
       let hasMore = true;
+      let pullPages = 0;
       let lastServerTime = new Date().toISOString();
       while (hasMore) {
+        pullPages += 1;
+        if (pullPages > 20) throw new Error('Sync pull pagination did not converge');
         const pulled = await apiPullChanges(cursor);
         if (pulled.changes.length > 0) {
           setTasksAndCache(current => pulled.changes.reduce((next, change) => applyRemoteChange(next, change), current));
         }
+        if (pulled.nextCursor === cursor && pulled.hasMore) throw new Error('Sync cursor did not advance');
         cursor = pulled.nextCursor;
         hasMore = pulled.hasMore;
         lastServerTime = pulled.serverTime;
@@ -3030,6 +2978,10 @@ function AppShell({
   const conflictOperations = useMemo(() => pendingOperations.filter(operation => operation.status === 'conflict'), [pendingOperations]);
   const flowDetailTask = flowDetailTaskId ? activeTasks.find(t => t.id === flowDetailTaskId) ?? null : null;
   const manageTask = manageTaskId ? activeTasks.find(t => t.id === manageTaskId) ?? null : null;
+
+  useEffect(() => {
+    if (conflictsOpen && conflictOperations.length === 0) setConflictsOpen(false);
+  }, [conflictOperations.length, conflictsOpen]);
 
   const removeConflictOperation = React.useCallback((operationId: string) => {
     setPendingOperationsAndCache(prev => prev.filter(operation => operation.operationId !== operationId));
@@ -3703,193 +3655,6 @@ function AppShell({
     closeTaskDetails();
   };
 
-  useEffect(() => {
-    if (!Capacitor.isNativePlatform()) return;
-    const topTask = pendingTasks[0] ?? null;
-    const state: NativeBridgeState = {
-      source: 'taskflow.react',
-      type: 'uiState',
-      protocolVersion: 2,
-      sequence: nativeStateSequenceRef.current + 1,
-      payload: {
-        appState: 'app',
-        currentView: viewMode,
-        currentTask: topTask ? {
-          id: topTask.id,
-          title: topTask.title,
-          priority: topTask.priority,
-          dueDate: topTask.dueDate ?? null,
-          estimateMinutes: topTask.estimateMinutes,
-          tag: topTask.tag ?? null,
-          reminderAt: topTask.reminderAt ?? null,
-          repeatRule: topTask.repeatRule ?? 'none',
-          repeatUntilDate: topTask.repeatUntilDate ?? null,
-        } : null,
-        pendingCount: pendingTasks.length,
-        canComplete: !!topTask && !actingTaskIds.has(topTask.id),
-        isSyncing: syncStatus === 'syncing',
-        syncStatus,
-        isSheetOpen: isAddingTask || isTaskDetailsOpen || accountOpen || isReordering,
-      },
-    };
-    nativeStateSequenceRef.current = state.sequence;
-    window.__taskflowNativeState = state;
-    window.webkit?.messageHandlers?.taskflowNative?.postMessage(state);
-  }, [accountOpen, actingTaskIds, isAddingTask, isReordering, isTaskDetailsOpen, pendingTasks, syncStatus, viewMode]);
-
-  useEffect(() => {
-    if (!Capacitor.isNativePlatform()) return;
-    const allowedActions = new Set<NativeBridgeAction>([
-      'setView',
-      'openAccount',
-      'addTask',
-      'createTask',
-      'updateCurrentTask',
-      'completeCurrent',
-      'snoozeCurrent',
-      'openDate',
-      'openReminder',
-      'openRepeat',
-    ]);
-    const openCurrentDetails = () => {
-      const current = pendingTasks[0];
-      if (current) {
-        openEditTask(current);
-        return;
-      }
-      openAddTask();
-    };
-    const handleNativeAction = (event: Event) => {
-      const detail = (event as CustomEvent<NativeBridgeActionMessage>).detail;
-      if (!detail || detail.source !== 'taskflow.native' || detail.protocolVersion !== 2 || !detail.action) return;
-      if (!allowedActions.has(detail.action)) return;
-      if (detail.actionId) {
-        if (nativeActionIdsRef.current.has(detail.actionId)) return;
-        nativeActionIdsRef.current.add(detail.actionId);
-        if (nativeActionIdsRef.current.size > 50) {
-          const [first] = nativeActionIdsRef.current;
-          nativeActionIdsRef.current.delete(first);
-        }
-      }
-      const current = pendingTasks[0];
-      switch (detail.action) {
-        case 'setView':
-          if (detail.payload?.view === 'flow' || detail.payload?.view === 'calendar') setViewMode(detail.payload.view);
-          break;
-        case 'openAccount':
-          setAccountOpen(true);
-          break;
-        case 'addTask':
-          openAddTask();
-          break;
-        case 'createTask': {
-          const title = detail.payload?.title?.trim();
-          if (!title) return;
-          const candidate: AddTaskState = {
-            title,
-            priority: detail.payload?.priority ?? 'P2',
-            dueDate: detail.payload?.dueDate || quickDueDate(0),
-            reminderAt: detail.payload?.reminderAt || '',
-            minutes: detail.payload?.estimateMinutes ? String(detail.payload.estimateMinutes) : '',
-            tag: detail.payload?.tag || '',
-            repeatRule: detail.payload?.repeatRule ?? 'none',
-            repeatUntilDate: detail.payload?.repeatUntilDate || '',
-          };
-          const errors = validateTaskForm(candidate);
-          if (Object.keys(errors).length > 0) {
-            toast.error(Object.values(errors)[0]);
-            return;
-          }
-          createTaskFromForm(candidate);
-          setViewMode('flow');
-          toast(t('task.created'), { description: t('task.createdDesc') });
-          break;
-        }
-        case 'updateCurrentTask': {
-          if (!current) return;
-          const patch: Partial<Task> = {
-            title: detail.payload?.title?.trim() || current.title,
-            priority: detail.payload?.priority ?? current.priority,
-            estimateMinutes: detail.payload?.estimateMinutes ?? null,
-            dueDate: detail.payload?.dueDate || current.dueDate || quickDueDate(0),
-            reminderAt: detail.payload?.reminderAt ?? null,
-            repeatRule: detail.payload?.repeatRule ?? 'none',
-            repeatUntilDate: detail.payload?.repeatRule && detail.payload.repeatRule !== 'none' ? detail.payload.repeatUntilDate ?? null : null,
-            tag: detail.payload?.tag ?? null,
-          };
-          const candidate: AddTaskState = {
-            title: patch.title ?? '',
-            priority: patch.priority ?? 'P2',
-            dueDate: patch.dueDate || '',
-            reminderAt: patch.reminderAt || '',
-            minutes: patch.estimateMinutes ? String(patch.estimateMinutes) : '',
-            tag: patch.tag || '',
-            repeatRule: patch.repeatRule ?? 'none',
-            repeatUntilDate: patch.repeatUntilDate || '',
-          };
-          const errors = validateTaskForm(candidate);
-          if (Object.keys(errors).length > 0) {
-            toast.error(Object.values(errors)[0]);
-            return;
-          }
-          const editedTask: Task = { ...current, ...patch };
-          const repeatedTasks = patch.repeatUntilDate
-            ? buildRepeatedTasks(
-              editedTask,
-              repeatDatesAfterStart(candidate.dueDate, patch.repeatUntilDate, candidate.repeatRule).filter(dueDate =>
-                !tasksRef.current.some(task =>
-                  task.id !== current.id
-                  && !task.deletedAt
-                  && task.dueDate === dueDate
-                  && task.title === editedTask.title
-                  && task.repeatRule === editedTask.repeatRule
-                )
-              ),
-              tasksRef.current.filter(task => task.status === 'todo' && !task.deletedAt).length
-            )
-            : [];
-          const operationId = syncOperationId();
-          setTasksAndCache(prev => markDirty([...prev.map(task => task.id === current.id ? { ...task, ...patch } : task), ...repeatedTasks], current.id, 'update', operationId));
-          for (const repeatedTask of repeatedTasks) {
-            queueOperation({
-              operationId: repeatedTask._operationId || syncOperationId(),
-              type: 'create',
-              clientTaskId: repeatedTask.id,
-              payload: taskPatch(repeatedTask),
-            });
-          }
-          persistTaskUpdate(current.id, patch, operationId).then((canFlushRepeatedTasks) => {
-            if (canFlushRepeatedTasks && repeatedTasks.length > 0) void retryDirtyTasks();
-          });
-          break;
-        }
-        case 'completeCurrent':
-          if (current && !actingTaskIds.has(current.id)) handleAction(current.id, 'complete');
-          break;
-        case 'snoozeCurrent':
-          if (current && !actingTaskIds.has(current.id)) handleAction(current.id, 'snooze');
-          break;
-        case 'openDate':
-        case 'openReminder':
-        case 'openRepeat':
-          openCurrentDetails();
-          break;
-      }
-    };
-    const handleNativeReady = () => {
-      if (window.__taskflowNativeState) {
-        window.webkit?.messageHandlers?.taskflowNative?.postMessage(window.__taskflowNativeState);
-      }
-    };
-    window.addEventListener('taskflow:native-action', handleNativeAction);
-    window.addEventListener('taskflow:native-ready', handleNativeReady);
-    return () => {
-      window.removeEventListener('taskflow:native-action', handleNativeAction);
-      window.removeEventListener('taskflow:native-ready', handleNativeReady);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [actingTaskIds, pendingTasks]);
-  
   return (
     <MotionConfig reducedMotion="user">
     <div className="app-viewport app-safe-y bg-background text-foreground flex flex-col items-center overscroll-none selection:bg-primary/20">
@@ -3960,8 +3725,7 @@ function AppShell({
         )}
       </AnimatePresence>
 
-      {!isNativeShell && (
-        <header className="w-full max-w-md px-4 sm:px-6 flex items-center justify-between mb-4">
+      <header className="w-full max-w-md px-4 sm:px-6 flex items-center justify-between mb-4">
           <div>
             <h1 className="text-xl font-semibold tracking-normal">{greeting}</h1>
             <p className="text-muted-foreground text-sm flex items-center gap-1.5 mt-1">
@@ -3984,8 +3748,7 @@ function AppShell({
                 alt="User" className="w-5 h-5 opacity-60" />
             </button>
           </div>
-        </header>
-      )}
+      </header>
 
       {syncStatus !== 'idle' && (
         <div
@@ -4034,11 +3797,9 @@ function AppShell({
         }}
       />
 
-      {!isNativeShell && (
-        <div className="w-full max-w-md px-4 sm:px-6 flex justify-center mb-5">
+      <div className="w-full max-w-md px-4 sm:px-6 flex justify-center mb-5">
           <ViewToggle view={viewMode} onChange={setViewMode} />
-        </div>
-      )}
+      </div>
 
       {/* Loading state */}
       {tasksLoading ? (
@@ -4061,12 +3822,12 @@ function AppShell({
           transition={shouldReduceMotion ? { duration: 0 } : { type: 'spring', stiffness: 360, damping: 36, mass: 0.85 }}
         >
           {/* ── Flow panel ── */}
-          <div className={cn('h-full overflow-y-auto px-4 sm:px-6', isNativeShell ? 'pb-[calc(env(safe-area-inset-bottom)+8.5rem)]' : 'pb-4')} style={{ width: '50%' }}>
+          <div className="h-full overflow-y-auto px-4 sm:px-6 pb-4" style={{ width: '50%' }}>
             {pendingTasks.length > 0 ? (
               <div className="mx-auto flex min-h-full w-full max-w-sm flex-col items-center gap-3">
                 <div className={cn(
                   'relative h-[clamp(360px,54vh,470px)] w-full max-w-[360px] shrink-0',
-                  isNativeShell ? 'mt-[clamp(4.25rem,9vh,6rem)]' : 'mt-[clamp(1.75rem,5vh,3.25rem)]'
+                  'mt-[clamp(1.75rem,5vh,3.25rem)]'
                 )}>
                   <AnimatePresence custom={exitAction} mode="popLayout">
                     {pendingTasks.slice(0, 3).map((task, index) => {
@@ -4092,7 +3853,7 @@ function AppShell({
                             onAction={handleAction}
                             pendingAction={exitAction?.taskId === task.id ? exitAction.action : null}
                             actionDisabled={actingTaskIds.has(task.id)}
-                            onOpen={isTop && !isNativeShell ? () => setFlowDetailTaskId(task.id) : undefined}
+                            onOpen={isTop ? () => setFlowDetailTaskId(task.id) : undefined}
                           />
                         </motion.div>
                       );
@@ -4146,9 +3907,7 @@ function AppShell({
                 </div>
                 <h2 className="text-xl font-semibold mb-2">{activeTasks.length === 0 ? t('task.emptyNewTitle') : t('task.allCaughtUp')}</h2>
                 <p className="text-sm text-muted-foreground mb-7">{activeTasks.length === 0 ? t('task.emptyNewDesc') : t('task.allCaughtUpDesc')}</p>
-                {!isNativeShell && (
-                  <button onClick={openAddTask} className="w-full py-3 bg-primary text-primary-foreground font-semibold rounded-xl">{t('task.addNewTask')}</button>
-                )}
+                <button onClick={openAddTask} className="w-full py-3 bg-primary text-primary-foreground font-semibold rounded-xl">{t('task.addNewTask')}</button>
               </motion.div>
             )}
           </div>
@@ -4162,8 +3921,8 @@ function AppShell({
               onRepeatTask={handleRepeatTask}
               onManageTask={(task) => setManageTaskId(task.id)}
               actingTaskIds={actingTaskIds}
-              showAddTaskPrompt={!isNativeShell}
-              nativeControls={isNativeShell}
+              showAddTaskPrompt
+              nativeControls={false}
             />
           </div>
         </motion.div>
@@ -4179,8 +3938,7 @@ function AppShell({
       </>
       )}
 
-      {!isNativeShell && (
-        <>
+      <>
           <button
             onClick={openAddTask}
             aria-label={t('task.addTask')}
@@ -4214,8 +3972,7 @@ function AppShell({
             onFormChange={updateTaskForm}
             onReminderChange={updateReminder}
           />
-        </>
-      )}
+      </>
     </div>
     </MotionConfig>
   );
@@ -4236,33 +3993,6 @@ export default function App() {
   const [accentTheme, setAccentTheme] = useState<AccentTheme>('tcx111400');
   const [accentThemeReady, setAccentThemeReady] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
-
-  useEffect(() => {
-    if (!Capacitor.isNativePlatform() || appState === 'app') return;
-    const state: NativeBridgeState = {
-      source: 'taskflow.react',
-      type: 'uiState',
-      protocolVersion: 2,
-      sequence: Date.now(),
-      payload: {
-        appState,
-        currentView: 'flow',
-        currentTask: null,
-        pendingCount: 0,
-        canComplete: false,
-        isSyncing: false,
-        syncStatus: 'idle',
-        isSheetOpen: false,
-      },
-    };
-    const publishState = () => {
-      window.__taskflowNativeState = state;
-      window.webkit?.messageHandlers?.taskflowNative?.postMessage(state);
-    };
-    publishState();
-    window.addEventListener('taskflow:native-ready', publishState);
-    return () => window.removeEventListener('taskflow:native-ready', publishState);
-  }, [appState]);
 
   useEffect(() => {
     let cancelled = false;

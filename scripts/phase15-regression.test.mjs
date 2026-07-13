@@ -4,43 +4,48 @@ import { test } from 'node:test';
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
-test('React native bridge keeps the Phase 13 action contract', () => {
+test('React controls are the only task interaction surface', () => {
   const app = read('src/app/App.tsx');
-  assert.match(app, /source:\s*'taskflow\.react'/);
-  assert.match(app, /detail\.source\s*!==\s*'taskflow\.native'/);
-  assert.match(app, /actionId/);
-  assert.match(app, /createTask/);
-  assert.match(app, /updateCurrentTask/);
-  assert.match(app, /showAddTaskPrompt=\{!isNativeShell\}/);
-  assert.match(app, /nativeControls=\{isNativeShell\}/);
-  assert.match(app, /repeatDatesAfterStart\(candidate\.dueDate,\s*patch\.repeatUntilDate,\s*candidate\.repeatRule\)/);
+  assert.doesNotMatch(app, /taskflowNative/);
+  assert.doesNotMatch(app, /taskflow:native/);
+  assert.doesNotMatch(app, /NativeBridge/);
+  assert.doesNotMatch(app, /postNativeState/);
+  assert.doesNotMatch(app, /useNativeChrome/);
+  assert.match(app, /<header className="w-full max-w-md/);
+  assert.match(app, /<ViewToggle view=\{viewMode\} onChange=\{setViewMode\}/);
+  assert.match(app, /onClick=\{\(\) => setAccountOpen\(true\)\}/);
+  assert.match(app, /onClick=\{openAddTask\}/);
+  assert.match(app, /showAddTaskPrompt\s*\n\s*nativeControls=\{false\}/);
+  assert.match(app, /<QuickCreateDialog[\s\S]*open=\{isAddingTask\}/);
+  assert.match(app, /<TaskDetailsSheet[\s\S]*open=\{isTaskDetailsOpen\}/);
+  assert.match(app, /<TaskDetailModal[\s\S]*task=\{flowDetailTask\}/);
+  assert.match(app, /onOpen=\{isTop \? \(\) => setFlowDetailTaskId\(task\.id\) : undefined\}/);
+  assert.match(app, /onClick=\{\(\) => setIsReordering\(true\)\}/);
+  assert.match(app, /function CalendarView[\s\S]{0,900}\)\s*\{\s*const \{ t, i18n \} = useTranslation\(\)/);
+  assert.match(app, /toLocaleDateString\(i18n\.language === 'zh'/);
+  assert.match(app, /onClick=\{\(\) => !nativeControls && setDetailTaskId\(task\.id\)\}/);
+  assert.match(app, /onClick=\{\(\) => !nativeControls && setRepeatTask\(task\)\}/);
   assert.match(app, /progress:\s*_legacyProgress/);
   assert.match(app, /Capacitor\.isNativePlatform\(\)\)\s*\{\s*window\.location\.assign\(PRIVACY_POLICY_URL\)/);
 });
 
-test('SwiftUI native shell owns iOS add and details sheets', () => {
+test('iOS shell is a thin Capacitor container without SwiftUI native controls', () => {
   const swift = read('ios/App/App/TaskFlowBridgeViewController.swift');
-  assert.match(swift, /private var topNavigation: some View/);
-  assert.match(swift, /private var bottomActions: some View/);
-  assert.match(swift, /coordinator\.appState == "app" && !coordinator\.isSheetOpen/);
-  assert.match(swift, /\.accessibilityHidden\(coordinator\.appState != "app" \|\| coordinator\.isSheetOpen\)/);
-  assert.match(swift, /TaskFlowQuickCreateSheet/);
-  assert.match(swift, /TaskFlowTaskDetailsSheet/);
-  assert.match(swift, /DatePicker\("Due date"/);
-  assert.match(swift, /DatePicker\("Reminder time"/);
-  assert.match(swift, /DatePicker\("Repeat until"/);
-  assert.match(swift, /sendNativeAction\("createTask"/);
-  assert.match(swift, /sendNativeAction\("updateCurrentTask"/);
+  assert.match(swift, /final class TaskFlowBridgeViewController: CAPBridgeViewController/);
+  assert.doesNotMatch(swift, /SwiftUI/);
+  assert.doesNotMatch(swift, /UIHostingController/);
+  assert.doesNotMatch(swift, /TaskFlowNative/);
+  assert.doesNotMatch(swift, /sendNativeAction/);
+  assert.doesNotMatch(swift, /Button\(/);
 });
 
 test('core task behavior paths remain covered by regression checks', () => {
   const app = read('src/app/App.tsx');
   assert.match(app, /const createTaskFromForm =/);
   assert.match(app, /const repeatedTasks = repeatUntilDate/);
-  assert.match(app, /case 'completeCurrent':/);
-  assert.match(app, /handleAction\(current\.id, 'complete'\)/);
-  assert.match(app, /case 'snoozeCurrent':/);
-  assert.match(app, /handleAction\(current\.id, 'snooze'\)/);
+  assert.match(app, /function TaskCard/);
+  assert.match(app, /const handleAction =/);
+  assert.match(app, /onAction\(task\.id, action\)/);
   assert.match(app, /if \(!cloudSyncEnabled\)/);
   assert.match(app, /isOperationReady/);
   assert.match(app, /remapOperationIds/);
@@ -57,13 +62,13 @@ test('core task behavior paths remain covered by regression checks', () => {
 
 test('Flow card position and task exit motion stay tuned for Phase 16', () => {
   const app = read('src/app/App.tsx');
-  assert.match(app, /isNativeShell \? 'mt-\[clamp\(4\.25rem,9vh,6rem\)\]' : 'mt-\[clamp\(1\.75rem,5vh,3\.25rem\)\]'/);
+  assert.match(app, /'mt-\[clamp\(1\.75rem,5vh,3\.25rem\)\]'/);
   assert.match(app, /offset=\{\{ top: isNativeShell \? 'calc\(env\(safe-area-inset-top\) \+ 28px\)' : '10px' \}\}/);
   assert.match(app, /mobileOffset=\{\{[\s\S]*left: '16px'[\s\S]*right: '16px'[\s\S]*\}\}/);
   assert.match(app, /style=\{\{ '--width': '360px' \} as React\.CSSProperties\}/);
   assert.match(app, /minHeight: '42px'/);
   assert.match(app, /borderRadius: '24px'/);
-  assert.match(app, /isNativeShell \? 'pb-\[calc\(env\(safe-area-inset-bottom\)\+8\.5rem\)\]' : 'pb-4'/);
+  assert.match(app, /className="h-full overflow-y-auto px-4 sm:px-6 pb-4"/);
   assert.match(app, /if \(action === 'complete'\)[\s\S]*y: -82[\s\S]*scale: 0\.94/);
   assert.match(app, /if \(action === 'skip'\)[\s\S]*x: -132[\s\S]*rotate: -4/);
   assert.match(app, /if \(action === 'snooze'\)[\s\S]*y: 112[\s\S]*x: 72/);
@@ -109,7 +114,7 @@ test('plan tracks the new multi-device sync architecture without legacy compatib
   assert.doesNotMatch(plan, /Phase 17：/);
 });
 
-test('Phase 17 adopts UIScene and gates native controls on authenticated app state', () => {
+test('iOS uses UIScene while React remains the only control surface', () => {
   const info = read('ios/App/App/Info.plist');
   const project = read('ios/App/App.xcodeproj/project.pbxproj');
   const scene = read('ios/App/App/SceneDelegate.swift');
@@ -122,10 +127,12 @@ test('Phase 17 adopts UIScene and gates native controls on authenticated app sta
   assert.match(project, /SceneDelegate\.swift in Sources/);
   assert.match(scene, /UIWindowSceneDelegate/);
   assert.match(scene, /ApplicationDelegateProxy\.shared\.application/);
-  assert.match(app, /protocolVersion:\s*2/);
-  assert.match(app, /appState:\s*'app'/);
-  assert.match(swift, /taskFlowBridgeVersion = 2/);
-  assert.match(swift, /if appState != "app"/);
+  assert.doesNotMatch(app, /protocolVersion:\s*2/);
+  assert.doesNotMatch(app, /taskflowNative/);
+  assert.match(swift, /final class TaskFlowBridgeViewController: CAPBridgeViewController/);
+  assert.doesNotMatch(swift, /taskFlowBridgeVersion/);
+  assert.doesNotMatch(swift, /appState != "app"/);
+  assert.doesNotMatch(swift, /WKScriptMessageHandler/);
 });
 
 test('new sync engine uses cursor-based push-pull instead of legacy dirty flush', () => {
