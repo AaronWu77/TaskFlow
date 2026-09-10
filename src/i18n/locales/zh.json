@@ -107,14 +107,9 @@
     "reorder": "排序",
     "reorderTasks": "任务排序",
     "reorderHint": "拖拽手柄来重新排列你的任务流",
-    "currentFocus": "当前焦点",
     "queuedCount": "后面还有 {{count}} 项",
-    "reorderLeadHint": "只有当你想切换“下一件要做的事”时，才需要移动这张卡片。",
-    "unsavedChanges": "有未保存的排序变更",
-    "orderSaved": "当前排序已保存",
     "now": "当前",
     "done": "完成",
-    "tasksInFlow": "个任务在流中 · 第一张卡片 = 下一个焦点",
     "snoozeHint": "稍后处理 · 移到队尾",
     "skipHint": "跳过 — 移出任务流",
     "snoozeMoved": "已移到队尾",
@@ -132,7 +127,8 @@
       "reminderInvalid": "提醒时间格式不正确。",
       "reminderPast": "提醒时间不能早于当前时间。",
       "repeatUntilRequired": "请选择重复截止日期。",
-      "repeatUntilAfterDue": "重复截止日期必须晚于截止日期。"
+      "repeatUntilAfterDue": "重复截止日期必须晚于截止日期。",
+      "repeatTooMany": "单个重复系列最多创建 {{count}} 个任务。"
     },
     "tasksDoneToday_one": "{{count}} 个任务今日已完成",
     "tasksDoneToday_other": "{{count}} 个任务今日已完成"
@@ -184,7 +180,7 @@
     },
     "errors": {
       "invalidEmail": "请输入有效邮箱地址。",
-      "weakPassword": "密码至少需要 8 个字符。",
+      "weakPassword": "密码需为 8–128 个字符，并同时包含字母和数字。",
       "invalidCredentials": "邮箱或密码不正确。",
       "emailExists": "该邮箱已经注册。",
       "invalidCode": "验证码错误或已过期。",
@@ -199,6 +195,9 @@
     "signOutConfirm": "退出登录后会回到登录页，并清理本机缓存；未上传的本机修改会被丢弃，已同步的数据仍保留在云端。确定退出吗？",
     "signOutFailed": "退出登录失败，请稍后再试。",
     "data": "数据",
+    "exportData": "导出我的数据",
+    "exportSuccess": "数据导出已开始",
+    "exportFailed": "数据导出失败，请稍后重试",
     "deleteAccount": "删除账号",
     "deleteAccountConfirm": "确定永久删除你的 TaskFlow 账号和云端数据吗？本机缓存会被清理，未同步修改不会再上传。此操作无法撤销。",
     "deleteAccountFailed": "删除账号失败",
@@ -220,7 +219,7 @@
       "tcx134306": "13-4306 TCX",
       "tcx133802": "13-3802 TCX",
       "tcx136006": "13-6006 TCX",
-      "tcx121107": "12-1107 TCX"
+      "tcx140837": "14-0837 TCX"
     },
     "theme": "主题",
     "light": "浅色",
@@ -298,6 +297,7 @@
     ]
   },
   "notifications": {
+    "scheduleFailed": "提醒安排失败，请检查系统通知设置。",
     "title": "进入专注流：{{priority}}",
     "body": "{{task}} · {{estimate}} · {{due}}。现在开始。",
     "dueToday": "今天截止",

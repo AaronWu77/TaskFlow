@@ -30,7 +30,8 @@ services:
       PORT: 3000
       NODE_ENV: production
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
-      CORS_ORIGIN: ${CORS_ORIGIN:-https://yourdomain.com}
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://taskflow.top,capacitor://localhost}
+      NATIVE_APP_ORIGINS: ${NATIVE_APP_ORIGINS:-capacitor://localhost,ionic://localhost}
       EMAIL_VERIFICATION_CONSOLE: ${EMAIL_VERIFICATION_CONSOLE:-false}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       EMAIL_FROM: ${EMAIL_FROM:-TaskFlow <verify@taskflow.top>}
@@ -40,13 +41,16 @@ services:
       sh -c "npx prisma migrate deploy --schema=prisma/schema.prisma && node dist/index.js"
 
   nginx:
-    image: nginx:alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        VITE_API_URL: /api
     restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./ssl:/etc/nginx/ssl:ro
     depends_on:
       - api

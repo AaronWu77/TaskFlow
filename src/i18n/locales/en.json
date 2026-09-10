@@ -107,14 +107,9 @@
     "reorder": "Reorder",
     "reorderTasks": "Reorder Tasks",
     "reorderHint": "Drag the handle to rearrange your flow",
-    "currentFocus": "Current focus",
     "queuedCount": "{{count}} queued",
-    "reorderLeadHint": "Move this card only when you want a different task to become the next thing you work on.",
-    "unsavedChanges": "Unsaved changes",
-    "orderSaved": "Order saved",
     "now": "Now",
     "done": "Done",
-    "tasksInFlow": "task(s) in flow · first card = next to focus",
     "snoozeHint": "Later — moves to queue end",
     "skipHint": "Skip — removes from flow",
     "snoozeMoved": "Moved to queue end",
@@ -132,7 +127,8 @@
       "reminderInvalid": "Reminder time is invalid.",
       "reminderPast": "Reminder time cannot be in the past.",
       "repeatUntilRequired": "Repeat end date is required.",
-      "repeatUntilAfterDue": "Repeat end date must be after the deadline."
+      "repeatUntilAfterDue": "Repeat end date must be after the deadline.",
+      "repeatTooMany": "A repeat series can create at most {{count}} tasks."
     },
     "tasksDoneToday_one": "{{count}} task done today",
     "tasksDoneToday_other": "{{count}} tasks done today"
@@ -184,7 +180,7 @@
     },
     "errors": {
       "invalidEmail": "Enter a valid email address.",
-      "weakPassword": "Password must be at least 8 characters.",
+      "weakPassword": "Password must be 8–128 characters and include a letter and a number.",
       "invalidCredentials": "Email or password is incorrect.",
       "emailExists": "This email is already registered.",
       "invalidCode": "Verification code is invalid or expired.",
@@ -199,6 +195,9 @@
     "signOutConfirm": "Signing out returns to the login screen and clears this device's cache. Unsynced local changes will be discarded, while synced cloud data is kept. Continue?",
     "signOutFailed": "Could not sign out. Please try again.",
     "data": "Data",
+    "exportData": "Export my data",
+    "exportSuccess": "Your data export has started",
+    "exportFailed": "Could not export data. Please try again.",
     "deleteAccount": "Delete Account",
     "deleteAccountConfirm": "Permanently delete your TaskFlow account and cloud data? This device's cache will be cleared, and unsynced changes will not upload. This cannot be undone.",
     "deleteAccountFailed": "Could not delete account",
@@ -220,7 +219,7 @@
       "tcx134306": "13-4306 TCX",
       "tcx133802": "13-3802 TCX",
       "tcx136006": "13-6006 TCX",
-      "tcx121107": "12-1107 TCX"
+      "tcx140837": "14-0837 TCX"
     },
     "theme": "Theme",
     "light": "Light",
@@ -298,6 +297,7 @@
     ]
   },
   "notifications": {
+    "scheduleFailed": "Could not schedule reminders. Check your system notification settings.",
     "title": "Now in flow: {{priority}}",
     "body": "{{task}} · {{estimate}} · {{due}}. Start clean.",
     "dueToday": "due today",

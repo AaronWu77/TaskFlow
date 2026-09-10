@@ -1,549 +1,140 @@
-# TaskFlow 开发者文档
+# TaskFlow 开发者手册
 
-> 面向参与开发的工程师，涵盖项目架构、本地搭建、后端开发、部署流程与 iOS 构建全流程。
+本手册是 TaskFlow 唯一的工程文档来源，覆盖本地开发、同步架构、部署、iOS 构建与发布。
 
----
+## 架构与目录
 
-## 目录
-
-1. [项目架构概览](#1-项目架构概览)
-2. [本地开发环境搭建](#2-本地开发环境搭建)
-3. [前端架构详解](#3-前端架构详解)
-4. [后端架构详解](#4-后端架构详解)
-5. [认证流程](#5-认证流程)
-6. [数据库 Schema](#6-数据库-schema)
-7. [Docker 生产部署](#7-docker-生产部署)
-8. [iOS (Capacitor) 构建与部署](#8-ios-capacitor-构建与部署)
-9. [环境变量参考](#9-环境变量参考)
-10. [常见问题](#10-常见问题)
-
----
-
-## 1. 项目架构概览
-
-```
-TaskFlow/
-├── src/                    # 前端 React + Vite SPA
-│   └── app/
-│       ├── App.tsx         # 主应用（所有 UI 组件和状态）
-│       ├── AuthPage.tsx    # 登录 / 注册页面
-│       ├── api.ts          # API 客户端（自动 Token 刷新）
-│       ├── storage.ts      # localStorage + Capacitor Preferences 适配层
-│       └── components/
-│           └── ui/         # shadcn/ui 组件（勿修改）
-├── backend/                # Node.js + Express + Prisma 后端
-│   ├── src/
-│   │   ├── index.ts        # Express 入口
-│   │   ├── middleware/
-│   │   │   └── auth.ts     # JWT Bearer Token 鉴权中间件
-│   │   ├── routes/
-│   │   │   ├── auth.ts     # 注册 / 登录 / 刷新 / 登出
-│   │   │   └── tasks.ts    # 任务 CRUD + 批量排序
-│   │   └── prisma/
-│   │       └── schema.prisma
-│   ├── Dockerfile
-│   ├── package.json
-│   └── tsconfig.json
-├── docker-compose.yml      # 生产三件套：API + PostgreSQL + Nginx
-├── nginx.conf              # 反向代理配置
-├── capacitor.config.ts     # iOS Capacitor 配置
-├── vite.config.ts          # Vite + Tailwind + Figma 资产插件
-└── doc/
-    ├── plan.md             # 项目规划（同步更新）
-    └── DEVELOPER.md        # 本文件
+```text
+src/                    React + Vite 前端
+  app/App.tsx           主界面、任务交互、同步与冲突处理
+  app/api.ts            API 客户端、认证刷新与默认 API 地址
+  app/storage.ts        Web / Capacitor 本地存储适配
+  i18n/locales/         中英文文案，修改界面文本时同时更新
+backend/                Express + Prisma API
+  src/routes/           auth、tasks、sync、user 路由
+  src/prisma/           schema 与迁移文件
+ios/                    Capacitor iOS 工程
+scripts/                Node 内建测试运行器的回归测试
 ```
 
-### 请求链路（生产环境）
+生产请求链路为：`iOS/Web -> HTTPS Nginx -> /api -> Express -> Prisma -> PostgreSQL`。Nginx 将 `/api/` 转发到 API 容器，`/health` 用于健康检查。
 
-```
-iPhone (Capacitor WKWebView)
-  └─ HTTPS → Nginx :443
-                └─ proxy_pass → API (Express) :3000
-                                    └─ Prisma → PostgreSQL :5432
-```
+## 环境要求与本地运行
 
----
-
-## 2. 本地开发环境搭建
-
-### 2.1 前提条件
-
-- Node.js 18+（推荐 22）
-- pnpm（`npm i -g pnpm`）
-- Docker + Docker Compose（用于运行 PostgreSQL）
-
-### 2.2 前端
+需要 Node.js 22、npm 与 Docker Compose。根目录使用 npm；后端依赖单独安装。
 
 ```bash
-# 在仓库根目录
-pnpm install
-pnpm run dev     # → http://localhost:5173
-```
-
-默认情况下前端不连接任何后端（`VITE_API_URL` 未设置时，`api.ts` 使用 `http://localhost:3000`）。
-
-### 2.3 后端
-
-**方式 A：Docker 启动 PostgreSQL，Node 本地运行（推荐开发）**
-
-```bash
-# 启动数据库
-docker run -d \
-  --name taskflow-pg \
-  -e POSTGRES_DB=taskflow \
-  -e POSTGRES_USER=taskflow \
-  -e POSTGRES_PASSWORD=taskflow_password \
-  -p 5432:5432 \
-  postgres:16-alpine
-
-# 安装后端依赖
-cd backend
-cp .env.example .env   # 默认值已与上面的 docker run 匹配
-
+# 前端
 npm install
-npm run db:generate    # 生成 Prisma Client
-npx prisma migrate dev --schema=src/prisma/schema.prisma --name init
-npm run dev            # → http://localhost:3000
+npm run dev                         # http://localhost:5173
+
+# 本地 PostgreSQL
+docker run -d --name taskflow-pg -e POSTGRES_DB=taskflow \
+  -e POSTGRES_USER=taskflow -e POSTGRES_PASSWORD=taskflow_password \
+  -p 5432:5432 postgres:16-alpine
+
+# 后端
+cd backend
+cp .env.example .env
+npm install
+npm run db:generate
+npm run db:migrate:dev
+npm run dev                         # http://localhost:3000
 ```
 
-**方式 B：完整 Docker Compose（含 Nginx）**
+根目录 `.env.local` 控制前端构建时的 API 地址。默认已是 `https://taskflow.top/api`；本地联调可覆盖为：
 
-```bash
-cp .env.example .env   # 填写密钥
-docker compose up -d
-```
-
-### 2.4 联调前端 + 后端
-
-在根目录创建 `.env.local`（Vite 会自动加载）：
-
-```
+```env
 VITE_API_URL=http://localhost:3000
 ```
 
-然后重启前端开发服务器：
+## 构建、测试与代码约定
 
 ```bash
-pnpm run dev
+npm run build                       # 输出 dist/
+npm --prefix backend run build      # 编译后端到 backend/dist/
+npm test                            # scripts/*.test.mjs
+npm run check                       # 前端构建 + 后端构建 + 测试
+npm run cap:sync                    # 构建并写入 ios/App/App/public/
+npm run ios                         # cap:sync 后打开 Xcode
 ```
 
----
+使用 TypeScript、两空格缩进、函数式 React 组件。组件用 PascalCase，函数和变量用 camelCase。优先使用 `src/styles/theme.css` 中的语义化 Tailwind token 和 `cn()`；用户可见文案必须同时更新 `src/i18n/locales/zh.json` 与 `en.json`。回归测试放在 `scripts/*.test.mjs`，涉及认证、同步、排序、重复任务或 iOS 的改动必须补充对应断言。
 
-## 3. 前端架构详解
+## 认证与数据同步
 
-### 3.1 单文件应用（App.tsx）
+认证采用短期 access token 和可轮换 refresh session。Web 使用 httpOnly Cookie；Capacitor 会额外安全保存 refresh token 作为 Cookie 不可用时的回退。生产环境必须 HTTPS，并设置 `COOKIE_SECURE=true`。
 
-整个应用逻辑集中在 `src/app/App.tsx`（约 1000 行）。无路由，一切通过 React state 控制显示。
+同步不再调用任务 CRUD 逐条上传。客户端把 `create`、`update`、`soft-delete`、`restore`、`permanent-delete`、`reorder` 和 `resolve-conflict` 写入按用户隔离的本地操作队列（`pendingOperations`）；网络恢复、回到前台或用户重试时按以下顺序执行：
 
-**AppState 状态机**（认证流）：
+1. `POST /sync/push` 提交可用操作及设备 ID；服务端以 `operationId` 去重并校验任务版本。
+2. `GET /sync?cursor=<n>` 拉取 `TaskChange`，直到游标追平；首次登录使用 `GET /sync/bootstrap` 获取任务、删除记录、统计和游标。
+3. 服务端为任务维护 `version`，为排序维护 `taskOrderVersion`。不同字段并发编辑自动合并；同字段编辑、删除与编辑、永久删除和排序冲突进入应用内冲突处理页。
 
-```
-localStorage 有 token?
-  ├── 是 → authUser = null（检查中）→ setAuthUser(placeholder)  → 渲染主 App
-  └── 否 → authUser = false → 渲染 AuthPage
-```
+冲突页支持逐字段选“本机 / 云端 / 自定义”、全部采用一侧、重新应用本机顺序，以及把被永久删除的本机任务复制为新任务。不要恢复旧的全局缓存或旧同步协议；当前项目处于开发阶段，数据模型直接以 `Device`、`UserSyncState`、`TaskChange` 和 `TaskOperation` 为准。
 
-实际 token 有效性验证发生在第一次 API 调用时（401 → 自动刷新）。
+## 数据库与 API
 
-### 3.2 视图布局（滚动修复）
-
-```
-Root div: h-screen overflow-hidden          ← 锁死屏幕高度，禁止全局滚动
-  Header（固定高度）
-  ViewToggle（固定高度）
-  Sliding container: flex-1 overflow-hidden ← 剩余空间，禁止外部滚动
-    motion.div: h-full items-stretch        ← 双面板等高
-      Flow 面板: h-full                     ← 内容不足也撑满，不产生滚动
-      Calendar 面板: h-full overflow-y-auto ← 内容超出时内部独立滚动
-```
-
-### 3.3 API 客户端（api.ts）
-
-```
-apiFetch(path, options)
-  ├── 注入 Authorization: Bearer <accessToken>
-  ├── 发起请求
-  └── 如果 401:
-        ├── 调用 /auth/refresh（携带 httpOnly cookie）
-        ├── 刷新成功 → 更新 accessToken → 重试原请求
-        └── 刷新失败 → 返回 401 响应（调用方负责登出）
-```
-
-accessToken 存在 `localStorage['taskflow_access_token']`；refreshToken 存在 httpOnly Cookie（服务端设置，JS 不可读）。
-
-### 3.4 用户本地数据隔离
-
-登录成功后前端 session 保存 `userId`、`email`、`emailVerifiedAt` 和 `lastAuthenticatedAt`。任务、统计和同步元数据不再使用全局 key，而是按用户命名空间存储：
-
-```
-taskflow:<userId>:tasks
-taskflow:<userId>:streak
-taskflow:<userId>:completed_today
-taskflow:<userId>:sync_meta
-```
-
-离线恢复只允许使用带 `userId` 的有效 session。旧版 `taskflow_tasks`、`taskflow_streak`、`taskflow_completed_today` 不再作为数据源，避免多账号切换时串号。
-
-### 3.5 任务插入排序（insertIndex）
-
-新任务插入时不重排所有任务，只寻找第一个"比新任务优先级低"的 `todo` 任务位置：
-
-```
-优先级比较规则：
-1. 新任务有 deadline，现有任务没有 → 新任务靠前
-2. 都有 deadline → deadline 越早越靠前
-3. 同 deadline 或都无 deadline → P1 > P2 > P3
-4. 找不到 → 追加到末尾
-```
-
----
-
-## 4. 后端架构详解
-
-### 4.1 Express 路由结构
-
-```
-GET  /health              → 健康检查（无鉴权）
-POST /auth/register       → 注册并发送邮箱验证码
-POST /auth/verify-email   → 验证邮箱并签发登录会话
-POST /auth/resend-verification → 重新发送邮箱验证码
-POST /auth/login          → 登录（未验证邮箱会重新发送验证码）
-POST /auth/refresh        → 刷新 accessToken（读 httpOnly cookie）
-POST /auth/logout         → 登出（清除 cookie）
-GET  /user/export         → 导出当前用户账号、统计和任务数据
-DELETE /user/account      → 删除当前账号和相关数据
-
-[以下需要 Bearer Token]
-GET    /tasks             → 获取当前用户未软删除任务（按 sortOrder）
-GET    /tasks/deleted     → 获取当前用户最近删除任务
-POST   /tasks             → 创建任务
-PATCH  /tasks/:id         → 更新任务字段
-POST   /tasks/:id/restore → 恢复软删除任务
-DELETE /tasks/:id         → 软删除任务
-DELETE /tasks/:id/permanent → 永久删除软删除任务
-PUT    /tasks/reorder     → 批量更新 sortOrder（拖拽排序）
-```
-
-### 4.2 JWT 鉴权中间件
-
-`backend/src/middleware/auth.ts` 从 `Authorization: Bearer <token>` 头提取并验证 accessToken，将 `userId` 注入 `req.userId`。
-
-所有任务操作均检查 `task.userId === req.userId`，防止越权访问。
-
-### 4.4 任务字段校验
-
-任务写接口在后端统一校验字段，非法客户端不能写入任意字符串：
-
-```
-priority: P1 | P2 | P3
-status: todo | doing | done | snoozed | skipped
-estimateMinutes: 1-1440 integer
-sortOrder: 0-1000000 integer
-dueDate: YYYY-MM-DD
-reminderAt/deletedAt: valid ISO datetime
-repeatRule: none | daily | weekly | monthly
-```
-
-旧客户端传入的 `progress` 仍会被后端校验并接受，用于一个兼容版本；v1 客户端不再读取、展示或写入该字段。
-
-普通 `GET /tasks` 默认排除 `deletedAt != null` 的软删除任务。
-
-### 4.3 Prisma Client 位置
-
-schema 文件位于 `backend/src/prisma/schema.prisma`（非默认 `prisma/schema.prisma`），所有 Prisma CLI 命令需加 `--schema=src/prisma/schema.prisma`：
+Prisma schema 位于 `backend/src/prisma/schema.prisma`，手动 Prisma 命令必须显式指定路径：
 
 ```bash
-npx prisma migrate dev --schema=src/prisma/schema.prisma --name <name>
+cd backend
+npx prisma migrate dev --schema=src/prisma/schema.prisma --name <change-name>
+npx prisma migrate deploy --schema=src/prisma/schema.prisma
 npx prisma studio --schema=src/prisma/schema.prisma
 ```
 
----
+`migrate dev` 只用于开发环境；生产只使用 `migrate deploy`，Docker API 容器启动时会自动执行。所有任务、同步和用户数据接口都要求 Bearer access token，只有 `/health` 无需认证。任务写入统一经过 `POST /sync/push`，`/tasks` 仅保留兼容性的只读查询，旧写接口返回 `410 SYNC_PROTOCOL_REQUIRED`，避免绕过版本号与变更日志；`/user/export` 导出用户数据，`PATCH /user/preferences` 保存统计所需的时区和语言，`DELETE /user/account` 删除用户及级联数据。
 
-## 5. 认证流程
+## 环境变量
 
-### 注册 / 邮箱验证 / 登录
+根目录 `.env` 供 Docker Compose 使用，`backend/.env` 供本地 API 使用；两者都不能提交。生产至少配置：
 
-```
-客户端 → POST /auth/register { email, password }
-服务端：
-  1. 标准化邮箱并校验格式
-  2. 按 IP + email 做注册限流
-  3. 检查邮箱唯一性
-  4. 通过 Resend 或开发环境 console 发送 6 位验证码
-  5. bcrypt.hash(password, 12)
-  6. 写入 User 表，emailVerifiedAt 为空
-  7. 返回 { requiresEmailVerification: true, user }
-
-客户端：
-  1. 进入验证码界面
-  2. POST /auth/verify-email { email, code }
-  3. 验证成功后服务端写入 emailVerifiedAt
-  4. 签发 accessToken + refreshToken
-  5. Cookie 由浏览器自动管理
+```env
+POSTGRES_PASSWORD=<strong-password>
+JWT_ACCESS_SECRET=<random-48-byte-hex>
+JWT_REFRESH_SECRET=<random-48-byte-hex>
+CORS_ORIGIN=https://taskflow.top,https://www.taskflow.top,capacitor://localhost
+COOKIE_SECURE=true
+EMAIL_VERIFICATION_CONSOLE=false
+RESEND_API_KEY=<server-only-secret>
+EMAIL_FROM=TaskFlow <verify@taskflow.top>
 ```
 
-```
-客户端 → POST /auth/login { email, password }
-服务端：
-  1. 校验邮箱格式和登录限流
-  2. 校验 bcrypt 密码
-  3. 如果 emailVerifiedAt 为空，重新发送验证码并返回 EMAIL_NOT_VERIFIED
-  4. 如果已验证，签发 accessToken + refreshToken
-```
+本地 `backend/.env` 使用 `DATABASE_URL=postgresql://taskflow:taskflow_password@localhost:5432/taskflow`、`NODE_ENV=development`、`COOKIE_SECURE=false` 和 `EMAIL_VERIFICATION_CONSOLE=true`。生成 JWT 密钥：`node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`。
 
-### Token 刷新
+## 生产部署与运维
 
-```
-客户端 → POST /auth/refresh（自动携带 Cookie）
-服务端：
-  1. 读取 req.cookies.taskflow_refresh 或 Authorization fallback refresh token
-  2. jwt.verify(token, JWT_REFRESH_SECRET)
-  3. 查询 RefreshSession，确认未撤销且未过期
-  4. 撤销旧 refresh session，创建新 refresh session
-  5. 签发新 accessToken 和 refreshToken
-  6. 返回 { accessToken, refreshToken, user }
-```
-
-### 安全注意事项
-
-- **生产环境**必须在 HTTPS 下运行，否则 `httpOnly` cookie 的 `Secure` 属性无法生效
-- 生产环境 `.env` 必须设置 `COOKIE_SECURE=true`
-- 生产环境 `.env` 必须设置 `RESEND_API_KEY` 和 `EMAIL_FROM`，否则新用户无法收到验证码
-- 已泄露的 Resend API Key 必须立刻在 Resend 后台撤销并重新生成
-- `/user/stats` 不接受客户端覆盖 streak/todayCount；服务端基于任务 `completedAt` 记录重算连续天数和今日完成数
-- JWT 密钥至少 32 字节随机字符串，生成方法：
-  ```bash
-  node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
-  ```
-- refreshToken 目前未存储于数据库（无法单独吊销），如需支持"踢出设备"，需改为数据库存储并在刷新时验证
-
----
-
-## 6. 数据库 Schema
-
-```prisma
-model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  password  String   // bcrypt hash，永远不返回给客户端
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  tasks     Task[]
-}
-
-model Task {
-  id              String   @id @default(cuid())
-  userId          String
-  title           String
-  priority        String   // "P1" | "P2" | "P3"
-  estimateMinutes Int
-  status          String   // "todo" | "doing" | "done" | "snoozed" | "skipped"
-  tag             String?
-  progress        Int      @default(0)   // legacy compatibility
-  dueDate         String?  // "YYYY-MM-DD"
-  sortOrder       Int      @default(0)   // 用户自定义位置
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-}
-```
-
-### 数据库迁移
+服务器首次部署：
 
 ```bash
-# 开发环境（自动创建迁移文件）
-cd backend
-npx prisma migrate dev --schema=src/prisma/schema.prisma --name <描述>
-
-# 生产环境（应用已有迁移，不创建新文件）
-npx prisma migrate deploy --schema=src/prisma/schema.prisma
-```
-
-Docker Compose 启动时 `api` 服务会自动执行 `prisma migrate deploy`。
-
----
-
-## 7. Docker 生产部署
-
-### 7.1 服务器准备
-
-```bash
-# 安装 Docker + Docker Compose（Debian/Ubuntu）
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-```
-
-### 7.2 部署步骤
-
-```bash
-# 1. 克隆仓库
-git clone https://github.com/AaronWu77/TaskFlow.git
-cd TaskFlow
-
-# 2. 配置环境变量
+git clone git@github.com:AaronWu77/TaskFlow.git /opt/TaskFlow
+cd /opt/TaskFlow
 cp .env.example .env
-vim .env   # 填写以下三项（必填）：
-           # POSTGRES_PASSWORD=<强密码>
-           # JWT_ACCESS_SECRET=<随机64字符>
-           # JWT_REFRESH_SECRET=<随机64字符>
-           # CORS_ORIGIN=https://你的前端域名
-
-# 3. 启动所有服务
-docker compose up -d
-
-# 4. 验证
-curl http://localhost/health        # → {"status":"ok"}，容器本机健康检查
-curl https://你的前端域名/health     # → {"status":"ok"}，生产 HTTPS 对外检查
-docker compose logs -f api     # 查看 API 日志
+# 编辑 .env，填入生产变量，并准备 ssl/fullchain.pem 与 ssl/privkey.pem
+docker compose up -d --build
+curl -i https://taskflow.top/api/health
 ```
 
-### 7.3 启用 HTTPS（Let's Encrypt）
+Nginx 监听 80/443，服务器安全组需开放 80 与 443；不要暴露 PostgreSQL。域名必须能在目标网络解析到服务器，且 iOS 必须使用 HTTPS API。更新 API：
 
 ```bash
-# 申请证书
-sudo apt install certbot
-certbot certonly --standalone -d yourdomain.com
-
-# 将证书挂载进 nginx 容器
-mkdir -p ssl
-cp /etc/letsencrypt/live/yourdomain.com/fullchain.pem ssl/
-cp /etc/letsencrypt/live/yourdomain.com/privkey.pem ssl/
-
-# 编辑 nginx.conf，取消 HTTPS server 块的注释
-# 将 HTTP → HTTPS 重定向取消注释
-docker compose restart nginx
-```
-
-### 7.4 更新部署
-
-```bash
+cd /opt/TaskFlow
 git pull
-docker compose build api
-docker compose up -d api   # 滚动重启，不影响 postgres 和 nginx
+docker compose up -d --build api
+docker compose logs -f api
 ```
 
----
-
-## 8. iOS (Capacitor) 构建与部署
-
-### 8.1 当前可用性说明
-
-> **重要：当前版本直接部署到 iPhone，应用可以正常启动，但功能受限。**
-
-| 功能 | 状态 | 原因 |
-|---|---|---|
-| 界面显示 | ✅ 正常 | 纯前端，无需后端 |
-| 滚动修复 | ✅ 已修复 | Phase 0 已完成 |
-| 登录 / 注册 | ❌ 无法连接 | 后端未部署，`localhost:3000` 在手机上不可达 |
-| 任务数据 | ⚠️ 仅本地 | 无后端时降级为 localStorage（当前未实现离线降级逻辑） |
-
-**要让认证功能在 iPhone 上可用**，必须：
-1. 在公网服务器上部署后端（见第 7 节）
-2. 构建前端时设置 `VITE_API_URL`（见下方）
-
-### 8.2 构建流程
+同步故障优先检查 `https://taskflow.top/api/health`、API 日志和 `/api/sync/bootstrap`（未登录应返回 401；返回 404 代表线上服务未更新）。备份生产数据库：
 
 ```bash
-# 1. 设置后端地址（必须是 HTTPS，否则 WKWebView 会拦截）
-VITE_API_URL=https://your-backend.com/api pnpm run build
-
-# 2. 同步到 Capacitor iOS 项目
-npx cap sync ios
-
-# 3. 打开 Xcode
-npx cap open ios
-
-# 4. 在 Xcode 中选择你的设备并 Build（⌘R）
+docker compose exec postgres pg_dump -U taskflow taskflow > taskflow-backup.sql
 ```
 
-### 8.3 Capacitor 配置要点
+## iOS 与发布
 
-`capacitor.config.ts` 中的关键配置：
+`npm run ios` 会按默认生产 API 构建前端、同步到 Capacitor，再打开 Xcode。修改 `VITE_API_URL`、Web 代码或 Capacitor 配置后必须重新执行；真机在 Xcode 选择设备后运行。`ios/App/App/public/` 是生成目录，不提交也不手改。
 
-```ts
-{
-  appId: 'com.wuyuchen.taskflow',
-  ios: {
-    contentInset: 'always',   // 暴露 safe-area-inset-* CSS 变量
-  }
-}
-```
+每次发布遵循语义化版本：破坏性变更提升 major，新功能提升 minor，修复提升 patch；iOS 的 Marketing Version 与 `package.json` 保持一致，Build 号每次上传 TestFlight 或 App Store 都递增。提交信息保持短小、聚焦、可读，例如 `4.0.4 修复任务排序`。
 
-`src/styles/theme.css` 中的 safe area 工具类：
-
-```css
-.pt-safe  { padding-top: max(2rem, calc(0.5rem + env(safe-area-inset-top))); }
-.pb-safe  { padding-bottom: max(6rem, calc(4rem + env(safe-area-inset-bottom))); }
-.bottom-safe { bottom: max(1.5rem, calc(0.25rem + env(safe-area-inset-bottom))); }
-```
-
-### 8.4 iOS WKWebView 注意事项
-
-- **字体大小**：所有 `<input>` 和 `<select>` 必须 `font-size ≥ 16px`（`text-base`），否则 iOS 会自动缩放页面
-- **viewport meta**：已设置 `maximum-scale=1, user-scalable=no` 防止双指缩放
-- **httpOnly Cookie**：Capacitor WKWebView 默认不发送 Cookie。需在 `capacitor.config.ts` 中启用：
-  ```ts
-  ios: {
-    allowsLinkPreview: false,
-    // 如遇 Cookie 问题，可配置 WKWebView 的 cookiePolicy
-  }
-  ```
-  或改为将 refreshToken 存入 `localStorage`（牺牲部分安全性）。
-
----
-
-## 9. 环境变量参考
-
-### 根目录 `.env`（Docker Compose 用）
-
-| 变量 | 必填 | 示例 | 说明 |
-|---|---|---|---|
-| `POSTGRES_PASSWORD` | ✅ | `s3cr3t123` | PostgreSQL 密码 |
-| `JWT_ACCESS_SECRET` | ✅ | `abc123...` | AccessToken 签名密钥（≥32字符） |
-| `JWT_REFRESH_SECRET` | ✅ | `xyz789...` | RefreshToken 签名密钥（≥32字符） |
-| `CORS_ORIGIN` | 推荐 | `https://app.yourdomain.com` | 前端域名（CORS 白名单） |
-
-### `backend/.env`（本地开发用）
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `DATABASE_URL` | `postgresql://taskflow:taskflow_password@localhost:5432/taskflow` | PostgreSQL 连接字符串 |
-| `JWT_ACCESS_SECRET` | — | 同上 |
-| `JWT_REFRESH_SECRET` | — | 同上 |
-| `JWT_ACCESS_EXPIRES_IN` | `15m` | AccessToken 有效期 |
-| `JWT_REFRESH_EXPIRES_IN` | `7d` | RefreshToken 有效期 |
-| `PORT` | `3000` | 监听端口 |
-| `NODE_ENV` | `development` | 环境标识 |
-| `CORS_ORIGIN` | `capacitor://localhost,http://localhost:5173` | 允许的前端来源 |
-
-### 前端环境变量
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `VITE_API_URL` | `http://localhost:3000` | 后端 API 地址（构建时注入） |
-
----
-
-## 10. 常见问题
-
-**Q: iPhone 上登录时提示网络错误？**  
-A: `localhost:3000` 在手机上不可达。需要在公网部署后端，并用 `VITE_API_URL` 指向正确地址重新构建前端。
-
-**Q: 后端返回 401，但 Token 刚刚获取？**  
-A: 检查 `JWT_ACCESS_SECRET` 两端是否一致，以及服务器时间是否准确（Token 包含时间戳）。
-
-**Q: Docker Compose 启动失败，postgres 健康检查超时？**  
-A: 可能是端口冲突，检查本机 5432 是否被占用：`lsof -i :5432`。
-
-**Q: Prisma 迁移报错 "schema not found"？**  
-A: 始终加 `--schema=src/prisma/schema.prisma`，因为 schema 不在默认路径。
-
-**Q: 前端构建产物如何部署到 Nginx？**  
-A: `pnpm run build` 输出到 `dist/`，将该目录映射为 Nginx 的静态文件根目录，或单独用 CDN 托管。当前 `nginx.conf` 仅反代 API，前端静态文件托管需额外配置（或直接打包进 Capacitor）。
-
-**Q: 开发时想跳过登录直接看主界面？**  
-A: 在 `App.tsx` 的 `App` 函数顶部临时改为：
-```ts
-const [authUser, setAuthUser] = useState<AuthUser | null | false>({ id: 'dev', email: 'dev@local' });
-```
-**注意：提交代码前必须还原。**
+发布前至少执行 `npm run check`、`plutil -lint ios/App/App/Info.plist ios/App/App/PrivacyInfo.xcprivacy`，并在真机回归登录、邮箱验证、创建/编辑/提醒/重复任务、排序、离线后恢复同步、冲突处理、退出登录、账号删除、中英双语和隐私/支持页。提交 App Store 前确认生产迁移已应用、`/api/health` 可用、CORS 与 HTTPS 正确、App 隐私标签与 `PrivacyInfo.xcprivacy` 及 `public/privacy/` 一致，并提供审核测试账号。

@@ -14,6 +14,7 @@
 		8F1B7D8B2D3F400100A10001 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F1B7D8A2D3F400100A10001 /* SceneDelegate.swift */; };
 		8F1B7D862D3F400100A10001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 8F1B7D852D3F400100A10001 /* PrivacyInfo.xcprivacy */; };
 		8F1B7D892D3F400100A10001 /* TaskFlowBridgeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F1B7D882D3F400100A10001 /* TaskFlowBridgeViewController.swift */; };
+		8F1B7D9B2D3F400100A10001 /* TaskFlowSecureStoragePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F1B7D9A2D3F400100A10001 /* TaskFlowSecureStoragePlugin.swift */; };
 		504EC30D1FED79650016851F /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 504EC30B1FED79650016851F /* Main.storyboard */; };
 		504EC30F1FED79650016851F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 504EC30E1FED79650016851F /* Assets.xcassets */; };
 		504EC3121FED79650016851F /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 504EC3101FED79650016851F /* LaunchScreen.storyboard */; };
@@ -28,6 +29,7 @@
 		8F1B7D8A2D3F400100A10001 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		8F1B7D852D3F400100A10001 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		8F1B7D882D3F400100A10001 /* TaskFlowBridgeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskFlowBridgeViewController.swift; sourceTree = "<group>"; };
+		8F1B7D9A2D3F400100A10001 /* TaskFlowSecureStoragePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskFlowSecureStoragePlugin.swift; sourceTree = "<group>"; };
 		504EC30C1FED79650016851F /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
 		504EC30E1FED79650016851F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		504EC3111FED79650016851F /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
@@ -72,6 +74,7 @@
 				504EC3071FED79650016851F /* AppDelegate.swift */,
 				8F1B7D8A2D3F400100A10001 /* SceneDelegate.swift */,
 				8F1B7D882D3F400100A10001 /* TaskFlowBridgeViewController.swift */,
+				8F1B7D9A2D3F400100A10001 /* TaskFlowSecureStoragePlugin.swift */,
 				8F1B7D852D3F400100A10001 /* PrivacyInfo.xcprivacy */,
 				504EC30B1FED79650016851F /* Main.storyboard */,
 				504EC30E1FED79650016851F /* Assets.xcassets */,
@@ -167,6 +170,7 @@
 				504EC3081FED79650016851F /* AppDelegate.swift in Sources */,
 				8F1B7D8B2D3F400100A10001 /* SceneDelegate.swift in Sources */,
 				8F1B7D892D3F400100A10001 /* TaskFlowBridgeViewController.swift in Sources */,
+				8F1B7D9B2D3F400100A10001 /* TaskFlowSecureStoragePlugin.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

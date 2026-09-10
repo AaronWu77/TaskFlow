@@ -79,6 +79,50 @@ test('core task behavior paths remain covered by regression checks', () => {
   assert.match(app, /normalizeCachedTask/);
 });
 
+test('task creation reads committed form controls on submit', () => {
+  const app = read('src/app/App.tsx');
+  assert.match(app, /const taskFormFromSubmit = \(formElement: HTMLFormElement, base: AddTaskState\): AddTaskState =>/);
+  for (const name of ['title', 'dueDate', 'priority', 'minutes', 'tag', 'reminderAt', 'repeatRule', 'repeatUntilDate']) {
+    assert.match(app, new RegExp(`name="${name}"`));
+  }
+  assert.match(app, /const quickForm = taskFormFromSubmit\(event\.currentTarget/);
+  assert.match(app, /const submittedForm = taskFormFromSubmit\(e\.currentTarget, form\)/);
+  assert.match(app, /validateTaskForm\(submittedForm\)/);
+  assert.match(app, /createTaskFromForm\(submittedForm\)/);
+  assert.match(app, /repeatInstanceCount\(submittedForm\.dueDate, submittedForm\.repeatUntilDate, submittedForm\.repeatRule\)/);
+});
+
+test('accent theme presets stay visually distinct', () => {
+  const app = read('src/app/App.tsx');
+  assert.match(app, /type AccentTheme = 'tcx111400' \| 'tcx134306' \| 'tcx133802' \| 'tcx136006' \| 'tcx140837'/);
+  assert.match(app, /tcx140837: \{\s*primary: '#E5D39A'/);
+  assert.doesNotMatch(app, /tcx121107/);
+  const zh = read('src/i18n/locales/zh.json');
+  const en = read('src/i18n/locales/en.json');
+  assert.match(zh, /"tcx140837": "14-0837 TCX"/);
+  assert.match(en, /"tcx140837": "14-0837 TCX"/);
+});
+
+test('legacy reorder sheet keeps the six-dot drag handle and move controls', () => {
+  const app = read('src/app/App.tsx');
+  assert.match(app, /function ReorderSheet/);
+  assert.match(app, /GripVertical/);
+  assert.match(app, /ArrowUpDown/);
+  assert.match(app, /onHandlePointerDown/);
+  assert.match(app, /onMoveUp/);
+  assert.match(app, /onMoveDown/);
+  assert.match(app, /setIsReordering/);
+  assert.match(app, /type: 'reorder'/);
+});
+
+test('npm run ios rebuilds, syncs, and opens the iOS project for device testing', () => {
+  const packageJson = read('package.json');
+  assert.match(packageJson, /"ios": "npm run build && npx cap sync ios && xattr -cr ios\/App\/App && npx cap open ios"/);
+  assert.match(packageJson, /xattr -cr ios\/App\/App/);
+  assert.match(packageJson, /npx cap open ios/);
+  assert.doesNotMatch(packageJson, /xcodebuild|simctl/);
+});
+
 test('Flow card position and task exit motion stay tuned for Phase 16', () => {
   const app = read('src/app/App.tsx');
   assert.match(app, /'mt-\[clamp\(1\.75rem,5vh,3\.25rem\)\]'/);
@@ -123,14 +167,14 @@ test('public privacy and support pages contain App Store required disclosures', 
   assert.match(support, /Account deletion/);
 });
 
-test('plan tracks the new multi-device sync architecture without legacy compatibility requirements', () => {
-  const plan = read('doc/plan.md');
-  assert.match(plan, /TaskFlow 多端同步完善计划/);
-  assert.match(plan, /不要求前向兼容旧同步协议/);
-  assert.match(plan, /TaskChange/);
-  assert.match(plan, /pendingOperations/);
-  assert.match(plan, /\/sync\/push/);
-  assert.doesNotMatch(plan, /Phase 17：/);
+test('developer manual records the current multi-device sync architecture', () => {
+  const manual = read('doc/DEVELOPER.md');
+  assert.match(manual, /TaskFlow 开发者手册/);
+  assert.match(manual, /不要恢复旧的全局缓存或旧同步协议/);
+  assert.match(manual, /TaskChange/);
+  assert.match(manual, /pendingOperations/);
+  assert.match(manual, /POST \/sync\/push/);
+  assert.match(manual, /冲突处理页/);
 });
 
 test('iOS uses UIScene while React remains the only control surface', () => {
@@ -176,4 +220,28 @@ test('new sync engine uses cursor-based push-pull instead of legacy dirty flush'
   assert.match(backend, /recordChange/);
   assert.match(schema, /model TaskChange/);
   assert.match(schema, /model UserSyncState/);
+});
+
+test('sync mutations have one versioned write path with user-scoped idempotency', () => {
+  const tasksRoute = read('backend/src/routes/tasks.ts');
+  const syncRoute = read('backend/src/routes/sync.ts');
+  const schema = read('backend/src/prisma/schema.prisma');
+  const migration = read('backend/src/prisma/migrations/20260908010000_scope_operation_ids/migration.sql');
+  assert.doesNotMatch(tasksRoute, /router\.(post|put|patch|delete)\(/);
+  assert.match(tasksRoute, /SYNC_PROTOCOL_REQUIRED/);
+  assert.match(syncRoute, /taskOperation\.findUnique/);
+  assert.match(syncRoute, /CURSOR_EXPIRED/);
+  assert.match(schema, /@@unique\(\[userId, operationId\]\)/);
+  assert.match(migration, /Preserve idempotency/);
+});
+
+test('refresh tokens remain out of web storage and native tokens use secure storage', () => {
+  const app = read('src/app/App.tsx');
+  const api = read('src/app/api.ts');
+  const secureStorage = read('src/app/secure-storage.ts');
+  const swift = read('ios/App/App/TaskFlowSecureStoragePlugin.swift');
+  assert.doesNotMatch(app, /restoreNativeStorageWithTimeout\(\[[^\]]*taskflow_refresh_token/);
+  assert.doesNotMatch(api, /localStorage\.setItem\(REFRESH_TOKEN_KEY/);
+  assert.match(secureStorage, /TaskFlowSecureStorage/);
+  assert.match(swift, /kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly/);
 });

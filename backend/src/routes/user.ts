@@ -1,16 +1,45 @@
 import { Router, Response, NextFunction, RequestHandler } from 'express';
-import { PrismaClient } from '@prisma/client';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { recomputeUserStats } from '../services/stats';
+import { prisma } from '../prisma-client';
+import { isValidTimeZone } from '../date-utils';
 
 const router = Router();
-const prisma = new PrismaClient();
 
 router.use(authMiddleware);
 
 function asyncHandler(fn: (req: AuthRequest, res: Response, next: NextFunction) => Promise<void>): RequestHandler {
   return (req, res, next) => fn(req as AuthRequest, res, next).catch(next);
 }
+
+// PATCH /user/preferences — persist locale and timezone used by server-side stats.
+router.patch('/preferences', asyncHandler(async (req, res) => {
+  const timezone = req.body?.timezone;
+  const locale = req.body?.locale;
+  const displayName = req.body?.displayName;
+  if (timezone !== undefined && (typeof timezone !== 'string' || !isValidTimeZone(timezone))) {
+    res.status(400).json({ code: 'INVALID_TIMEZONE', error: 'Invalid timezone' });
+    return;
+  }
+  if (locale !== undefined && (typeof locale !== 'string' || !['zh', 'en'].includes(locale))) {
+    res.status(400).json({ code: 'INVALID_LOCALE', error: 'Unsupported locale' });
+    return;
+  }
+  if (displayName !== undefined && (typeof displayName !== 'string' || displayName.trim().length > 80)) {
+    res.status(400).json({ code: 'INVALID_DISPLAY_NAME', error: 'Display name is too long' });
+    return;
+  }
+  const user = await prisma.user.update({
+    where: { id: req.userId! },
+    data: {
+      timezone,
+      locale,
+      displayName: displayName === undefined ? undefined : displayName.trim() || null,
+    },
+    select: { id: true, email: true, emailVerifiedAt: true, displayName: true, timezone: true, locale: true },
+  });
+  res.json(user);
+}));
 
 // GET /user/export — export current user's data as JSON
 router.get('/export', asyncHandler(async (req, res) => {

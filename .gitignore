@@ -19,6 +19,9 @@ android/
 .env.local
 .env.*.local
 
+# Production TLS material (never commit private keys)
+ssl/
+
 # Editor
 .vscode/
 .idea/

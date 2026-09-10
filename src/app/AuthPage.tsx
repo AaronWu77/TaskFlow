@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CheckCircle2, Mail, Lock, Eye, EyeOff, Loader2, ShieldCheck } from 'lucide-react';
-import { apiLogin, apiRegister, apiResendVerification, apiVerifyEmail, type AuthUser } from './api';
+import { ApiError, apiLogin, apiRegister, apiResendVerification, apiVerifyEmail, type AuthUser } from './api';
 import { useTranslation } from 'react-i18next';
 
 interface AuthPageProps {
@@ -32,11 +32,18 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
     'flex h-11 w-full rounded-xl border border-input bg-input-background px-4 py-2 text-base placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-colors';
 
   function authErrorMessage(err: unknown): string {
+    if (err instanceof ApiError) {
+      if (err.code === 'INVALID_EMAIL') return t('auth.errors.invalidEmail');
+      if (err.code === 'WEAK_PASSWORD') return t('auth.errors.weakPassword');
+      if (err.code === 'INVALID_CREDENTIALS') return t('auth.errors.invalidCredentials');
+      if (err.code === 'EMAIL_NOT_VERIFIED' || err.code === 'INVALID_VERIFICATION_CODE') return t('auth.errors.invalidCode');
+      if (err.code === 'EMAIL_DELIVERY_FAILED') return t('auth.errors.emailDelivery');
+    }
     const message = err instanceof Error ? err.message : '';
     const normalized = message.toLowerCase();
-    if (normalized.includes('invalid email') || normalized.includes('valid email')) return t('auth.errors.invalidEmail');
+    if (normalized.includes('invalid credentials') || normalized.includes('invalid email or password')) return t('auth.errors.invalidCredentials');
+    if (normalized.includes('valid email')) return t('auth.errors.invalidEmail');
     if (normalized.includes('password') && normalized.includes('8')) return t('auth.errors.weakPassword');
-    if (normalized.includes('invalid credentials')) return t('auth.errors.invalidCredentials');
     if (normalized.includes('already registered') || normalized.includes('already exists')) return t('auth.errors.emailExists');
     if (normalized.includes('verification') || normalized.includes('code')) return t('auth.errors.invalidCode');
     if (normalized.includes('delivery') || normalized.includes('configured')) return t('auth.errors.emailDelivery');
@@ -55,6 +62,10 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
         return;
       }
       const fn = mode === 'login' ? apiLogin : apiRegister;
+      if (mode === 'register' && passwordChecks.some(check => !check.passed)) {
+        setError(t('auth.errors.weakPassword'));
+        return;
+      }
       const result = await fn(email.trim().toLowerCase(), password);
       if ('requiresEmailVerification' in result) {
         setPendingEmail(result.user.email);

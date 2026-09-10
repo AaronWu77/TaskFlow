@@ -1,40 +1,32 @@
 import { PrismaClient } from '@prisma/client';
+import { addCalendarDays, dateInTimeZone, isValidTimeZone } from '../date-utils';
 
-function dateOnly(date = new Date()): string {
-  return date.toISOString().slice(0, 10);
-}
-
-function addDays(date: string, days: number): string {
-  const next = new Date(`${date}T00:00:00.000Z`);
-  next.setUTCDate(next.getUTCDate() + days);
-  return dateOnly(next);
-}
-
-export async function recomputeUserStats(prisma: PrismaClient, userId: string) {
-  const completedTasks = await prisma.task.findMany({
-    where: {
-      userId,
-      completedAt: { not: null },
-    },
-    select: { completedAt: true },
-  });
+export async function recomputeUserStats(prisma: PrismaClient, userId: string, now = new Date()) {
+  const [user, completedTasks] = await Promise.all([
+    prisma.user.findUnique({ where: { id: userId }, select: { timezone: true } }),
+    prisma.task.findMany({
+      where: { userId, completedAt: { not: null } },
+      select: { completedAt: true },
+    }),
+  ]);
+  const timeZone = user?.timezone && isValidTimeZone(user.timezone) ? user.timezone : 'UTC';
 
   const countsByDay = new Map<string, number>();
   for (const task of completedTasks) {
     if (!task.completedAt) continue;
-    const completedDate = task.completedAt.slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(completedDate)) continue;
+    const completedDate = dateInTimeZone(task.completedAt, timeZone);
+    if (!completedDate) continue;
     countsByDay.set(completedDate, (countsByDay.get(completedDate) ?? 0) + 1);
   }
 
-  const today = dateOnly();
-  const yesterday = addDays(today, -1);
+  const today = dateInTimeZone(now, timeZone)!;
+  const yesterday = addCalendarDays(today, -1);
   const streakStart = countsByDay.has(today) ? today : countsByDay.has(yesterday) ? yesterday : null;
   let streak = 0;
   let cursor = streakStart;
   while (cursor && countsByDay.has(cursor)) {
     streak += 1;
-    cursor = addDays(cursor, -1);
+    cursor = addCalendarDays(cursor, -1);
   }
 
   return prisma.userStats.upsert({

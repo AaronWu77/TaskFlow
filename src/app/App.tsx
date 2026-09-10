@@ -5,18 +5,19 @@ import {
   Calendar, Tag, XCircle, ChevronLeft, ChevronRight,
   ListTodo, SkipForward, AlarmClock, RotateCcw,
   GripVertical, ArrowUpDown, Globe, ChevronUp, ChevronDown,
-  Search, Bell, RotateCw, Flag, SlidersHorizontal
+  Search, Bell, RotateCw, Flag, SlidersHorizontal, Download
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
 import { storageGet, storageSet, storageRemove, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, apiDeleteAccount, apiSyncBootstrap, apiPullChanges, apiPushOperations, type AuthUser, type TaskDTO, type PendingSyncOperationDTO, type SyncChangeDTO } from './api';
+import { ApiError, apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, apiDeleteAccount, apiExportUserData, apiUpdateUserPreferences, apiSyncBootstrap, apiPullChanges, apiPushOperations, type AuthUser, type TaskDTO, type PendingSyncOperationDTO, type SyncChangeDTO } from './api';
 import { toast, Toaster } from 'sonner';
 import { cn } from './components/ui/utils';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { Capacitor } from '@capacitor/core';
 import { LocalNotifications } from '@capacitor/local-notifications';
+import { MAX_REPEAT_INSTANCES, dateOnlyKey, nextRepeatDate, repeatDatesAfterStart, repeatInstanceCount } from './task-core.mjs';
 
 // --- Types ---
 type Priority = 'P1' | 'P2' | 'P3';
@@ -82,7 +83,7 @@ function visibleSyncStatus(rawStatus: SyncStatus, operations: PendingOperation[]
   }
   if (rawStatus === 'syncing') return 'syncing';
   if (!meta.lastSuccessfulSyncAt) return navigator.onLine ? 'pending' : 'offline';
-  if (rawStatus === 'conflict' || rawStatus === 'error' || rawStatus === 'offline') return rawStatus;
+  if (rawStatus === 'conflict') return rawStatus;
   return 'idle';
 }
 const SESSION_KEY = 'taskflow_session';
@@ -147,7 +148,7 @@ function loadSession(): SessionMeta | null {
           userId: parsed.userId,
           email: parsed.email,
           emailVerifiedAt: typeof parsed.emailVerifiedAt === 'string' ? parsed.emailVerifiedAt : null,
-          signedOut: parsed.signedOut === true,
+          signedOut: false,
           lastAuthenticatedAt: parsed.lastAuthenticatedAt,
         };
       }
@@ -386,10 +387,6 @@ function dateFromDateOnly(value: string): Date | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-function dateOnlyKey(date: Date): string {
-  return fmtDate(date.getFullYear(), date.getMonth(), date.getDate());
-}
-
 function relativeDueLabel(dueDate: string | null | undefined, t: (key: string) => string, locale: string): string | null {
   if (!dueDate) return null;
   const due = dateFromDateOnly(dueDate);
@@ -469,19 +466,6 @@ async function getNotificationPermission(request: boolean): Promise<Notification
   }
 }
 
-function markOrderDirty(task: Task, sortOrder: number): Task {
-  if (task.id.startsWith('local-')) return { ...task, sortOrder };
-  return {
-    ...task,
-    sortOrder,
-    _dirty: true,
-    _syncState: 'update',
-    _operationId: syncOperationId(),
-    _conflict: false,
-    _syncError: false,
-  };
-}
-
 // --- Constants ---
 const PRESET_TAGS = ['Work', 'Personal', 'Study', 'Planning', 'Health', 'Other'];
 const STATUSES_FOR_CLIENT = new Set(['todo', 'doing', 'done', 'snoozed', 'skipped']);
@@ -498,7 +482,7 @@ const PRIORITY_LABEL_KEY: Record<Priority, string> = { P1: 'priority.P1', P2: 'p
 const DOT_COLOR = { P1: 'bg-rose-500', P2: 'bg-amber-400', P3: 'bg-emerald-500' };
 const ACCENT_THEME_KEY = 'taskflow_accent_theme';
 
-type AccentTheme = 'tcx111400' | 'tcx134306' | 'tcx133802' | 'tcx136006' | 'tcx121107';
+type AccentTheme = 'tcx111400' | 'tcx134306' | 'tcx133802' | 'tcx136006' | 'tcx140837';
 
 const ACCENT_THEME_PRESETS: Record<AccentTheme, {
   primary: string;
@@ -535,12 +519,12 @@ const ACCENT_THEME_PRESETS: Record<AccentTheme, {
     secondaryForeground: '#495640',
     ring: '#CAD3C1',
   },
-  tcx121107: {
-    primary: '#F0D8CC',
-    primaryForeground: '#3e2f28',
-    secondary: '#fff2ec',
-    secondaryForeground: '#695044',
-    ring: '#F0D8CC',
+  tcx140837: {
+    primary: '#E5D39A',
+    primaryForeground: '#3d3520',
+    secondary: '#fbf4dc',
+    secondaryForeground: '#675a34',
+    ring: '#E5D39A',
   },
 };
 
@@ -614,7 +598,7 @@ function saveTasksToCache(userId: string, tasks: Task[]) {
 }
 
 // --- Persistence helpers ---
-const todayStr = () => new Date().toISOString().split('T')[0];
+const todayStr = () => dateOnlyKey(new Date());
 
 function loadStatsFromCache(userId: string): { streak: number; completedToday: number } {
   let streak = 0, completedToday = 0;
@@ -626,7 +610,7 @@ function loadStatsFromCache(userId: string): { streak: number; completedToday: n
       if (lastDate === today) streak = count;
       else {
         const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
-        if (lastDate === yesterday.toISOString().split('T')[0]) streak = count;
+        if (lastDate === dateOnlyKey(yesterday)) streak = count;
       }
     }
     const rawC = storageGet(userStorageKey(userId, 'completed_today'));
@@ -664,31 +648,6 @@ function quickDueDate(offset: number): string {
   return fmtDate(next.getFullYear(), next.getMonth(), next.getDate());
 }
 
-function nextRepeatDate(dueDate: string | null | undefined, rule: Task['repeatRule']): string | null {
-  if (!dueDate || !rule || rule === 'none') return null;
-  const next = new Date(`${dueDate}T12:00:00`);
-  if (Number.isNaN(next.getTime())) return null;
-  if (rule === 'daily') next.setDate(next.getDate() + 1);
-  if (rule === 'weekly') next.setDate(next.getDate() + 7);
-  if (rule === 'monthly') next.setMonth(next.getMonth() + 1);
-  return fmtDate(next.getFullYear(), next.getMonth(), next.getDate());
-}
-
-function repeatDatesAfterStart(dueDate: string, repeatUntilDate: string, rule: Task['repeatRule']): string[] {
-  const dates: string[] = [];
-  let next = nextRepeatDate(dueDate, rule);
-  while (next && next <= repeatUntilDate) {
-    dates.push(next);
-    next = nextRepeatDate(next, rule);
-  }
-  return dates;
-}
-
-function repeatInstanceCount(dueDate: string, repeatUntilDate: string, rule: Task['repeatRule']): number {
-  if (!dueDate || !repeatUntilDate || !rule || rule === 'none' || repeatUntilDate <= dueDate) return 0;
-  return repeatDatesAfterStart(dueDate, repeatUntilDate, rule).length + 1;
-}
-
 function buildRepeatedTasks(source: Task, dueDates: string[], sortOrderStart: number): Task[] {
   const now = new Date().toISOString();
   return dueDates.map((dueDate, offset) => ({
@@ -714,11 +673,11 @@ function localTaskId(): string {
   return `local-${typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2)}`;
 }
 
-function taskExitMotion(action: ExitAction | null, shouldReduceMotion = false) {
+function taskExitMotion(action: ExitAction | null, shouldReduceMotion = false): import('motion/react').TargetAndTransition {
   if (shouldReduceMotion) {
     return {
       opacity: 0,
-      transition: { duration: 0.12, ease: 'easeOut' },
+      transition: { duration: 0.12, ease: 'easeOut' as const },
     };
   }
   if (action === 'complete') {
@@ -758,7 +717,7 @@ function taskExitMotion(action: ExitAction | null, shouldReduceMotion = false) {
     opacity: 0,
     y: 36,
     scale: 0.96,
-    transition: { duration: 0.24, ease: 'easeOut' },
+    transition: { duration: 0.24, ease: 'easeOut' as const },
   };
 }
 
@@ -813,6 +772,7 @@ function ViewToggle({ view, onChange }: { view: ViewMode; onChange: (v: ViewMode
     <div className="relative flex items-center bg-muted rounded-full p-1">
       <button
         onClick={() => onChange('flow')}
+        aria-pressed={view === 'flow'}
         className={`relative flex items-center justify-center gap-2 w-32 py-2 text-sm font-semibold rounded-full transition-colors duration-200 ${view === 'flow' ? 'text-foreground' : 'text-muted-foreground'}`}
       >
         {view === 'flow' && (
@@ -826,6 +786,7 @@ function ViewToggle({ view, onChange }: { view: ViewMode; onChange: (v: ViewMode
       </button>
       <button
         onClick={() => onChange('calendar')}
+        aria-pressed={view === 'calendar'}
         className={`relative flex items-center justify-center gap-2 w-32 py-2 text-sm font-semibold rounded-full transition-colors duration-200 ${view === 'calendar' ? 'text-foreground' : 'text-muted-foreground'}`}
       >
         {view === 'calendar' && (
@@ -879,7 +840,18 @@ function TaskCard({ task, onAction, pendingAction = null, actionDisabled = false
   );
 
   return (
-    <div onClick={onOpen} className="relative w-full h-full bg-card rounded-3xl border border-border/70 flex flex-col overflow-hidden shadow-sm">
+    <div
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (!onOpen || event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        onOpen();
+      }}
+      role="group"
+      aria-label={task.title}
+      tabIndex={onOpen ? 0 : undefined}
+      className="relative w-full h-full bg-card rounded-3xl border border-border/70 flex flex-col overflow-hidden shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
       <div className="relative z-10 flex h-full min-h-0 flex-col p-5 sm:p-6">
         <div className="mb-5 flex items-start justify-between gap-3">
           <span className={`shrink-0 text-xs font-semibold px-2.5 py-1 rounded-full ${PRIORITY_BADGE[task.priority]}`}>{t(PRIORITY_LABEL_KEY[task.priority])}</span>
@@ -908,16 +880,16 @@ function TaskCard({ task, onAction, pendingAction = null, actionDisabled = false
               </span>
             )}
           </div>
-          <motion.button type="button" aria-disabled={actionDisabled} onClick={(e) => triggerAction(e, 'complete')} className={actionButtonClass('complete', 'relative z-20 w-full bg-primary text-primary-foreground py-4 font-bold text-lg shadow-lg shadow-primary/20 hover:bg-primary/90')} style={{ WebkitTapHighlightColor: 'transparent' }}>
+          <motion.button type="button" disabled={actionDisabled} onClick={(e) => triggerAction(e, 'complete')} className={actionButtonClass('complete', 'relative z-20 w-full bg-primary text-primary-foreground py-4 font-bold text-lg shadow-lg shadow-primary/20 hover:bg-primary/90 disabled:cursor-wait disabled:opacity-60')} style={{ WebkitTapHighlightColor: 'transparent' }}>
             <span className={cn('absolute inset-0 bg-white/15 opacity-0 transition-opacity duration-150', visualAction === 'complete' && 'opacity-100')} />
             <Check className="relative w-6 h-6" /><span className="relative">{t('task.complete')}</span>
           </motion.button>
           <div className="relative z-20 grid grid-cols-2 gap-2">
-            <motion.button type="button" aria-disabled={actionDisabled} onClick={(e) => triggerAction(e, 'snooze')} className={actionButtonClass('snooze', 'text-muted-foreground py-2.5 hover:bg-muted/70')} style={{ WebkitTapHighlightColor: 'transparent' }}>
+            <motion.button type="button" disabled={actionDisabled} onClick={(e) => triggerAction(e, 'snooze')} className={actionButtonClass('snooze', 'text-muted-foreground py-2.5 hover:bg-muted/70 disabled:cursor-wait disabled:opacity-60')} style={{ WebkitTapHighlightColor: 'transparent' }}>
               <span className={cn('absolute inset-0 bg-foreground/5 opacity-0 transition-opacity duration-150', visualAction === 'snooze' && 'opacity-100')} />
               <AlarmClock className="relative w-4 h-4 shrink-0" /><span className="relative whitespace-normal text-xs leading-tight sm:text-sm">{t('task.snooze')}</span>
             </motion.button>
-            <motion.button type="button" aria-disabled={actionDisabled} onClick={(e) => triggerAction(e, 'skip')} className={actionButtonClass('skip', 'text-muted-foreground py-2.5 hover:bg-muted/70')} style={{ WebkitTapHighlightColor: 'transparent' }}>
+            <motion.button type="button" disabled={actionDisabled} onClick={(e) => triggerAction(e, 'skip')} className={actionButtonClass('skip', 'text-muted-foreground py-2.5 hover:bg-muted/70 disabled:cursor-wait disabled:opacity-60')} style={{ WebkitTapHighlightColor: 'transparent' }}>
               <span className={cn('absolute inset-0 bg-foreground/5 opacity-0 transition-opacity duration-150', visualAction === 'skip' && 'opacity-100')} />
               <SkipForward className="relative w-4 h-4 shrink-0" /><span className="relative text-sm">{t('task.skip')}</span>
             </motion.button>
@@ -926,6 +898,68 @@ function TaskCard({ task, onAction, pendingAction = null, actionDisabled = false
       </div>
     </div>
   );
+}
+
+function ReorderRow({ task, position, isFirst, isDragging, setRowRef, onHandlePointerDown, onMoveUp, onMoveDown, canMoveUp, canMoveDown }: {
+  task: Task; position: number; isFirst: boolean; isDragging: boolean;
+  setRowRef: (node: HTMLDivElement | null) => void;
+  onHandlePointerDown: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onMoveUp: () => void; onMoveDown: () => void; canMoveUp: boolean; canMoveDown: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <motion.div ref={setRowRef} layout className={cn('select-none rounded-2xl border px-3 py-3.5', isFirst ? 'border-primary/20 bg-primary/5 shadow-sm' : 'border-border bg-card', isDragging && 'relative z-10 border-primary/40 shadow-lg shadow-black/10')} animate={{ scale: isDragging ? 1.015 : 1 }} transition={isDragging ? { type: 'tween', duration: 0.02 } : { type: 'spring', stiffness: 420, damping: 34, mass: 0.75 }}>
+      <div className="flex items-start gap-3">
+        <div className="flex min-w-0 flex-1 items-start gap-3">
+          <button onPointerDown={onHandlePointerDown} className="-ml-2 -mt-2 touch-none cursor-grab rounded-xl p-3 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:cursor-grabbing" aria-label={`Reorder ${task.title}`} type="button"><GripVertical className="h-5 w-5" /></button>
+          <div className="mt-1 flex w-8 flex-col items-center gap-2"><span className="text-xs font-semibold text-muted-foreground tabular-nums">{position}</span><span className={`h-2.5 w-2.5 rounded-full ${DOT_COLOR[task.priority]}`} /></div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2"><p className="min-w-0 flex-1 text-sm font-semibold leading-snug text-foreground">{task.title}</p>{isFirst && <span className="rounded-full bg-primary/10 px-2 py-1 text-[11px] font-semibold text-primary">{t('task.now')}</span>}</div>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span className="rounded-md bg-muted px-2 py-1">{estimateLabel(task.estimateMinutes)}</span><span className={`rounded-md px-2 py-1 font-semibold ${PRIORITY_BADGE[task.priority]}`}>{task.priority}</span>{task.tag && <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1"><Tag className="h-3 w-3" />{task.tag}</span>}</div>
+          </div>
+        </div>
+        <div className="flex flex-col gap-1">
+          <button type="button" onClick={onMoveUp} disabled={!canMoveUp} aria-label={`Move ${task.title} up`} className="rounded-lg border border-border p-1.5 text-muted-foreground transition-colors hover:border-primary/30 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"><ChevronUp className="h-4 w-4" /></button>
+          <button type="button" onClick={onMoveDown} disabled={!canMoveDown} aria-label={`Move ${task.title} down`} className="rounded-lg border border-border p-1.5 text-muted-foreground transition-colors hover:border-primary/30 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"><ChevronDown className="h-4 w-4" /></button>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: { isOpen: boolean; pendingTasks: Task[]; onClose: () => void; onSave: (ordered: Task[]) => void }) {
+  const { t } = useTranslation();
+  const [orderIds, setOrderIds] = useState<string[]>(() => pendingTasks.map(task => task.id));
+  const taskById = useMemo(() => new Map(pendingTasks.map(task => [task.id, task])), [pendingTasks]);
+  const pendingTaskIds = useMemo(() => pendingTasks.map(task => task.id), [pendingTasks]);
+  const pendingTaskIdsKey = pendingTaskIds.join('\u001f');
+  const order = useMemo(() => orderIds.map(id => taskById.get(id)).filter((task): task is Task => !!task), [orderIds, taskById]);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const rowRefs = React.useRef(new Map<string, HTMLDivElement>());
+
+  useEffect(() => { if (isOpen) { setOrderIds(pendingTaskIds); setDraggedId(null); } }, [isOpen, pendingTaskIdsKey]);
+  const hasChanges = orderIds.join('\u001f') !== pendingTaskIdsKey;
+  const setRowRef = React.useCallback((id: string, node: HTMLDivElement | null) => { if (node) rowRefs.current.set(id, node); else rowRefs.current.delete(id); }, []);
+  const moveByStep = React.useCallback((id: string, direction: -1 | 1) => setOrderIds(previous => {
+    const from = previous.indexOf(id); const to = from + direction;
+    return from < 0 || to < 0 || to >= previous.length ? previous : arrayMove(previous, from, to);
+  }), []);
+  const startDrag = React.useCallback((id: string, event: React.PointerEvent<HTMLButtonElement>) => {
+    event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture?.(event.pointerId); setDraggedId(id);
+    const move = (moveEvent: PointerEvent) => setOrderIds(previous => {
+      const remaining = previous.filter(item => item !== id); let target = remaining.length;
+      for (let index = 0; index < remaining.length; index += 1) {
+        const row = rowRefs.current.get(remaining[index]);
+        if (row && moveEvent.clientY < row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2) { target = index; break; }
+      }
+      const next = [...remaining]; next.splice(target, 0, id); return next;
+    });
+    const finish = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', finish); window.removeEventListener('pointercancel', finish); setDraggedId(null); };
+    window.addEventListener('pointermove', move, { passive: false }); window.addEventListener('pointerup', finish); window.addEventListener('pointercancel', finish);
+  }, []);
+  const close = () => { setOrderIds(pendingTaskIds); setDraggedId(null); onClose(); };
+
+  return <AnimatePresence>{isOpen && <><motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40" onClick={close} /><motion.div initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }} transition={{ type: 'spring', stiffness: 380, damping: 38, mass: 0.9 }} className="fixed bottom-0 left-0 right-0 z-50 flex max-h-[82vh] flex-col rounded-t-3xl border-t border-border bg-card"><div className="flex justify-center pb-1 pt-3"><div className="h-1 w-10 rounded-full bg-muted-foreground/30" /></div><div className="flex items-center justify-between gap-3 border-b border-border px-5 py-3"><div><h2 className="text-base font-bold">{t('task.reorderTasks')}</h2><p className="mt-0.5 text-xs text-muted-foreground">{t('task.reorderHint')}</p></div><div className="flex shrink-0 gap-2"><button onClick={close} className="rounded-xl border border-border px-3 py-2 text-sm font-semibold text-muted-foreground">{t('task.cancel')}</button><button onClick={() => { if (hasChanges) onSave(order); onClose(); }} className="flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"><Check className="h-4 w-4" />{t('task.done')}</button></div></div><div className="flex-1 overflow-y-auto px-4 py-3"><div className="space-y-2">{order.map((task, index) => <ReorderRow key={task.id} task={task} position={index + 1} isFirst={index === 0} isDragging={draggedId === task.id} setRowRef={node => setRowRef(task.id, node)} onHandlePointerDown={event => startDrag(task.id, event)} onMoveUp={() => moveByStep(task.id, -1)} onMoveDown={() => moveByStep(task.id, 1)} canMoveUp={index > 0} canMoveDown={index < order.length - 1} />)}</div></div></motion.div></>}</AnimatePresence>;
 }
 
 function QuickCreateDialog({
@@ -945,7 +979,7 @@ function QuickCreateDialog({
   errors: AddTaskErrors;
   showReminder: boolean;
   onClose: () => void;
-  onSubmit: (event: React.FormEvent) => void;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
   onOpenDetails: () => void;
   onFormChange: (patch: Partial<AddTaskState>) => void;
   onReminderChange: (value: string) => void;
@@ -972,6 +1006,7 @@ function QuickCreateDialog({
               <label htmlFor="quick-task-title" className="sr-only">{t('task.taskName')}</label>
               <input
                 id="quick-task-title"
+                name="title"
                 type="text"
                 autoFocus
                 enterKeyHint="done"
@@ -1009,6 +1044,7 @@ function QuickCreateDialog({
                 <Flag className="h-4 w-4" />
                 <span className="sr-only">{t('task.priority')}</span>
                 <select
+                  name="priority"
                   aria-label={t('task.priority')}
                   value={form.priority}
                   onChange={(event) => onFormChange({ priority: event.target.value as Priority })}
@@ -1033,6 +1069,7 @@ function QuickCreateDialog({
                 <label htmlFor="quick-reminder" className="sr-only">{t('task.reminderAt')}</label>
                 <input
                   id="quick-reminder"
+                  name="reminderAt"
                   type="datetime-local"
                   value={form.reminderAt}
                   aria-invalid={!!errors.reminderAt}
@@ -1049,6 +1086,7 @@ function QuickCreateDialog({
             {errors.reminderAt && <p className="text-xs font-medium text-destructive">{errors.reminderAt}</p>}
 
             <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-2">
+              <input type="hidden" name="dueDate" value={form.dueDate} />
               <button type="button" onClick={onOpenDetails} className="flex min-h-12 items-center justify-center gap-2 rounded-lg px-3 text-sm font-semibold text-muted-foreground hover:bg-muted hover:text-foreground">
                 <SlidersHorizontal className="h-4 w-4" />{t('task.completeDetails')}
               </button>
@@ -1082,7 +1120,7 @@ function TaskDetailsSheet({
   editing: boolean;
   repeatMode: boolean;
   onClose: () => void;
-  onSubmit: (event: React.FormEvent) => void;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
   onFormChange: (patch: Partial<AddTaskState>) => void;
   onReminderChange: (value: string) => void;
 }) {
@@ -1106,19 +1144,19 @@ function TaskDetailsSheet({
             <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-5">
               <div className="space-y-2">
                 <label htmlFor="details-title" className="text-sm font-semibold">{t('task.taskName')}</label>
-                <input id="details-title" type="text" value={form.title} aria-invalid={!!errors.title} onChange={(event) => onFormChange({ title: event.target.value })} className={cn('h-11 w-full rounded-lg border bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring', errors.title ? 'border-destructive' : 'border-input')} />
+                <input id="details-title" name="title" type="text" value={form.title} aria-invalid={!!errors.title} onChange={(event) => onFormChange({ title: event.target.value })} className={cn('h-11 w-full rounded-lg border bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring', errors.title ? 'border-destructive' : 'border-input')} />
                 {errors.title && <p className="text-xs font-medium text-destructive">{errors.title}</p>}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-2">
                   <label htmlFor="details-due-date" className="text-sm font-semibold">{t('task.deadline')}</label>
-                  <input id="details-due-date" type="date" value={form.dueDate} aria-invalid={!!errors.dueDate} onChange={(event) => onFormChange({ dueDate: event.target.value })} className={cn('h-11 w-full appearance-none rounded-lg border bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring', errors.dueDate ? 'border-destructive' : 'border-input')} />
+                  <input id="details-due-date" name="dueDate" type="date" value={form.dueDate} aria-invalid={!!errors.dueDate} onChange={(event) => onFormChange({ dueDate: event.target.value })} className={cn('h-11 w-full appearance-none rounded-lg border bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring', errors.dueDate ? 'border-destructive' : 'border-input')} />
                   {errors.dueDate && <p className="text-xs font-medium text-destructive">{errors.dueDate}</p>}
                 </div>
                 <div className="space-y-2">
                   <label htmlFor="details-priority" className="text-sm font-semibold">{t('task.priority')}</label>
-                  <select id="details-priority" value={form.priority} onChange={(event) => onFormChange({ priority: event.target.value as Priority })} className="h-11 w-full rounded-lg border border-input bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring">
+                  <select id="details-priority" name="priority" value={form.priority} onChange={(event) => onFormChange({ priority: event.target.value as Priority })} className="h-11 w-full rounded-lg border border-input bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring">
                     {(['P1', 'P2', 'P3'] as Priority[]).map(priority => <option key={priority} value={priority}>{t(PRIORITY_LABEL_KEY[priority])}</option>)}
                   </select>
                 </div>
@@ -1127,12 +1165,12 @@ function TaskDetailsSheet({
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-2">
                   <label htmlFor="details-minutes" className="text-sm font-semibold">{t('task.estMinutes')}</label>
-                  <input id="details-minutes" type="number" min="1" max="1440" inputMode="numeric" value={form.minutes} aria-invalid={!!errors.minutes} onChange={(event) => onFormChange({ minutes: event.target.value })} className={cn('h-11 w-full rounded-lg border bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring', errors.minutes ? 'border-destructive' : 'border-input')} />
+                  <input id="details-minutes" name="minutes" type="number" min="1" max="1440" inputMode="numeric" value={form.minutes} aria-invalid={!!errors.minutes} onChange={(event) => onFormChange({ minutes: event.target.value })} className={cn('h-11 w-full rounded-lg border bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring', errors.minutes ? 'border-destructive' : 'border-input')} />
                   {errors.minutes && <p className="text-xs font-medium text-destructive">{errors.minutes}</p>}
                 </div>
                 <div className="space-y-2">
                   <label htmlFor="details-tag" className="text-sm font-semibold">{t('task.categoryTag')}</label>
-                  <select id="details-tag" value={form.tag} onChange={(event) => onFormChange({ tag: event.target.value })} className="h-11 w-full rounded-lg border border-input bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring">
+                  <select id="details-tag" name="tag" value={form.tag} onChange={(event) => onFormChange({ tag: event.target.value })} className="h-11 w-full rounded-lg border border-input bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring">
                     <option value="">{t('task.noTag')}</option>
                     {PRESET_TAGS.map(tag => <option key={tag} value={tag}>{t(`tag.${tag}`)}</option>)}
                   </select>
@@ -1141,7 +1179,7 @@ function TaskDetailsSheet({
 
               <div className="space-y-2">
                 <label htmlFor="details-reminder" className="flex items-center gap-2 text-sm font-semibold"><Bell className="h-4 w-4" />{t('task.reminderAt')}</label>
-                <input id="details-reminder" type="datetime-local" value={form.reminderAt} aria-invalid={!!errors.reminderAt} onChange={(event) => onReminderChange(event.target.value)} className={cn('h-11 w-full appearance-none rounded-lg border bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring', errors.reminderAt ? 'border-destructive' : 'border-input')} />
+                <input id="details-reminder" name="reminderAt" type="datetime-local" value={form.reminderAt} aria-invalid={!!errors.reminderAt} onChange={(event) => onReminderChange(event.target.value)} className={cn('h-11 w-full appearance-none rounded-lg border bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring', errors.reminderAt ? 'border-destructive' : 'border-input')} />
                 {errors.reminderAt && <p className="text-xs font-medium text-destructive">{errors.reminderAt}</p>}
                 <p className="text-xs text-muted-foreground">{t('task.reminderHint')}</p>
               </div>
@@ -1149,7 +1187,7 @@ function TaskDetailsSheet({
               <div className="space-y-3 border-t border-border pt-5">
                 <div className="space-y-2">
                   <label htmlFor="details-repeat" className="text-sm font-semibold">{t('task.repeatRule')}</label>
-                  <select id="details-repeat" value={form.repeatRule} onChange={(event) => {
+                  <select id="details-repeat" name="repeatRule" value={form.repeatRule} onChange={(event) => {
                     const repeatRule = event.target.value as AddTaskState['repeatRule'];
                     onFormChange({ repeatRule, repeatUntilDate: repeatRule === 'none' ? '' : form.repeatUntilDate });
                   }} className="h-11 w-full rounded-lg border border-input bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring">
@@ -1162,7 +1200,7 @@ function TaskDetailsSheet({
                 {form.repeatRule !== 'none' && (
                   <div className="space-y-2">
                     <label htmlFor="details-repeat-until" className="text-sm font-semibold">{t('task.repeatUntilDate')}</label>
-                    <input id="details-repeat-until" type="date" min={form.dueDate || undefined} value={form.repeatUntilDate} aria-invalid={!!errors.repeatUntilDate} onChange={(event) => onFormChange({ repeatUntilDate: event.target.value })} className={cn('h-11 w-full appearance-none rounded-lg border bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring', errors.repeatUntilDate ? 'border-destructive' : 'border-input')} />
+                    <input id="details-repeat-until" name="repeatUntilDate" type="date" min={form.dueDate || undefined} value={form.repeatUntilDate} aria-invalid={!!errors.repeatUntilDate} onChange={(event) => onFormChange({ repeatUntilDate: event.target.value })} className={cn('h-11 w-full appearance-none rounded-lg border bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring', errors.repeatUntilDate ? 'border-destructive' : 'border-input')} />
                     {errors.repeatUntilDate && <p className="text-xs font-medium text-destructive">{errors.repeatUntilDate}</p>}
                     {repeatPreviewCount > 0 && <p className={cn('rounded-lg px-3 py-2 text-xs leading-relaxed', repeatPreviewCount > 30 ? 'bg-amber-500/10 text-amber-700' : 'bg-muted text-muted-foreground')}>{t('task.repeatPreview', { count: repeatPreviewCount })}</p>}
                     <p className="text-xs text-muted-foreground">{t('task.repeatHint')}</p>
@@ -1308,330 +1346,6 @@ function RepeatTaskModal({ task, onClose, onRepeat }: {
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
-  );
-}
-
-// --- Reorder Row Item (with dedicated drag handle) ---
-function ReorderRow({
-  task,
-  position,
-  isFirst,
-  isDragging,
-  setRowRef,
-  onHandlePointerDown,
-  onMoveUp,
-  onMoveDown,
-  canMoveUp,
-  canMoveDown,
-}: {
-  task: Task;
-  position: number;
-  isFirst: boolean;
-  isDragging: boolean;
-  setRowRef: (node: HTMLDivElement | null) => void;
-  onHandlePointerDown: (event: React.PointerEvent<HTMLButtonElement>) => void;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
-  canMoveUp: boolean;
-  canMoveDown: boolean;
-}) {
-  const { t } = useTranslation();
-  return (
-    <motion.div
-      ref={setRowRef}
-      layout
-      className={cn(
-        'select-none rounded-2xl border px-3 py-3.5',
-        isFirst ? 'border-primary/20 bg-primary/5 shadow-sm' : 'border-border bg-card',
-        isDragging && 'relative z-10 border-primary/40 shadow-lg shadow-black/10'
-      )}
-      animate={{ scale: isDragging ? 1.015 : 1 }}
-      transition={isDragging
-        ? { type: 'tween', duration: 0.02 }
-        : { type: 'spring', stiffness: 420, damping: 34, mass: 0.75 }}
-    >
-      <div className="flex items-start gap-3">
-        <div className="flex min-w-0 flex-1 items-start gap-3">
-          <button
-            onPointerDown={onHandlePointerDown}
-            className="-ml-2 -mt-2 touch-none cursor-grab rounded-xl p-3 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:cursor-grabbing"
-            aria-label={`Reorder ${task.title}`}
-            type="button"
-          >
-            <GripVertical className="h-5 w-5" />
-          </button>
-          <div className="mt-1 flex w-8 flex-col items-center gap-2">
-            <span className="text-xs font-semibold text-muted-foreground tabular-nums">{position}</span>
-            <span className={`h-2.5 w-2.5 rounded-full ${DOT_COLOR[task.priority]}`} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <p className="min-w-0 flex-1 text-sm font-semibold leading-snug text-foreground">
-                {task.title}
-              </p>
-              {isFirst && (
-                <span className="rounded-full bg-primary/10 px-2 py-1 text-[11px] font-semibold text-primary">
-                  {t('task.now')}
-                </span>
-              )}
-            </div>
-            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <span className="rounded-md bg-muted px-2 py-1">{estimateLabel(task.estimateMinutes)}</span>
-              <span className={`rounded-md px-2 py-1 font-semibold ${PRIORITY_BADGE[task.priority]}`}>
-                {task.priority}
-              </span>
-              {task.tag && (
-                <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1">
-                  <Tag className="h-3 w-3" />
-                  {task.tag}
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-        <div className="flex flex-col gap-1">
-          <button
-            type="button"
-            onClick={onMoveUp}
-            disabled={!canMoveUp}
-            aria-label={`Move ${task.title} up`}
-            className="rounded-lg border border-border p-1.5 text-muted-foreground transition-colors hover:border-primary/30 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <ChevronUp className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            onClick={onMoveDown}
-            disabled={!canMoveDown}
-            aria-label={`Move ${task.title} down`}
-            className="rounded-lg border border-border p-1.5 text-muted-foreground transition-colors hover:border-primary/30 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <ChevronDown className="h-4 w-4" />
-          </button>
-        </div>
-      </div>
-    </motion.div>
-  );
-}
-
-// --- Reorder Bottom Sheet ---
-function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: {
-  isOpen: boolean; pendingTasks: Task[];
-  onClose: () => void; onSave: (ordered: Task[]) => void;
-}) {
-  const { t } = useTranslation();
-  const [orderIds, setOrderIds] = useState<string[]>(() => pendingTasks.map(task => task.id));
-  const taskById = useMemo(() => new Map(pendingTasks.map(task => [task.id, task])), [pendingTasks]);
-  const pendingTaskIds = useMemo(() => pendingTasks.map(task => task.id), [pendingTasks]);
-  const pendingTaskIdsKey = pendingTaskIds.join('\u001f');
-  const currentOrderKey = orderIds.join('\u001f');
-  const order = useMemo(
-    () => orderIds.map(id => taskById.get(id)).filter((task): task is Task => !!task),
-    [orderIds, taskById]
-  );
-  const [dragState, setDragState] = useState<{ id: string; startY: number; currentY: number } | null>(null);
-  const rowRefs = React.useRef(new Map<string, HTMLDivElement>());
-  const lastHapticIndexRef = React.useRef<number | null>(null);
-
-  React.useEffect(() => {
-    if (!isOpen) return;
-    setOrderIds(pendingTaskIds);
-    setDragState(null);
-  }, [isOpen, pendingTaskIdsKey]);
-
-  const hasChanges = currentOrderKey !== pendingTaskIdsKey;
-  const leadTask = order[0] ?? null;
-  const queuedCount = Math.max(order.length - 1, 0);
-
-  const handleClose = () => {
-    setOrderIds(pendingTaskIds);
-    setDragState(null);
-    onClose();
-  };
-
-  const handleDone = () => {
-    if (hasChanges) onSave(order);
-    onClose();
-  };
-
-  const setRowRef = React.useCallback((id: string, node: HTMLDivElement | null) => {
-    if (node) rowRefs.current.set(id, node);
-    else rowRefs.current.delete(id);
-  }, []);
-
-  const moveDraggedId = React.useCallback((dragId: string, pointerY: number) => {
-    setOrderIds(prev => {
-      if (!prev.includes(dragId)) return prev;
-      const withoutDragged = prev.filter(id => id !== dragId);
-      let targetIndex = withoutDragged.length;
-
-      for (let i = 0; i < withoutDragged.length; i += 1) {
-        const id = withoutDragged[i];
-        const row = rowRefs.current.get(id);
-        if (!row) continue;
-        const rect = row.getBoundingClientRect();
-        const centerY = rect.top + rect.height / 2;
-        if (pointerY < centerY) {
-          targetIndex = i;
-          break;
-        }
-      }
-
-      const next = [...withoutDragged];
-      next.splice(targetIndex, 0, dragId);
-      const nextKey = next.join('\u001f');
-      if (nextKey === prev.join('\u001f')) return prev;
-
-      const nextIndex = next.indexOf(dragId);
-      if (lastHapticIndexRef.current !== nextIndex) {
-        lastHapticIndexRef.current = nextIndex;
-        Haptics.impact({ style: ImpactStyle.Light }).catch(() => {});
-      }
-      return next;
-    });
-  }, []);
-
-  const moveByStep = React.useCallback((id: string, direction: -1 | 1) => {
-    setOrderIds(prev => {
-      const currentIndex = prev.indexOf(id);
-      const nextIndex = currentIndex + direction;
-      if (currentIndex < 0 || nextIndex < 0 || nextIndex >= prev.length) return prev;
-      Haptics.impact({ style: ImpactStyle.Light }).catch(() => {});
-      return arrayMove(prev, currentIndex, nextIndex);
-    });
-  }, []);
-
-  const startDrag = React.useCallback((id: string, event: React.PointerEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    setDragState({ id, startY: event.clientY, currentY: event.clientY });
-    lastHapticIndexRef.current = orderIds.indexOf(id);
-    Haptics.impact({ style: ImpactStyle.Medium }).catch(() => {});
-
-    const handleMove = (moveEvent: PointerEvent) => {
-      moveEvent.preventDefault();
-      setDragState(current => current?.id === id ? { ...current, currentY: moveEvent.clientY } : current);
-      moveDraggedId(id, moveEvent.clientY);
-    };
-    const finishDrag = () => {
-      window.removeEventListener('pointermove', handleMove);
-      window.removeEventListener('pointerup', finishDrag);
-      window.removeEventListener('pointercancel', finishDrag);
-      setDragState(current => current?.id === id ? null : current);
-      lastHapticIndexRef.current = null;
-      Haptics.impact({ style: ImpactStyle.Light }).catch(() => {});
-    };
-
-    window.addEventListener('pointermove', handleMove, { passive: false });
-    window.addEventListener('pointerup', finishDrag);
-    window.addEventListener('pointercancel', finishDrag);
-  }, [moveDraggedId, orderIds]);
-
-  return (
-    <AnimatePresence>
-      {isOpen && (
-        <>
-          <motion.div
-            key="backdrop"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40"
-            onClick={handleClose}
-          />
-          <motion.div
-            key="sheet"
-            initial={{ y: '100%' }}
-            animate={{ y: 0 }}
-            exit={{ y: '100%' }}
-            transition={{ type: 'spring', stiffness: 380, damping: 38, mass: 0.9 }}
-            className="fixed bottom-0 left-0 right-0 z-50 bg-card rounded-t-3xl border-t border-border flex flex-col"
-            style={{ maxHeight: '82vh' }}
-          >
-            <div className="flex justify-center pt-3 pb-1">
-              <div className="w-10 h-1 rounded-full bg-muted-foreground/30" />
-            </div>
-
-            <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-3">
-              <div>
-                <h2 className="text-base font-bold">{t('task.reorderTasks')}</h2>
-                <p className="text-xs text-muted-foreground mt-0.5">{t('task.reorderHint')}</p>
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <button
-                  onClick={handleClose}
-                  className="rounded-xl border border-border px-3 py-2 text-sm font-semibold text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
-                >
-                  {t('task.cancel')}
-                </button>
-                <button
-                  onClick={handleDone}
-                  className="flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-transform active:scale-95"
-                >
-                  <Check className="w-4 h-4" />{t('task.done')}
-                </button>
-              </div>
-            </div>
-
-            <div className="overflow-y-auto flex-1 px-4 py-3">
-              {order.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-center">
-                  <CheckCircle2 className="w-10 h-10 text-emerald-500 mb-3" />
-                  <p className="text-sm text-muted-foreground">{t('task.noPendingTasks')}</p>
-                </div>
-              ) : (
-                <>
-                  {leadTask && (
-                    <div className="mb-3 rounded-2xl border border-primary/20 bg-primary/5 p-3">
-                      <div className="mb-2 flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-primary/80">
-                            {t('task.currentFocus')}
-                          </p>
-                          <p className="mt-1 text-sm font-semibold text-foreground">{leadTask.title}</p>
-                        </div>
-                        <span className="rounded-full bg-background/80 px-2.5 py-1 text-xs font-medium text-muted-foreground">
-                          {t('task.queuedCount', { count: queuedCount })}
-                        </span>
-                      </div>
-                      <p className="text-xs leading-relaxed text-muted-foreground">
-                        {t('task.reorderLeadHint')}
-                      </p>
-                    </div>
-                  )}
-                  <div className="space-y-2">
-                    {order.map((task, index) => (
-                      <ReorderRow
-                        key={task.id}
-                        task={task}
-                        position={index + 1}
-                        isFirst={index === 0}
-                        isDragging={dragState?.id === task.id}
-                        setRowRef={(node) => setRowRef(task.id, node)}
-                        onHandlePointerDown={(event) => startDrag(task.id, event)}
-                        onMoveUp={() => moveByStep(task.id, -1)}
-                        onMoveDown={() => moveByStep(task.id, 1)}
-                        canMoveUp={index > 0}
-                        canMoveDown={index < order.length - 1}
-                      />
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-
-            <div className="px-5 py-3 border-t border-border">
-              <div className="flex items-center justify-between gap-4 text-xs text-muted-foreground">
-                <p>{order.length} {t('task.tasksInFlow')}</p>
-                <p>{hasChanges ? t('task.unsavedChanges') : t('task.orderSaved')}</p>
-              </div>
-            </div>
-          </motion.div>
-        </>
-      )}
-    </AnimatePresence>
   );
 }
 
@@ -2150,7 +1864,7 @@ function ConflictResolutionPage({
   );
 }
 
-function AccountPage({ email, emailVerified, notificationPermission, accentTheme, onAccentThemeChange, onClose, onLogout, isLoggingOut, onOpenDeletedTasks, deletedCount, onDeleteAccount, onRetrySync, onOpenPrivacy, onRequestNotifications, onOpenConflicts, syncStatus, lastSync, pendingSyncCount, conflictCount }: {
+function AccountPage({ email, emailVerified, notificationPermission, accentTheme, onAccentThemeChange, onClose, onLogout, isLoggingOut, onOpenDeletedTasks, deletedCount, onDeleteAccount, onExportData, onRetrySync, onOpenPrivacy, onRequestNotifications, onOpenConflicts, syncStatus, lastSync, pendingSyncCount, conflictCount }: {
   email: string;
   emailVerified: boolean;
   notificationPermission: NotificationPermissionState;
@@ -2162,6 +1876,7 @@ function AccountPage({ email, emailVerified, notificationPermission, accentTheme
   onOpenDeletedTasks: () => void;
   deletedCount: number;
   onDeleteAccount: () => void;
+  onExportData: () => void;
   onRetrySync: () => void;
   onOpenPrivacy: () => void;
   onRequestNotifications: () => void;
@@ -2312,6 +2027,14 @@ function AccountPage({ email, emailVerified, notificationPermission, accentTheme
 
           <div className="space-y-2">
             <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('account.data')}</p>
+            <button
+              type="button"
+              onClick={onExportData}
+              className="flex w-full items-center justify-between rounded-xl border border-border bg-card px-4 py-3 text-left text-sm font-semibold text-foreground transition-colors hover:bg-muted/50"
+            >
+              <span>{t('account.exportData')}</span>
+              <Download className="h-4 w-4 text-muted-foreground" />
+            </button>
             <button
               type="button"
               onClick={onOpenDeletedTasks}
@@ -2528,18 +2251,19 @@ function AppShell({
   const syncInFlightRef = React.useRef(false);
   const syncRequestedRef = React.useRef(false);
   const syncNoticeKeyRef = React.useRef('');
-  const scheduledNotificationIdsRef = React.useRef(new Set<number>());
+  const scheduledNotificationsRef = React.useRef(new Map<number, string>());
+  const notificationErrorShownRef = React.useRef(false);
   const [tasksLoading, setTasksLoading] = useState(true);
   const [exitAction, setExitAction] = useState<TaskActionState | null>(null);
   const [actingTaskIds, setActingTaskIds] = useState<Set<string>>(() => new Set());
   const [viewMode, setViewMode] = useState<ViewMode>('flow');
   const greeting = useMemo(() => getGreeting(t), [t]);
-  const [isReordering, setIsReordering] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [conflictsOpen, setConflictsOpen] = useState(false);
   const [privacyOpen, setPrivacyOpen] = useState(false);
   const [flowDetailTaskId, setFlowDetailTaskId] = useState<string | null>(null);
   const [manageTaskId, setManageTaskId] = useState<string | null>(null);
+  const [isReordering, setIsReordering] = useState(false);
 
   const [isAddingTask, setIsAddingTask] = useState(false);
   const [isTaskDetailsOpen, setIsTaskDetailsOpen] = useState(false);
@@ -2557,6 +2281,15 @@ function AppShell({
     () => repeatInstanceCount(form.dueDate, form.repeatUntilDate, form.repeatRule),
     [form.dueDate, form.repeatRule, form.repeatUntilDate]
   );
+
+  useEffect(() => {
+    if (!cloudSyncEnabled) return;
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const locale: 'zh' | 'en' = i18n.language.startsWith('zh') ? 'zh' : 'en';
+    void apiUpdateUserPreferences({ timezone, locale }).catch(() => {
+      // Preferences are retried on the next app start or language change.
+    });
+  }, [cloudSyncEnabled, i18n.language, user.id]);
 
   const refreshNotificationPermission = React.useCallback(async (request = false) => {
     const permission = await getNotificationPermission(request);
@@ -2656,20 +2389,27 @@ function AppShell({
     let cancelled = false;
     async function syncReminderNotifications() {
       if (notificationPermission !== 'granted') return;
-      const candidates = tasks.filter(canNotifyTask);
-      const nextIds = new Set(candidates.map(task => notificationIdForTask(task.id)));
-      const cancelIds = new Set([...scheduledNotificationIdsRef.current, ...nextIds]);
-      if (cancelIds.size > 0) {
-        await LocalNotifications.cancel({
-          notifications: [...cancelIds].map(id => ({ id })),
-        }).catch(() => undefined);
-      }
-      if (cancelled || candidates.length === 0) {
-        scheduledNotificationIdsRef.current = new Set();
-        return;
-      }
-      await LocalNotifications.schedule({
-        notifications: candidates.map(task => {
+      const candidates = tasks.filter(canNotifyTask)
+        .sort((a, b) => Date.parse(a.reminderAt!) - Date.parse(b.reminderAt!))
+        .slice(0, 64);
+      const next = new Map(candidates.map(task => {
+        const id = notificationIdForTask(task.id);
+        return [id, `${task.reminderAt}|${task.title}|${i18n.language}`];
+      }));
+      const cancelIds = [...scheduledNotificationsRef.current]
+        .filter(([id, signature]) => next.get(id) !== signature)
+        .map(([id]) => id);
+      const toSchedule = candidates.filter(task => {
+        const id = notificationIdForTask(task.id);
+        return scheduledNotificationsRef.current.get(id) !== next.get(id);
+      });
+      try {
+        if (cancelIds.length > 0) {
+          await LocalNotifications.cancel({ notifications: cancelIds.map(id => ({ id })) });
+        }
+        if (cancelled) return;
+        if (toSchedule.length > 0) await LocalNotifications.schedule({
+          notifications: toSchedule.map(task => {
           const copy = notificationCopy(task, t, i18n.language);
           return {
             id: notificationIdForTask(task.id),
@@ -2678,9 +2418,19 @@ function AppShell({
             schedule: { at: new Date(task.reminderAt!) },
             extra: { taskId: task.id },
           };
-        }),
-      }).catch(() => undefined);
-      if (!cancelled) scheduledNotificationIdsRef.current = nextIds;
+          }),
+        });
+        if (!cancelled) {
+          scheduledNotificationsRef.current = next;
+          notificationErrorShownRef.current = false;
+        }
+      } catch (error) {
+        console.error('TaskFlow: failed to schedule reminders', error);
+        if (!cancelled && !notificationErrorShownRef.current) {
+          notificationErrorShownRef.current = true;
+          toast.error(t('notifications.scheduleFailed'));
+        }
+      }
     }
     syncReminderNotifications();
     return () => { cancelled = true; };
@@ -2789,7 +2539,6 @@ function AppShell({
   }, [isAddingTask, isTaskDetailsOpen]);
 
   // Cache tasks to localStorage whenever they change
-  useEffect(() => { saveTasksToCache(user.id, tasks); }, [tasks, user.id]);
   useEffect(() => {
     if (!cloudSyncEnabled) {
       setSyncStatus('idle');
@@ -2942,7 +2691,29 @@ function AppShell({
       while (hasMore) {
         pullPages += 1;
         if (pullPages > 20) throw new Error('Sync pull pagination did not converge');
-        const pulled = await apiPullChanges(cursor);
+        let pulled;
+        try {
+          pulled = await apiPullChanges(cursor);
+        } catch (error) {
+          if (!(error instanceof ApiError) || error.code !== 'CURSOR_EXPIRED') throw error;
+          const remote = await apiSyncBootstrap();
+          const rebuilt = new Map(remote.tasks.map(task => [task.id, toTask(task)]));
+          const pendingTaskIds = new Set(pendingOperationsRef.current.flatMap(operation =>
+            [operation.taskId, operation.clientTaskId].filter((id): id is string => !!id)
+          ));
+          for (const localTask of tasksRef.current) {
+            if (pendingTaskIds.has(localTask.id)) rebuilt.set(localTask.id, localTask);
+          }
+          setTasksAndCache([...rebuilt.values()].sort((a, b) => a.sortOrder - b.sortOrder));
+          setDeletedTasks(remote.deletedTasks.map(toTask));
+          setSyncMetaAndCache(current => ({ ...current, taskOrderVersion: remote.taskOrderVersion }));
+          pulled = {
+            changes: [],
+            nextCursor: remote.currentCursor,
+            hasMore: false,
+            serverTime: remote.serverTime,
+          };
+        }
         if (pulled.changes.length > 0) {
           setTasksAndCache(current => pulled.changes.reduce((next, change) => applyRemoteChange(next, change), current));
         }
@@ -3161,19 +2932,18 @@ function AppShell({
   }, [cloudSyncEnabled, retryDirtyTasks, setPendingOperationsAndCache, setTasksAndCache]);
 
   const applyPendingOrder = React.useCallback((orderedIds: string[]) => {
-    const idRank = new Map(orderedIds.map((id, index) => [id, index]));
-
     setTasksAndCache(prev => {
       const pending = prev.filter(task => task.status === 'todo' && !task.deletedAt);
       const pendingById = new Map(pending.map(task => [task.id, task]));
       const orderedPending = orderedIds
         .map(id => pendingById.get(id))
         .filter((task): task is Task => !!task);
-      const newlyAddedPending = pending.filter(task => !idRank.has(task.id));
+      const includedIds = new Set(orderedPending.map(task => task.id));
+      const newlyAddedPending = pending.filter(task => !includedIds.has(task.id));
       const nonPending = prev.filter(task => task.status !== 'todo' || task.deletedAt);
-      let sortOrder = 0;
-      const nextPending = [...orderedPending, ...newlyAddedPending].map(task => markOrderDirty(task, sortOrder++));
-      const next = [...nextPending, ...nonPending];
+      const next = [...orderedPending, ...newlyAddedPending]
+        .map((task, index) => ({ ...task, sortOrder: index }))
+        .concat(nonPending);
       updateSyncStatusFromTasks(next);
       return next;
     });
@@ -3183,9 +2953,12 @@ function AppShell({
       baseOrderVersion: syncMetaRef.current.taskOrderVersion,
       payload: { order: orderedIds.map((id, index) => ({ id, sortOrder: index })) },
     });
-
     if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
   }, [cloudSyncEnabled, queueOperation, retryDirtyTasks, setTasksAndCache, updateSyncStatusFromTasks]);
+
+  const handleSaveOrder = React.useCallback((newPendingOrder: Task[]) => {
+    applyPendingOrder(newPendingOrder.map(task => task.id));
+  }, [applyPendingOrder]);
 
   const handleAction = (id: string, action: ExitAction) => {
     if (actionLocksRef.current.has(id)) return;
@@ -3222,7 +2995,7 @@ function AppShell({
         let sortOrder = 0;
         const normalized = reordered.map(t => {
           if (t.status !== 'todo' || t.deletedAt) return t;
-          return markOrderDirty(t, sortOrder++);
+          return { ...t, sortOrder: sortOrder++ };
         });
         setTasksAndCache(prev => {
           if (!task) return prev;
@@ -3232,7 +3005,7 @@ function AppShell({
             let nextSortOrder = 0;
             return [...prev.filter(t => t.id !== id), nextTask].map(t => {
               if (t.status !== 'todo' || t.deletedAt) return t;
-              return markOrderDirty(t, nextSortOrder++);
+              return { ...t, sortOrder: nextSortOrder++ };
             });
           }
           return normalized;
@@ -3252,9 +3025,7 @@ function AppShell({
         });
         window.setTimeout(() => {
           unlock();
-          if (undoRequested) applyPendingOrder(previousPendingIds);
-          else if (!cloudSyncEnabled) applyPendingOrder(nextPendingIds);
-          else void retryDirtyTasks();
+          if (!undoRequested) applyPendingOrder(nextPendingIds);
         }, 520);
       }, 170);
     } else {
@@ -3300,7 +3071,7 @@ function AppShell({
           if (completedTodayRef.current === 0) {
             const yesterday = new Date();
             yesterday.setDate(yesterday.getDate() - 1);
-            const yStr = yesterday.toISOString().split('T')[0];
+            const yStr = dateOnlyKey(yesterday);
             try {
               const raw = storageGet(userStorageKey(user.id, 'streak'));
               if (raw) {
@@ -3324,21 +3095,6 @@ function AppShell({
         }, 520);
       }, 170);
     }
-  };
-
-  /** Apply reordered pending tasks back into the full tasks array */
-  const handleSaveOrder = (newPendingOrder: Task[]) => {
-    setTasksAndCache(prev => {
-      const nonPending = prev.filter(t => t.status !== 'todo');
-      return [...newPendingOrder.map((task, index) => markOrderDirty(task, index)), ...nonPending];
-    });
-    queueOperation({
-      operationId: syncOperationId(),
-      type: 'reorder',
-      baseOrderVersion: syncMetaRef.current.taskOrderVersion,
-      payload: { order: newPendingOrder.map((task, index) => ({ id: task.id, sortOrder: index })) },
-    });
-    if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
   };
 
   const persistTaskUpdate = (id: string, data: Partial<Task>, operationId?: string): Promise<boolean> => {
@@ -3493,6 +3249,35 @@ function AppShell({
     }
   }, [onAccountDeleted, t, user.id]);
 
+  const handleExportData = React.useCallback(async () => {
+    try {
+      const blob = await apiExportUserData();
+      const filename = `taskflow-export-${dateOnlyKey(new Date())}.json`;
+      const file = new File([blob], filename, { type: 'application/json' });
+      if (navigator.share && navigator.canShare?.({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: 'TaskFlow data export' });
+          toast.success(t('account.exportSuccess'));
+        } catch (error) {
+          if (error instanceof DOMException && error.name === 'AbortError') return;
+          throw error;
+        }
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      toast.success(t('account.exportSuccess'));
+    } catch {
+      toast.error(t('account.exportFailed'));
+    }
+  }, [t]);
+
   const handleDeleteTask = (task: Task) => {
     const deletedAt = new Date().toISOString();
     const operationId = syncOperationId();
@@ -3554,6 +3339,26 @@ function AppShell({
     setIsTaskDetailsOpen(true);
   };
 
+  const taskFormFromSubmit = (formElement: HTMLFormElement, base: AddTaskState): AddTaskState => {
+    const data = new FormData(formElement);
+    const getValue = (key: keyof AddTaskState) => {
+      const value = data.get(key);
+      return typeof value === 'string' ? value : base[key];
+    };
+    const priority = getValue('priority');
+    const repeatRule = getValue('repeatRule');
+    return {
+      title: getValue('title'),
+      minutes: getValue('minutes'),
+      priority: priority === 'P1' || priority === 'P2' || priority === 'P3' ? priority : base.priority,
+      dueDate: getValue('dueDate'),
+      reminderAt: getValue('reminderAt'),
+      repeatRule: repeatRule === 'daily' || repeatRule === 'weekly' || repeatRule === 'monthly' || repeatRule === 'none' ? repeatRule : base.repeatRule,
+      repeatUntilDate: getValue('repeatUntilDate'),
+      tag: getValue('tag'),
+    };
+  };
+
   const validateTaskForm = (candidate: AddTaskState): AddTaskErrors => {
     const errors: AddTaskErrors = {};
     if (!candidate.title.trim()) errors.title = t('task.errors.titleRequired');
@@ -3575,6 +3380,8 @@ function AppShell({
         errors.repeatUntilDate = t('task.errors.repeatUntilRequired');
       } else if (candidate.dueDate && candidate.repeatUntilDate <= candidate.dueDate) {
         errors.repeatUntilDate = t('task.errors.repeatUntilAfterDue');
+      } else if (repeatInstanceCount(candidate.dueDate, candidate.repeatUntilDate, candidate.repeatRule) > MAX_REPEAT_INSTANCES) {
+        errors.repeatUntilDate = t('task.errors.repeatTooMany', { count: MAX_REPEAT_INSTANCES });
       }
     }
     return errors;
@@ -3636,52 +3443,46 @@ function AppShell({
     return clientKey;
   };
 
-  const handleQuickCreate = (event: React.FormEvent) => {
+  const handleQuickCreate = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const quickForm = { ...form, repeatRule: 'none' as const, repeatUntilDate: '', minutes: '', tag: '' };
+    const quickForm = taskFormFromSubmit(event.currentTarget, { ...form, repeatRule: 'none' as const, repeatUntilDate: '', minutes: '', tag: '' });
     const errors = validateTaskForm(quickForm);
+    setForm(quickForm);
     setFormErrors(errors);
     if (Object.keys(errors).length > 0) return;
-    const clientKey = createTaskFromForm(quickForm);
+    createTaskFromForm(quickForm);
     setViewMode('flow');
     closeQuickCreate();
-    toast(t('task.created'), {
-      description: t('task.createdDesc'),
-      action: {
-        label: t('task.completeDetails'),
-        onClick: () => {
-          const createdTask = tasksRef.current.find(task => task._clientKey === clientKey);
-          if (createdTask) openEditTask(createdTask);
-        },
-      },
-    });
   };
 
-  const handleAddTask = async (e: React.FormEvent) => {
+  const handleAddTask = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const errors = validateTaskForm(form);
+    const submittedForm = taskFormFromSubmit(e.currentTarget, form);
+    const errors = validateTaskForm(submittedForm);
+    setForm(submittedForm);
     setFormErrors(errors);
     if (Object.keys(errors).length > 0) return;
-    if (repeatPreviewCount > 30 && !window.confirm(t('task.repeatLargeConfirm', { count: repeatPreviewCount }))) {
+    const submittedRepeatPreviewCount = repeatInstanceCount(submittedForm.dueDate, submittedForm.repeatUntilDate, submittedForm.repeatRule);
+    if (submittedRepeatPreviewCount > 30 && !window.confirm(t('task.repeatLargeConfirm', { count: submittedRepeatPreviewCount }))) {
       return;
     }
     if (editingTaskId) {
       const existingTask = tasksRef.current.find(task => task.id === editingTaskId);
       const patch: Partial<Task> = {
-        title: form.title.trim(),
-        priority: form.priority,
-        estimateMinutes: form.minutes.trim() ? Number.parseInt(form.minutes, 10) : null,
-        dueDate: form.dueDate || null,
-        reminderAt: form.reminderAt || null,
-        repeatRule: form.repeatRule,
-        repeatUntilDate: form.repeatRule === 'none' ? null : form.repeatUntilDate,
-        tag: form.tag || null,
+        title: submittedForm.title.trim(),
+        priority: submittedForm.priority,
+        estimateMinutes: submittedForm.minutes.trim() ? Number.parseInt(submittedForm.minutes, 10) : null,
+        dueDate: submittedForm.dueDate || null,
+        reminderAt: submittedForm.reminderAt || null,
+        repeatRule: submittedForm.repeatRule,
+        repeatUntilDate: submittedForm.repeatRule === 'none' ? null : submittedForm.repeatUntilDate,
+        tag: submittedForm.tag || null,
       };
       const editedTask: Task | null = existingTask ? { ...existingTask, ...patch } : null;
       const repeatedTasks = editedTask && patch.repeatUntilDate
         ? buildRepeatedTasks(
           editedTask,
-          repeatDatesAfterStart(form.dueDate, patch.repeatUntilDate, form.repeatRule).filter(dueDate =>
+          repeatDatesAfterStart(submittedForm.dueDate, patch.repeatUntilDate, submittedForm.repeatRule).filter(dueDate =>
             !tasksRef.current.some(task =>
               task.id !== editingTaskId
               && !task.deletedAt
@@ -3712,7 +3513,7 @@ function AppShell({
       closeTaskDetails();
       return;
     }
-    createTaskFromForm(form);
+    createTaskFromForm(submittedForm);
     closeTaskDetails();
   };
 
@@ -3760,6 +3561,7 @@ function AppShell({
             }}
             deletedCount={tasks.filter(task => !!task.deletedAt).length || deletedTasks.length}
             onDeleteAccount={handleDeleteAccount}
+            onExportData={handleExportData}
             onRetrySync={retryAllSyncOperations}
             onOpenPrivacy={() => setPrivacyOpen(true)}
             onRequestNotifications={() => refreshNotificationPermission(true)}
@@ -3906,7 +3708,7 @@ function AppShell({
                             scale: 1 - index * 0.035,
                             zIndex: 10 - index,
                           }}
-                          exit={(custom: TaskActionState | null) => taskExitMotion(custom?.taskId === task.id ? custom.action : null, shouldReduceMotion)}
+                          exit={taskExitMotion(exitAction?.taskId === task.id ? exitAction.action : null, shouldReduceMotion)}
                           transition={shouldReduceMotion ? { duration: 0 } : { type: 'spring', stiffness: 340, damping: 34, mass: 0.72 }}
                           className={`absolute inset-0 w-full h-full ${!isTop ? 'pointer-events-none' : ''}`}
                         >
@@ -3927,16 +3729,12 @@ function AppShell({
                 <div className="w-full px-1 py-1">
                   <div className="mb-2 flex items-center justify-between gap-3">
                     <div className="min-w-0">
-	                      <span className="block text-xs font-semibold uppercase text-muted-foreground">{t('task.upNext')}</span>
-	                      <span className="block truncate text-[11px] text-muted-foreground">
-	                        {t('task.queuedCount', { count: Math.max(pendingTasks.length - 1, 0) })}
-	                      </span>
+	                    <span className="block text-xs font-semibold uppercase text-muted-foreground">{t('task.upNext')}</span>
+	                    <span className="block truncate text-[11px] text-muted-foreground">
+	                      {t('task.queuedCount', { count: Math.max(pendingTasks.length - 1, 0) })}
+	                    </span>
                     </div>
-                    <button
-	                      onClick={() => setIsReordering(true)}
-	                      aria-label={t('task.reorderTasks')}
-	                      className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
-                    >
+                    <button onClick={() => setIsReordering(true)} aria-label={t('task.reorderTasks')} className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground">
                       <ArrowUpDown className="w-3.5 h-3.5" />{t('task.reorder')}
                     </button>
                   </div>
@@ -3990,13 +3788,7 @@ function AppShell({
         </motion.div>
       </div>
 
-      {/* Reorder Sheet */}
-      <ReorderSheet
-        isOpen={isReordering}
-        pendingTasks={pendingTasks}
-        onClose={() => setIsReordering(false)}
-        onSave={handleSaveOrder}
-      />
+      <ReorderSheet isOpen={isReordering} pendingTasks={pendingTasks} onClose={() => setIsReordering(false)} onSave={handleSaveOrder} />
       </>
       )}
 
@@ -4118,13 +3910,6 @@ export default function App() {
   // Register a global auth-failure callback so apiFetch can trigger logout
   useEffect(() => {
     setAuthFailureHandler(() => {
-      const session = loadSession();
-      if (session && !session.signedOut && !isSessionExpired(session)) {
-        setCurrentUser({ id: session.userId, email: session.email, emailVerifiedAt: session.emailVerifiedAt ?? null });
-        setCloudSyncEnabled(false);
-        setAppState('app');
-        return;
-      }
       clearLocalAuthTokens();
       clearSession();
       setCurrentUser(null);
@@ -4140,7 +3925,7 @@ export default function App() {
     let cancelled = false;
     async function restoreSession() {
       try {
-        await restoreNativeStorageWithTimeout([SESSION_KEY, 'taskflow_logged_in', 'taskflow_user_email', 'taskflow_refresh_token', ACCENT_THEME_KEY]);
+        await restoreNativeStorageWithTimeout([SESSION_KEY, 'taskflow_logged_in', 'taskflow_user_email', ACCENT_THEME_KEY]);
         if (cancelled) return;
 
         const session = loadSession();
@@ -4172,12 +3957,6 @@ export default function App() {
           return;
         }
         if (refreshResult === 'network' && canUseSession) {
-          setCurrentUser({ id: session.userId, email: session.email, emailVerifiedAt: session.emailVerifiedAt ?? null });
-          setCloudSyncEnabled(false);
-          setAppState('app');
-          return;
-        }
-        if (refreshResult === 'unauthorized' && canUseSession) {
           setCurrentUser({ id: session.userId, email: session.email, emailVerifiedAt: session.emailVerifiedAt ?? null });
           setCloudSyncEnabled(false);
           setAppState('app');

@@ -1,10 +1,10 @@
 import { Router, Response, NextFunction, RequestHandler } from 'express';
-import { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { recomputeUserStats } from '../services/stats';
+import { prisma } from '../prisma-client';
 
 const router = Router();
-const prisma = new PrismaClient();
 const PRIORITIES = new Set(['P1', 'P2', 'P3']);
 const STATUSES = new Set(['todo', 'doing', 'done', 'snoozed', 'skipped']);
 const REPEAT_RULES = new Set(['none', 'daily', 'weekly', 'monthly']);
@@ -94,10 +94,11 @@ function taskSnapshot(task: {
 
 async function upsertDevice(tx: Prisma.TransactionClient, userId: string, deviceId: string | null, body: Record<string, unknown>): Promise<void> {
   if (!deviceId) return;
+  const scopedDeviceId = `${userId}:${deviceId}`;
   await tx.device.upsert({
-    where: { id: deviceId },
+    where: { id: scopedDeviceId },
     create: {
-      id: deviceId,
+      id: scopedDeviceId,
       userId,
       name: normalizeNullableString(body.deviceName, 80) ?? null,
       platform: normalizeNullableString(body.platform, 40) ?? null,
@@ -141,6 +142,20 @@ async function recordChange(tx: Prisma.TransactionClient, userId: string, data: 
       tombstone: data.tombstone === undefined ? undefined : jsonValue(data.tombstone),
     },
   });
+}
+
+async function recordOperation(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  operationId: string,
+  taskId: string | null,
+  type: string,
+  response: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  await tx.taskOperation.create({
+    data: { userId, operationId, taskId, type, response: jsonValue(response) },
+  });
+  return response;
 }
 
 function parseTaskPayload(payload: unknown, partial: boolean): Record<string, string | number | null> | null {
@@ -247,9 +262,23 @@ router.get('/bootstrap', asyncHandler(async (req, res) => {
 
 router.get('/', asyncHandler(async (req, res) => {
   const cursor = Number.parseInt(String(req.query.cursor ?? '0'), 10);
-  const limit = Math.min(Number.parseInt(String(req.query.limit ?? '500'), 10) || 500, 1000);
+  const requestedLimit = Number.parseInt(String(req.query.limit ?? '500'), 10);
+  const limit = Math.min(requestedLimit || 500, 1000);
   if (!Number.isInteger(cursor) || cursor < 0) {
     res.status(400).json({ code: 'VALIDATION_ERROR', error: 'cursor must be a non-negative integer' });
+    return;
+  }
+  if (!Number.isInteger(requestedLimit) || requestedLimit < 1) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', error: 'limit must be a positive integer' });
+    return;
+  }
+  const [syncState, earliest] = await Promise.all([
+    prisma.userSyncState.upsert({ where: { userId: req.userId! }, create: { userId: req.userId! }, update: {} }),
+    prisma.taskChange.findFirst({ where: { userId: req.userId! }, orderBy: { seq: 'asc' }, select: { seq: true } }),
+  ]);
+  const earliestRecoverableCursor = earliest ? earliest.seq - 1 : syncState.nextSeq - 1;
+  if (cursor > 0 && cursor < earliestRecoverableCursor) {
+    res.status(409).json({ code: 'CURSOR_EXPIRED', error: 'Sync history expired; bootstrap is required' });
     return;
   }
   const changes = await prisma.taskChange.findMany({
@@ -272,12 +301,26 @@ router.post('/push', asyncHandler(async (req, res) => {
     res.status(400).json({ code: 'VALIDATION_ERROR', error: 'operations must be an array' });
     return;
   }
+  if (req.body.operations.length > 100) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', error: 'A sync batch can contain at most 100 operations' });
+    return;
+  }
   const deviceId = normalizeString(req.body.deviceId, 120);
   const accepted: unknown[] = [];
   const conflicts: unknown[] = [];
   const rejected: unknown[] = [];
+  let statsMayHaveChanged = false;
 
-  for (const operation of req.body.operations as SyncOperation[]) {
+  if (deviceId) {
+    await prisma.$transaction(tx => upsertDevice(tx, req.userId!, deviceId, req.body as Record<string, unknown>));
+  }
+
+  for (const rawOperation of req.body.operations as unknown[]) {
+    if (!isObject(rawOperation)) {
+      rejected.push({ code: 'VALIDATION_ERROR', error: 'Invalid operation' });
+      continue;
+    }
+    const operation = rawOperation as SyncOperation;
     const operationId = normalizeString(operation.operationId, 120);
     const type = typeof operation.type === 'string' && OP_TYPES.has(operation.type) ? operation.type : null;
     if (!operationId || !type) {
@@ -285,15 +328,20 @@ router.post('/push', asyncHandler(async (req, res) => {
       continue;
     }
 
-    const recorded = await prisma.taskChange.findUnique({ where: { operationId } });
-    if (recorded && recorded.userId === req.userId!) {
-      accepted.push({ operationId, change: recorded, replayed: true });
+    const recorded = await prisma.taskOperation.findUnique({
+      where: { userId_operationId: { userId: req.userId!, operationId } },
+    });
+    if (recorded) {
+      accepted.push({
+        ...(isObject(recorded.response) ? recorded.response : { operationId }),
+        ...(operation.clientTaskId ? { clientTaskId: operation.clientTaskId } : {}),
+        replayed: true,
+      });
       continue;
     }
 
     try {
       const result = await prisma.$transaction(async (tx) => {
-        await upsertDevice(tx, req.userId!, deviceId, req.body as Record<string, unknown>);
         if (type === 'create') {
           const data = parseTaskPayload(operation.payload, false);
           if (!data) return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'Invalid task payload' } };
@@ -316,7 +364,8 @@ router.post('/push', asyncHandler(async (req, res) => {
           });
           const snapshot = taskSnapshot(created);
           const change = await recordChange(tx, req.userId!, { taskId: created.id, operationId, deviceId, type: 'create', snapshot });
-          return { accepted: { operationId, change, task: snapshot, clientTaskId: operation.clientTaskId } };
+          const response = { operationId, change, task: snapshot, clientTaskId: operation.clientTaskId };
+          return { accepted: await recordOperation(tx, req.userId!, operationId, created.id, type, response) };
         }
 
         if (type === 'reorder') {
@@ -328,16 +377,26 @@ router.post('/push', asyncHandler(async (req, res) => {
             return { conflict: { operationId, code: 'ORDER_CONFLICT', clientOperation: operation, serverOrderVersion: state.taskOrderVersion } };
           }
           const normalizedOrder: Array<{ id: string; sortOrder: number }> = [];
+          const seenTaskIds = new Set<string>();
           for (const item of order) {
-            if (!isObject(item) || typeof item.id !== 'string' || !Number.isInteger(item.sortOrder)) {
+            if (!isObject(item) || typeof item.id !== 'string' || !Number.isInteger(item.sortOrder)
+              || (item.sortOrder as number) < 0 || (item.sortOrder as number) > 1_000_000
+              || seenTaskIds.has(item.id)) {
               return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'Invalid order payload' } };
             }
+            seenTaskIds.add(item.id);
             normalizedOrder.push({ id: item.id, sortOrder: item.sortOrder as number });
+          }
+          const ownedTaskCount = await tx.task.count({
+            where: { userId: req.userId!, id: { in: normalizedOrder.map(item => item.id) } },
+          });
+          if (ownedTaskCount !== normalizedOrder.length) {
+            return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'Order contains an unknown task' } };
           }
           for (const item of normalizedOrder) {
             await tx.task.updateMany({
               where: { id: item.id, userId: req.userId! },
-              data: { sortOrder: item.sortOrder, version: { increment: 1 }, lastChangedByDeviceId: deviceId },
+              data: { sortOrder: item.sortOrder, lastChangedByDeviceId: deviceId },
             });
           }
           const updatedState = await tx.userSyncState.update({
@@ -346,7 +405,8 @@ router.post('/push', asyncHandler(async (req, res) => {
           });
           const snapshot = { order: normalizedOrder, taskOrderVersion: updatedState.taskOrderVersion };
           const change = await recordChange(tx, req.userId!, { operationId, deviceId, type: 'reorder', snapshot });
-          return { accepted: { operationId, change, order: snapshot } };
+          const response = { operationId, change, order: snapshot };
+          return { accepted: await recordOperation(tx, req.userId!, operationId, null, type, response) };
         }
 
         const taskId = normalizeString(operation.taskId, 120);
@@ -378,7 +438,8 @@ router.post('/push', asyncHandler(async (req, res) => {
           });
           const snapshot = taskSnapshot(saved);
           const change = await recordChange(tx, req.userId!, { taskId, operationId, deviceId, type: 'update', snapshot });
-          return { accepted: { operationId, change, task: snapshot } };
+          const response = { operationId, change, task: snapshot };
+          return { accepted: await recordOperation(tx, req.userId!, operationId, taskId, type, response) };
         }
 
         if (type === 'soft-delete' || type === 'restore') {
@@ -390,26 +451,42 @@ router.post('/push', asyncHandler(async (req, res) => {
           const snapshot = taskSnapshot(saved);
           const tombstone = type === 'soft-delete' ? { taskId, deletedAt, version: saved.version } : undefined;
           const change = await recordChange(tx, req.userId!, { taskId, operationId, deviceId, type, snapshot, tombstone });
-          return { accepted: { operationId, change, task: snapshot } };
+          const response = { operationId, change, task: snapshot };
+          return { accepted: await recordOperation(tx, req.userId!, operationId, taskId, type, response) };
         }
 
         if (type === 'permanent-delete') {
+          if (!existing.deletedAt) {
+            return { rejected: { operationId, code: 'TASK_NOT_DELETED', error: 'Task must be soft-deleted before permanent deletion' } };
+          }
           await tx.task.delete({ where: { id: taskId } });
           const tombstone = { taskId, deletedAt: existing.deletedAt, permanentlyDeletedAt: new Date().toISOString(), version: existing.version + 1 };
           const change = await recordChange(tx, req.userId!, { taskId, operationId, deviceId, type, tombstone });
-          return { accepted: { operationId, change, tombstone } };
+          const response = { operationId, change, tombstone };
+          return { accepted: await recordOperation(tx, req.userId!, operationId, taskId, type, response) };
         }
 
         return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'Unsupported operation type' } };
       });
 
-      if ('accepted' in result) accepted.push(result.accepted);
+      if ('accepted' in result) {
+        accepted.push(result.accepted);
+        if (type === 'create' || type === 'update' || type === 'resolve-conflict' || type === 'permanent-delete') {
+          statsMayHaveChanged = true;
+        }
+      }
       else if ('conflict' in result) conflicts.push(result.conflict);
       else rejected.push(result.rejected);
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        const recorded = await prisma.taskChange.findUnique({ where: { operationId } });
-        if (recorded) accepted.push({ operationId, change: recorded, replayed: true });
+        const recorded = await prisma.taskOperation.findUnique({
+          where: { userId_operationId: { userId: req.userId!, operationId } },
+        });
+        if (recorded) accepted.push({
+          ...(isObject(recorded.response) ? recorded.response : { operationId }),
+          ...(operation.clientTaskId ? { clientTaskId: operation.clientTaskId } : {}),
+          replayed: true,
+        });
         else rejected.push({ operationId, code: 'DUPLICATE_OPERATION', error: 'Operation already exists' });
         continue;
       }
@@ -417,7 +494,14 @@ router.post('/push', asyncHandler(async (req, res) => {
     }
   }
 
-  if (accepted.length > 0) await recomputeUserStats(prisma, req.userId!);
+  if (statsMayHaveChanged) await recomputeUserStats(prisma, req.userId!);
+  const now = Date.now();
+  await Promise.all([
+    prisma.taskChange.deleteMany({ where: { createdAt: { lt: new Date(now - 180 * 24 * 60 * 60 * 1000) } } }),
+    prisma.taskOperation.deleteMany({ where: { createdAt: { lt: new Date(now - 365 * 24 * 60 * 60 * 1000) } } }),
+    prisma.rateLimitBucket.deleteMany({ where: { resetAt: { lt: new Date(now - 24 * 60 * 60 * 1000) } } }),
+    prisma.emailVerification.deleteMany({ where: { expiresAt: { lt: new Date(now - 24 * 60 * 60 * 1000) } } }),
+  ]);
   const state = await prisma.userSyncState.upsert({ where: { userId: req.userId! }, create: { userId: req.userId! }, update: {} });
   res.json({ accepted, conflicts, rejected, nextCursorHint: state.nextSeq - 1 });
 }));

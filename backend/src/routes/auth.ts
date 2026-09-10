@@ -2,15 +2,13 @@ import { Router, Request, Response, NextFunction, RequestHandler } from 'express
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
-import { PrismaClient } from '@prisma/client';
+import { Prisma } from '@prisma/client';
+import { prisma } from '../prisma-client';
 
 const router = Router();
-const prisma = new PrismaClient();
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const VERIFICATION_TTL_MS = 10 * 60 * 1000;
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
-const verificationCodes = new Map<string, { codeHash: string; expiresAt: number; attempts: number }>();
-const rateLimits = new Map<string, { count: number; resetAt: number }>();
 
 /** Wraps an async route handler so unhandled rejections propagate to Express error middleware */
 function asyncHandler(fn: (req: Request, res: Response, next: NextFunction) => Promise<void>): RequestHandler {
@@ -41,58 +39,80 @@ function codeHash(email: string, code: string): string {
   return crypto.createHash('sha256').update(`${email}:${code}:${process.env.JWT_REFRESH_SECRET}`).digest('hex');
 }
 
-function createVerificationCode(email: string): string {
+async function createVerificationCode(email: string): Promise<string> {
   const code = String(crypto.randomInt(100000, 1000000));
-  verificationCodes.set(email, {
-    codeHash: codeHash(email, code),
-    expiresAt: Date.now() + VERIFICATION_TTL_MS,
-    attempts: 0,
+  await prisma.emailVerification.upsert({
+    where: { email },
+    create: { email, codeHash: codeHash(email, code), expiresAt: new Date(Date.now() + VERIFICATION_TTL_MS) },
+    update: { codeHash: codeHash(email, code), expiresAt: new Date(Date.now() + VERIFICATION_TTL_MS), attempts: 0 },
   });
   return code;
 }
 
-function consumeVerificationCode(email: string, code: string): boolean {
-  const record = verificationCodes.get(email);
-  if (!record || record.expiresAt < Date.now() || record.attempts >= 5) {
-    verificationCodes.delete(email);
-    return false;
+async function consumeVerificationCode(email: string, code: string): Promise<boolean> {
+  const now = new Date();
+  const expectedHash = codeHash(email, code.trim());
+  const matched = await prisma.emailVerification.updateMany({
+    where: { email, codeHash: expectedHash, expiresAt: { gt: now }, attempts: { lt: 5 } },
+    data: { attempts: { increment: 1 } },
+  });
+  if (matched.count === 1) {
+    await prisma.emailVerification.deleteMany({ where: { email } });
+    return true;
   }
-  record.attempts += 1;
-  if (record.codeHash !== codeHash(email, code.trim())) return false;
-  verificationCodes.delete(email);
-  return true;
+  await prisma.emailVerification.updateMany({
+    where: { email, expiresAt: { gt: now }, attempts: { lt: 5 } },
+    data: { attempts: { increment: 1 } },
+  });
+  return false;
 }
 
 function clientKey(req: Request, scope: string, email?: string): string {
   return `${scope}:${req.ip}:${email ? normalizeEmail(email) : ''}`;
 }
 
-function checkRateLimit(key: string, max: number): boolean {
-  const now = Date.now();
-  const current = rateLimits.get(key);
-  if (!current || current.resetAt <= now) {
-    rateLimits.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return true;
-  }
-  if (current.count >= max) return false;
-  current.count += 1;
-  return true;
+async function checkRateLimit(key: string, max: number): Promise<boolean> {
+  const now = new Date();
+  const resetAt = new Date(now.getTime() + RATE_LIMIT_WINDOW_MS);
+  const rows = await prisma.$queryRaw<Array<{ count: number }>>(Prisma.sql`
+    INSERT INTO "RateLimitBucket" ("key", "count", "resetAt", "updatedAt")
+    VALUES (${key}, 1, ${resetAt}, ${now})
+    ON CONFLICT ("key") DO UPDATE SET
+      "count" = CASE WHEN "RateLimitBucket"."resetAt" <= ${now} THEN 1 ELSE "RateLimitBucket"."count" + 1 END,
+      "resetAt" = CASE WHEN "RateLimitBucket"."resetAt" <= ${now} THEN ${resetAt} ELSE "RateLimitBucket"."resetAt" END,
+      "updatedAt" = ${now}
+    RETURNING "count"
+  `);
+  return (rows[0]?.count ?? max + 1) <= max;
 }
 
-function userPayload(user: { id: string; email: string; emailVerifiedAt: Date | null }) {
+function userPayload(user: { id: string; email: string; emailVerifiedAt: Date | null; displayName?: string | null; timezone?: string | null; locale?: string | null }) {
   return {
     id: user.id,
     email: user.email,
     emailVerifiedAt: user.emailVerifiedAt?.toISOString() ?? null,
     emailVerified: !!user.emailVerifiedAt,
+    displayName: user.displayName ?? null,
+    timezone: user.timezone ?? null,
+    locale: user.locale ?? null,
   };
 }
 
-async function issueSession(user: { id: string; email: string; emailVerifiedAt: Date | null }, res: Response, status = 200) {
+function includeRefreshTokenInBody(req: Request): boolean {
+  const origin = req.get('Origin');
+  const allowedNativeOrigins = (process.env.NATIVE_APP_ORIGINS || 'capacitor://localhost,ionic://localhost').split(',');
+  return req.get('X-TaskFlow-Platform') === 'native' && !!origin && allowedNativeOrigins.includes(origin);
+}
+
+async function issueSession(user: { id: string; email: string; emailVerifiedAt: Date | null; displayName?: string | null; timezone?: string | null; locale?: string | null }, req: Request, res: Response, status = 200) {
   const accessToken = signAccess(user.id);
   const refreshToken = await createRefreshSession(user.id);
   res.cookie(REFRESH_COOKIE, refreshToken, COOKIE_OPTS);
-  res.status(status).json({ accessToken, refreshToken, user: userPayload(user) });
+  res.status(status).json({
+    accessToken,
+    ...(includeRefreshTokenInBody(req) ? { refreshToken } : {}),
+    user: userPayload(user),
+  });
 }
 
 async function sendVerificationCode(email: string, code: string): Promise<void> {
@@ -155,7 +175,7 @@ async function sendVerificationCode(email: string, code: string): Promise<void> 
 }
 
 async function startEmailVerification(email: string): Promise<{ devCode?: string }> {
-  const code = createVerificationCode(email);
+  const code = await createVerificationCode(email);
   await sendVerificationCode(email, code);
   return process.env.NODE_ENV === 'production' ? {} : { devCode: code };
 }
@@ -184,13 +204,26 @@ function buildRefreshSession(userId: string): { token: string; tokenHash: string
 
 async function createRefreshSession(userId: string): Promise<string> {
   const session = buildRefreshSession(userId);
-  await prisma.refreshSession.create({
-    data: {
-      userId,
-      tokenHash: session.tokenHash,
-      expiresAt: session.expiresAt,
-    },
-  });
+  const now = new Date();
+  const revokedRetention = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  await prisma.$transaction([
+    prisma.refreshSession.deleteMany({
+      where: {
+        userId,
+        OR: [
+          { expiresAt: { lt: now } },
+          { revokedAt: { lt: revokedRetention } },
+        ],
+      },
+    }),
+    prisma.refreshSession.create({
+      data: {
+        userId,
+        tokenHash: session.tokenHash,
+        expiresAt: session.expiresAt,
+      },
+    }),
+  ]);
   return session.token;
 }
 
@@ -218,8 +251,8 @@ const CLEAR_COOKIE_OPTS = { httpOnly: COOKIE_OPTS.httpOnly, secure: COOKIE_OPTS.
 router.post('/register', asyncHandler(async (req, res) => {
   const rawEmail = typeof req.body?.email === 'string' ? req.body.email : '';
   const email = normalizeEmail(rawEmail);
-  const { password } = req.body as { password?: string };
-  if (!checkRateLimit(clientKey(req, 'register', email), 5)) {
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  if (!(await checkRateLimit(clientKey(req, 'register', email), 5))) {
     res.status(429).json({ code: 'RATE_LIMITED', error: 'Too many registration attempts. Please try again later.' });
     return;
   }
@@ -231,13 +264,13 @@ router.post('/register', asyncHandler(async (req, res) => {
     res.status(400).json({ code: 'INVALID_EMAIL', error: 'Enter a valid email address' });
     return;
   }
-  if (password.length < 8) {
-    res.status(400).json({ error: 'Password must be at least 8 characters' });
+  if (password.length < 8 || password.length > 128 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+    res.status(400).json({ code: 'WEAK_PASSWORD', error: 'Password must be 8-128 characters and include a letter and a number' });
     return;
   }
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) {
-    res.status(409).json({ error: 'Email already registered' });
+    res.status(409).json({ code: 'EMAIL_EXISTS', error: 'Email already registered' });
     return;
   }
   try {
@@ -259,8 +292,8 @@ router.post('/register', asyncHandler(async (req, res) => {
 router.post('/login', asyncHandler(async (req, res) => {
   const rawEmail = typeof req.body?.email === 'string' ? req.body.email : '';
   const email = normalizeEmail(rawEmail);
-  const { password } = req.body as { password?: string };
-  if (!checkRateLimit(clientKey(req, 'login', email), 10)) {
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  if (!(await checkRateLimit(clientKey(req, 'login', email), 10))) {
     res.status(429).json({ code: 'RATE_LIMITED', error: 'Too many login attempts. Please try again later.' });
     return;
   }
@@ -274,16 +307,16 @@ router.post('/login', asyncHandler(async (req, res) => {
   }
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) {
-    res.status(401).json({ error: 'Invalid email or password' });
+    res.status(401).json({ code: 'INVALID_CREDENTIALS', error: 'Invalid email or password' });
     return;
   }
   const valid = await bcrypt.compare(password, user.password);
   if (!valid) {
-    res.status(401).json({ error: 'Invalid email or password' });
+    res.status(401).json({ code: 'INVALID_CREDENTIALS', error: 'Invalid email or password' });
     return;
   }
   if (user.deletedAt) {
-    res.status(401).json({ error: 'Invalid email or password' });
+    res.status(401).json({ code: 'INVALID_CREDENTIALS', error: 'Invalid email or password' });
     return;
   }
   if (!user.emailVerifiedAt) {
@@ -303,13 +336,13 @@ router.post('/login', asyncHandler(async (req, res) => {
     return;
   }
   const loggedInUser = await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
-  await issueSession(loggedInUser, res);
+  await issueSession(loggedInUser, req, res);
 }));
 
 // POST /auth/resend-verification
 router.post('/resend-verification', asyncHandler(async (req, res) => {
   const email = normalizeEmail(typeof req.body?.email === 'string' ? req.body.email : '');
-  if (!checkRateLimit(clientKey(req, 'verify-resend', email), 5)) {
+  if (!(await checkRateLimit(clientKey(req, 'verify-resend', email), 5))) {
     res.status(429).json({ code: 'RATE_LIMITED', error: 'Too many verification requests. Please try again later.' });
     return;
   }
@@ -343,7 +376,7 @@ router.post('/resend-verification', asyncHandler(async (req, res) => {
 router.post('/verify-email', asyncHandler(async (req, res) => {
   const email = normalizeEmail(typeof req.body?.email === 'string' ? req.body.email : '');
   const code = typeof req.body?.code === 'string' ? req.body.code : '';
-  if (!checkRateLimit(clientKey(req, 'verify-email', email), 10)) {
+  if (!(await checkRateLimit(clientKey(req, 'verify-email', email), 10))) {
     res.status(429).json({ code: 'RATE_LIMITED', error: 'Too many verification attempts. Please try again later.' });
     return;
   }
@@ -360,7 +393,7 @@ router.post('/verify-email', asyncHandler(async (req, res) => {
     res.status(404).json({ code: 'USER_NOT_FOUND', error: 'Account not found' });
     return;
   }
-  if (!user.emailVerifiedAt && !consumeVerificationCode(email, code)) {
+  if (!user.emailVerifiedAt && !(await consumeVerificationCode(email, code))) {
     res.status(400).json({ code: 'INVALID_VERIFICATION_CODE', error: 'Invalid or expired verification code' });
     return;
   }
@@ -368,7 +401,7 @@ router.post('/verify-email', asyncHandler(async (req, res) => {
     ? user
     : await prisma.user.update({ where: { id: user.id }, data: { emailVerifiedAt: new Date() } });
   const loggedInUser = await prisma.user.update({ where: { id: verifiedUser.id }, data: { lastLoginAt: new Date() } });
-  await issueSession(loggedInUser, res);
+  await issueSession(loggedInUser, req, res);
 }));
 
 // POST /auth/refresh
@@ -410,7 +443,11 @@ router.post('/refresh', asyncHandler(async (req, res) => {
     });
     const refreshToken = nextSession.token;
     res.cookie(REFRESH_COOKIE, refreshToken, COOKIE_OPTS);
-    res.json({ accessToken, refreshToken, user: userPayload(session.user) });
+    res.json({
+      accessToken,
+      ...(includeRefreshTokenInBody(req) ? { refreshToken } : {}),
+      user: userPayload(session.user),
+    });
   } catch {
     res.status(401).json({ error: 'Invalid or expired refresh token' });
   }

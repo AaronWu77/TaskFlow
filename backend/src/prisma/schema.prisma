@@ -88,7 +88,7 @@ model TaskChange {
   userId      String
   seq         Int
   taskId      String?
-  operationId String?  @unique
+  operationId String?
   deviceId    String?
   type        String
   snapshot    Json?
@@ -97,6 +97,7 @@ model TaskChange {
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, seq])
+  @@unique([userId, operationId])
   @@index([userId])
   @@index([taskId])
   @@index([createdAt])
@@ -104,7 +105,7 @@ model TaskChange {
 
 model TaskOperation {
   id          String   @id @default(cuid())
-  operationId String  @unique
+  operationId String
   userId      String
   taskId      String?
   type        String
@@ -113,6 +114,7 @@ model TaskOperation {
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@unique([userId, operationId])
   @@index([taskId])
   @@index([createdAt])
 }
@@ -141,4 +143,23 @@ model RefreshSession {
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+model EmailVerification {
+  email     String   @id
+  codeHash  String
+  expiresAt DateTime
+  attempts  Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@index([expiresAt])
+}
+
+model RateLimitBucket {
+  key       String   @id
+  count     Int
+  resetAt   DateTime
+  updatedAt DateTime @updatedAt
+
+  @@index([resetAt])
 }

@@ -1,7 +1,7 @@
 // API base URL — override with VITE_API_URL when targeting a different backend.
-import { Preferences } from '@capacitor/preferences';
 import { Capacitor } from '@capacitor/core';
 import { createSingleFlight } from './sync-core.mjs';
+import { secureGet, secureRemove, secureSet } from './secure-storage';
 
 const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || 'https://taskflow.top/api';
 
@@ -43,31 +43,23 @@ function setAccessToken(token: string | null) {
 }
 
 async function getStoredRefreshToken(): Promise<string | null> {
+  return IS_NATIVE_PLATFORM ? secureGet(REFRESH_TOKEN_KEY) : null;
+}
+
+async function setStoredRefreshToken(token: string | null): Promise<void> {
   if (IS_NATIVE_PLATFORM) {
+    if (token) await secureSet(REFRESH_TOKEN_KEY, token);
+    else await secureRemove(REFRESH_TOKEN_KEY);
+  } else {
+    // Remove tokens written by older web builds. Web sessions use only the httpOnly cookie.
     try {
-      const { value } = await Preferences.get({ key: REFRESH_TOKEN_KEY });
-      return value;
-    } catch {
-      return null;
-    }
-  }
-  try {
-    return localStorage.getItem(REFRESH_TOKEN_KEY);
-  } catch {
-    return null;
+      localStorage.removeItem(REFRESH_TOKEN_KEY);
+    } catch { /**/ }
   }
 }
 
-function setStoredRefreshToken(token: string | null): void {
-  if (IS_NATIVE_PLATFORM) {
-    if (token) Preferences.set({ key: REFRESH_TOKEN_KEY, value: token }).catch(() => { /**/ });
-    else Preferences.remove({ key: REFRESH_TOKEN_KEY }).catch(() => { /**/ });
-  } else {
-    try {
-      if (token) localStorage.setItem(REFRESH_TOKEN_KEY, token);
-      else localStorage.removeItem(REFRESH_TOKEN_KEY);
-    } catch { /**/ }
-  }
+function platformHeaders(): Record<string, string> {
+  return IS_NATIVE_PLATFORM ? { 'X-TaskFlow-Platform': 'native' } : {};
 }
 
 async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = REQUEST_TIMEOUT_MS): Promise<Response> {
@@ -84,8 +76,9 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}
  *  The fallback keeps dev web and Capacitor sessions alive when cookies are not persisted. */
 async function performRefresh(): Promise<RefreshResult> {
   try {
+    if (!IS_NATIVE_PLATFORM) await setStoredRefreshToken(null);
     const storedRefreshToken = await getStoredRefreshToken();
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = platformHeaders();
     if (storedRefreshToken) headers.Authorization = `Bearer ${storedRefreshToken}`;
 
     const res = await fetchWithTimeout(`${BASE_URL}/auth/refresh`, {
@@ -97,7 +90,7 @@ async function performRefresh(): Promise<RefreshResult> {
     const data = await res.json() as { accessToken: string; refreshToken?: string; user?: AuthUser };
     setAccessToken(data.accessToken);
     refreshedUser = data.user ?? null;
-    if (data.refreshToken) setStoredRefreshToken(data.refreshToken);
+    if (data.refreshToken) await setStoredRefreshToken(data.refreshToken);
     return 'ok';
   } catch {
     return 'network';
@@ -120,7 +113,7 @@ export async function apiRefresh(): Promise<boolean> {
 
 export function clearLocalAuthTokens(): void {
   setAccessToken(null);
-  setStoredRefreshToken(null);
+  void setStoredRefreshToken(null);
 }
 
 export async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
@@ -151,6 +144,9 @@ export interface AuthUser {
   email: string;
   emailVerifiedAt?: string | null;
   emailVerified?: boolean;
+  displayName?: string | null;
+  timezone?: string | null;
+  locale?: string | null;
 }
 
 export interface AuthSuccess {
@@ -173,6 +169,7 @@ function isVerificationRequired(data: unknown): data is AuthVerificationRequired
 async function parseAuthResponse(res: Response, fallback: string): Promise<AuthResult> {
   const data = await res.json().catch(() => ({ error: fallback })) as {
     error?: string;
+    code?: string;
     user?: AuthUser;
     accessToken?: string;
     refreshToken?: string;
@@ -181,21 +178,21 @@ async function parseAuthResponse(res: Response, fallback: string): Promise<AuthR
   };
   if (!res.ok) {
     if (isVerificationRequired(data) && data.user) return data;
-    throw new Error(data.error || fallback);
+    throw new ApiError(('error' in data ? data.error : undefined) || fallback, res.status, 'code' in data ? data.code : undefined, data);
   }
   if (data.requiresEmailVerification && data.user) {
     return { requiresEmailVerification: true, user: data.user, devCode: data.devCode };
   }
   if (!data.accessToken || !data.user) throw new Error(fallback);
   setAccessToken(data.accessToken);
-  setStoredRefreshToken(data.refreshToken ?? null);
+  await setStoredRefreshToken(data.refreshToken ?? null);
   return { user: data.user, accessToken: data.accessToken };
 }
 
 export async function apiLogin(email: string, password: string): Promise<AuthResult> {
-  const res = await fetch(`${BASE_URL}/auth/login`, {
+  const res = await fetchWithTimeout(`${BASE_URL}/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...platformHeaders() },
     credentials: 'include',
     body: JSON.stringify({ email, password }),
   });
@@ -203,9 +200,9 @@ export async function apiLogin(email: string, password: string): Promise<AuthRes
 }
 
 export async function apiRegister(email: string, password: string): Promise<AuthResult> {
-  const res = await fetch(`${BASE_URL}/auth/register`, {
+  const res = await fetchWithTimeout(`${BASE_URL}/auth/register`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...platformHeaders() },
     credentials: 'include',
     body: JSON.stringify({ email, password }),
   });
@@ -213,40 +210,47 @@ export async function apiRegister(email: string, password: string): Promise<Auth
 }
 
 export async function apiVerifyEmail(email: string, code: string): Promise<AuthSuccess> {
-  const res = await fetch(`${BASE_URL}/auth/verify-email`, {
+  const res = await fetchWithTimeout(`${BASE_URL}/auth/verify-email`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...platformHeaders() },
     credentials: 'include',
     body: JSON.stringify({ email, code }),
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Email verification failed' })) as { error: string };
-    throw new Error(err.error || 'Email verification failed');
+    const err = await res.json().catch(() => ({ error: 'Email verification failed' })) as { error?: string; code?: string };
+    throw new ApiError(err.error || 'Email verification failed', res.status, err.code, err);
   }
   const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken?: string };
   setAccessToken(data.accessToken);
-  setStoredRefreshToken(data.refreshToken ?? null);
+  await setStoredRefreshToken(data.refreshToken ?? null);
   return data;
 }
 
 export async function apiResendVerification(email: string): Promise<{ ok: true; devCode?: string; alreadyVerified?: boolean }> {
-  const res = await fetch(`${BASE_URL}/auth/resend-verification`, {
+  const res = await fetchWithTimeout(`${BASE_URL}/auth/resend-verification`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...platformHeaders() },
     credentials: 'include',
     body: JSON.stringify({ email }),
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Failed to resend verification code' })) as { error: string };
-    throw new Error(err.error || 'Failed to resend verification code');
+    const err = await res.json().catch(() => ({ error: 'Failed to resend verification code' })) as { error?: string; code?: string };
+    throw new ApiError(err.error || 'Failed to resend verification code', res.status, err.code, err);
   }
   return res.json() as Promise<{ ok: true; devCode?: string; alreadyVerified?: boolean }>;
 }
 
 export async function apiLogout(): Promise<void> {
-  try { await fetch(`${BASE_URL}/auth/logout`, { method: 'POST', credentials: 'include' }); } catch { /* */ }
+  try {
+    const refreshToken = await getStoredRefreshToken();
+    await fetchWithTimeout(`${BASE_URL}/auth/logout`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { ...platformHeaders(), ...(refreshToken ? { Authorization: `Bearer ${refreshToken}` } : {}) },
+    });
+  } catch { /* local sign-out must still complete */ }
   setAccessToken(null);
-  setStoredRefreshToken(null);
+  await setStoredRefreshToken(null);
 }
 
 // ── Task CRUD ──
@@ -348,115 +352,6 @@ export async function apiPushOperations(deviceId: string, operations: PendingSyn
   return res.json() as Promise<SyncPushResponseDTO>;
 }
 
-export async function apiGetTasks(): Promise<TaskDTO[]> {
-  const res = await apiFetch('/tasks');
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Failed to fetch tasks' })) as { error: string };
-    throw new Error(err.error || 'Failed to fetch tasks');
-  }
-  return res.json() as Promise<TaskDTO[]>;
-}
-
-export async function apiGetDeletedTasks(): Promise<TaskDTO[]> {
-  const res = await apiFetch('/tasks/deleted');
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Failed to fetch deleted tasks' })) as { error: string };
-    throw new Error(err.error || 'Failed to fetch deleted tasks');
-  }
-  return res.json() as Promise<TaskDTO[]>;
-}
-
-export async function apiCreateTask(task: {
-  title: string;
-  priority: string;
-  estimateMinutes?: number | null;
-  status?: string;
-  tag?: string | null;
-  dueDate?: string | null;
-  reminderAt?: string | null;
-  repeatRule?: string | null;
-  repeatUntilDate?: string | null;
-  deletedAt?: string | null;
-  sortOrder?: number;
-  operationId?: string;
-}): Promise<TaskDTO> {
-  const res = await apiFetch('/tasks', {
-    method: 'POST',
-    body: JSON.stringify(task),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Failed to create task' })) as { error?: string; code?: string };
-    throw new ApiError(err.error || 'Failed to create task', res.status, err.code, err);
-  }
-  return res.json() as Promise<TaskDTO>;
-}
-
-export async function apiUpdateTask(id: string, data: Partial<{
-  title: string;
-  priority: string;
-  estimateMinutes: number | null;
-  status: string;
-  tag: string | null;
-  dueDate: string | null;
-  reminderAt: string | null;
-  repeatRule: string | null;
-  repeatUntilDate: string | null;
-  deletedAt: string | null;
-  sortOrder: number;
-  lastKnownUpdatedAt: string | null;
-  operationId: string;
-}>): Promise<TaskDTO> {
-  const res = await apiFetch(`/tasks/${encodeURIComponent(id)}`, {
-    method: 'PATCH',
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Failed to update task' })) as { error?: string; code?: string };
-    throw new ApiError(err.error || 'Failed to update task', res.status, err.code, err);
-  }
-  return res.json() as Promise<TaskDTO>;
-}
-
-export async function apiDeleteTask(id: string): Promise<TaskDTO | null> {
-  const res = await apiFetch(`/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
-  if (!res.ok && res.status !== 404) {
-    const err = await res.json().catch(() => ({ error: 'Failed to delete task' })) as { error?: string; code?: string };
-    throw new ApiError(err.error || 'Failed to delete task', res.status, err.code, err);
-  }
-  if (res.status === 404) return null;
-  return res.json() as Promise<TaskDTO>;
-}
-
-export async function apiRestoreTask(id: string, data?: { operationId?: string; lastKnownUpdatedAt?: string | null }): Promise<TaskDTO> {
-  const res = await apiFetch(`/tasks/${encodeURIComponent(id)}/restore`, {
-    method: 'POST',
-    body: JSON.stringify(data ?? {}),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Failed to restore task' })) as { error?: string; code?: string };
-    throw new ApiError(err.error || 'Failed to restore task', res.status, err.code, err);
-  }
-  return res.json() as Promise<TaskDTO>;
-}
-
-export async function apiPermanentDeleteTask(id: string): Promise<void> {
-  const res = await apiFetch(`/tasks/${encodeURIComponent(id)}/permanent`, { method: 'DELETE' });
-  if (!res.ok && res.status !== 404) {
-    const err = await res.json().catch(() => ({ error: 'Failed to permanently delete task' })) as { error?: string; code?: string };
-    throw new ApiError(err.error || 'Failed to permanently delete task', res.status, err.code, err);
-  }
-}
-
-export async function apiReorderTasks(order: Array<{ id: string; sortOrder: number }>): Promise<void> {
-  const res = await apiFetch('/tasks/reorder', {
-    method: 'PUT',
-    body: JSON.stringify({ order }),
-  });
-  if (!res.ok) {
-    throw new Error('Failed to reorder tasks');
-  }
-}
-
 // ── User Stats ──
 
 export async function apiGetUserStats(): Promise<UserStatsDTO> {
@@ -484,5 +379,23 @@ export async function apiDeleteAccount(): Promise<void> {
     throw new Error('Failed to delete account');
   }
   setAccessToken(null);
-  setStoredRefreshToken(null);
+  await setStoredRefreshToken(null);
+}
+
+export async function apiExportUserData(): Promise<Blob> {
+  const res = await apiFetch('/user/export', { headers: { Accept: 'application/json' } });
+  if (!res.ok) throw new ApiError('Failed to export account data', res.status);
+  return res.blob();
+}
+
+export async function apiUpdateUserPreferences(preferences: { timezone?: string; locale?: 'zh' | 'en'; displayName?: string }): Promise<AuthUser> {
+  const res = await apiFetch('/user/preferences', {
+    method: 'PATCH',
+    body: JSON.stringify(preferences),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ error: 'Failed to update preferences' })) as { error?: string; code?: string };
+    throw new ApiError(error.error || 'Failed to update preferences', res.status, error.code, error);
+  }
+  return res.json() as Promise<AuthUser>;
 }
