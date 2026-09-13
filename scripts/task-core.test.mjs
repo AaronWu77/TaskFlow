@@ -2,10 +2,42 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   MAX_REPEAT_INSTANCES,
+  applyTodoOrder,
   nextRepeatDate,
+  normalizeTodoSortOrder,
   repeatDatesAfterStart,
   repeatInstanceCount,
 } from '../src/app/task-core.mjs';
+
+test('pending order normalization is contiguous and excludes completed or deleted tasks', () => {
+  const tasks = [
+    { id: 'a', status: 'todo', deletedAt: null, sortOrder: 7 },
+    { id: 'b', status: 'done', deletedAt: null, sortOrder: 2 },
+    { id: 'c', status: 'todo', deletedAt: '2026-01-01', sortOrder: 9 },
+    { id: 'd', status: 'todo', deletedAt: null, sortOrder: 7 },
+  ];
+  assert.deepEqual(normalizeTodoSortOrder(tasks), [
+    { ...tasks[0], sortOrder: 0 },
+    tasks[1],
+    tasks[2],
+    { ...tasks[3], sortOrder: 1 },
+  ]);
+});
+
+test('a remote order snapshot changes render order and preserves unsynced local tasks', () => {
+  const tasks = [
+    { id: 'a', status: 'todo', deletedAt: null, sortOrder: 0 },
+    { id: 'local-new', status: 'todo', deletedAt: null, sortOrder: 1 },
+    { id: 'b', status: 'todo', deletedAt: null, sortOrder: 2 },
+    { id: 'done', status: 'done', deletedAt: null, sortOrder: 0 },
+  ];
+  const reordered = applyTodoOrder(tasks, [
+    { id: 'b', sortOrder: 0 },
+    { id: 'a', sortOrder: 1 },
+  ]);
+  assert.deepEqual(reordered.map(task => task.id), ['b', 'a', 'local-new', 'done']);
+  assert.deepEqual(reordered.slice(0, 3).map(task => task.sortOrder), [0, 1, 1]);
+});
 
 test('monthly recurrence clamps short months without drifting the anchor day', () => {
   assert.equal(nextRepeatDate('2025-01-31', 'monthly'), '2025-02-28');

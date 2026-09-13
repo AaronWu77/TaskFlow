@@ -6,10 +6,11 @@ import { prisma } from '../prisma-client';
 
 const router = Router();
 const PRIORITIES = new Set(['P1', 'P2', 'P3']);
-const STATUSES = new Set(['todo', 'doing', 'done', 'snoozed', 'skipped']);
+const STATUSES = new Set(['todo', 'done', 'skipped']);
 const REPEAT_RULES = new Set(['none', 'daily', 'weekly', 'monthly']);
 const OP_TYPES = new Set(['create', 'update', 'soft-delete', 'restore', 'permanent-delete', 'reorder', 'resolve-conflict']);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const STATS_MUTATION_TYPES = new Set(['create', 'update', 'soft-delete', 'restore', 'permanent-delete', 'resolve-conflict']);
 
 router.use(authMiddleware);
 
@@ -77,6 +78,8 @@ function taskSnapshot(task: {
   reminderAt: string | null;
   repeatRule: string | null;
   repeatUntilDate: string | null;
+  seriesId: string | null;
+  occurrenceDate: string | null;
   completedAt: string | null;
   deletedAt: string | null;
   sortOrder: number;
@@ -119,6 +122,57 @@ async function nextSeq(tx: Prisma.TransactionClient, userId: string): Promise<nu
     update: { nextSeq: { increment: 1 } },
   });
   return state.nextSeq - 1;
+}
+
+async function lockTaskOrderState(tx: Prisma.TransactionClient, userId: string): Promise<number> {
+  await tx.userSyncState.upsert({
+    where: { userId },
+    create: { userId },
+    update: {},
+  });
+  const rows = await tx.$queryRaw<Array<{ taskOrderVersion: number }>>(Prisma.sql`
+    SELECT "taskOrderVersion"
+    FROM "UserSyncState"
+    WHERE "userId" = ${userId}
+    FOR UPDATE
+  `);
+  return rows[0]?.taskOrderVersion ?? 1;
+}
+
+async function taskCasFailure(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  taskId: string,
+  operationId: string,
+  operation: SyncOperation,
+) {
+  const latest = await tx.task.findFirst({ where: { id: taskId, userId } });
+  if (latest) {
+    return {
+      conflict: {
+        operationId,
+        code: 'TASK_CONFLICT',
+        serverTask: taskSnapshot(latest),
+        serverVersion: latest.version,
+        clientOperation: operation,
+      },
+    };
+  }
+  const permanentDelete = await tx.taskChange.findFirst({
+    where: { userId, taskId, type: 'permanent-delete' },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (permanentDelete) {
+    return {
+      conflict: {
+        operationId,
+        code: 'TASK_NOT_FOUND',
+        clientOperation: operation,
+        tombstone: permanentDelete.tombstone,
+      },
+    };
+  }
+  return { rejected: { operationId, code: 'TASK_NOT_FOUND', error: 'Task not found' } };
 }
 
 async function recordChange(tx: Prisma.TransactionClient, userId: string, data: {
@@ -181,13 +235,21 @@ function parseTaskPayload(payload: unknown, partial: boolean): Record<string, st
   } else if (!partial) {
     data.estimateMinutes = null;
   }
+  if (payload.progress !== undefined) {
+    const progress = parseInteger(payload.progress, 0, 100);
+    if (progress === undefined) return null;
+    data.progress = progress;
+  } else if (!partial) {
+    data.progress = 0;
+  }
   if (payload.status !== undefined) {
     if (typeof payload.status !== 'string' || !STATUSES.has(payload.status)) return null;
     data.status = payload.status;
   } else if (!partial) {
     data.status = 'todo';
   }
-  if (payload.sortOrder !== undefined) {
+  if (partial && payload.sortOrder !== undefined) return null;
+  if (!partial && payload.sortOrder !== undefined) {
     const sortOrder = parseInteger(payload.sortOrder, 0, 1_000_000);
     if (sortOrder === undefined) return null;
     data.sortOrder = sortOrder;
@@ -225,10 +287,25 @@ function parseTaskPayload(payload: unknown, partial: boolean): Record<string, st
   } else if (!partial) {
     data.repeatUntilDate = null;
   }
-  const deletedAt = normalizeNullableString(payload.deletedAt, 64);
+  if (partial && (payload.seriesId !== undefined || payload.occurrenceDate !== undefined)) return null;
+  const seriesId = normalizeNullableString(payload.seriesId, 120);
+  if (payload.seriesId !== undefined) {
+    if (seriesId === undefined) return null;
+    data.seriesId = seriesId ?? null;
+  } else if (!partial) {
+    data.seriesId = null;
+  }
+  const occurrenceDate = normalizeNullableString(payload.occurrenceDate, 10);
+  if (payload.occurrenceDate !== undefined) {
+    if (occurrenceDate !== null && occurrenceDate !== undefined && !isValidDateOnly(occurrenceDate)) return null;
+    data.occurrenceDate = occurrenceDate ?? null;
+  } else if (!partial) {
+    data.occurrenceDate = null;
+  }
+  if (!partial && Boolean(data.seriesId) !== Boolean(data.occurrenceDate)) return null;
   if (payload.deletedAt !== undefined) {
-    if (deletedAt !== null && deletedAt !== undefined && !isValidIsoDateTime(deletedAt)) return null;
-    data.deletedAt = deletedAt ?? null;
+    if (partial || payload.deletedAt !== null) return null;
+    data.deletedAt = null;
   }
   return data;
 }
@@ -241,8 +318,8 @@ async function bootstrap(userId: string) {
       update: {},
     });
     const [tasks, deletedTasks, stats] = await Promise.all([
-      tx.task.findMany({ where: { userId, deletedAt: null }, orderBy: { sortOrder: 'asc' } }),
-      tx.task.findMany({ where: { userId, deletedAt: { not: null } }, orderBy: { updatedAt: 'desc' } }),
+      tx.task.findMany({ where: { userId, deletedAt: null }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }] }),
+      tx.task.findMany({ where: { userId, deletedAt: { not: null } }, orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }] }),
       tx.userStats.findUnique({ where: { userId } }),
     ]);
     return {
@@ -337,6 +414,7 @@ router.post('/push', asyncHandler(async (req, res) => {
         ...(operation.clientTaskId ? { clientTaskId: operation.clientTaskId } : {}),
         replayed: true,
       });
+      if (STATS_MUTATION_TYPES.has(type)) statsMayHaveChanged = true;
       continue;
     }
 
@@ -345,18 +423,22 @@ router.post('/push', asyncHandler(async (req, res) => {
         if (type === 'create') {
           const data = parseTaskPayload(operation.payload, false);
           if (!data) return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'Invalid task payload' } };
+          await lockTaskOrderState(tx, req.userId!);
           const created = await tx.task.create({
             data: {
               userId: req.userId!,
               title: data.title as string,
               priority: data.priority as string,
               estimateMinutes: data.estimateMinutes as number | null,
+              progress: data.progress as number,
               status: data.status as string,
               tag: data.tag as string | null | undefined,
               dueDate: data.dueDate as string | null | undefined,
               reminderAt: data.reminderAt as string | null | undefined,
               repeatRule: data.repeatRule as string | null | undefined,
               repeatUntilDate: data.repeatUntilDate as string | null | undefined,
+              seriesId: data.seriesId as string | null | undefined,
+              occurrenceDate: data.occurrenceDate as string | null | undefined,
               completedAt: data.status === 'done' ? new Date().toISOString() : null,
               sortOrder: data.sortOrder as number,
               lastChangedByDeviceId: deviceId,
@@ -372,32 +454,48 @@ router.post('/push', asyncHandler(async (req, res) => {
           const payload = isObject(operation.payload) ? operation.payload : {};
           const order = Array.isArray(payload.order) ? payload.order : null;
           const baseOrderVersion = Number.isInteger(operation.baseOrderVersion) ? operation.baseOrderVersion as number : null;
-          const state = await tx.userSyncState.upsert({ where: { userId: req.userId! }, create: { userId: req.userId! }, update: {} });
-          if (!order || (baseOrderVersion !== null && state.taskOrderVersion !== baseOrderVersion)) {
-            return { conflict: { operationId, code: 'ORDER_CONFLICT', clientOperation: operation, serverOrderVersion: state.taskOrderVersion } };
+          if (!order || baseOrderVersion === null) {
+            return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'order and baseOrderVersion are required' } };
+          }
+          const currentOrderVersion = await lockTaskOrderState(tx, req.userId!);
+          const activeTodoTasks = await tx.task.findMany({
+            where: { userId: req.userId!, status: 'todo', deletedAt: null },
+            orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+            select: { id: true, sortOrder: true },
+          });
+          const serverOrder = activeTodoTasks.map((task, index) => ({ id: task.id, sortOrder: index }));
+          if (currentOrderVersion !== baseOrderVersion) {
+            return { conflict: { operationId, code: 'ORDER_CONFLICT', clientOperation: operation, serverOrderVersion: currentOrderVersion, serverOrder } };
           }
           const normalizedOrder: Array<{ id: string; sortOrder: number }> = [];
           const seenTaskIds = new Set<string>();
-          for (const item of order) {
+          for (const [index, item] of order.entries()) {
             if (!isObject(item) || typeof item.id !== 'string' || !Number.isInteger(item.sortOrder)
               || (item.sortOrder as number) < 0 || (item.sortOrder as number) > 1_000_000
+              || item.sortOrder !== index
               || seenTaskIds.has(item.id)) {
               return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'Invalid order payload' } };
             }
             seenTaskIds.add(item.id);
             normalizedOrder.push({ id: item.id, sortOrder: item.sortOrder as number });
           }
-          const ownedTaskCount = await tx.task.count({
-            where: { userId: req.userId!, id: { in: normalizedOrder.map(item => item.id) } },
-          });
-          if (ownedTaskCount !== normalizedOrder.length) {
-            return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'Order contains an unknown task' } };
+          const activeTodoIds = new Set(activeTodoTasks.map(task => task.id));
+          if (activeTodoIds.size !== normalizedOrder.length || normalizedOrder.some(item => !activeTodoIds.has(item.id))) {
+            return { conflict: { operationId, code: 'ORDER_CONFLICT', clientOperation: operation, serverOrderVersion: currentOrderVersion, serverOrder } };
           }
-          for (const item of normalizedOrder) {
-            await tx.task.updateMany({
-              where: { id: item.id, userId: req.userId! },
-              data: { sortOrder: item.sortOrder, lastChangedByDeviceId: deviceId },
-            });
+          if (normalizedOrder.length > 0) {
+            const rows = Prisma.join(normalizedOrder.map(item => Prisma.sql`(${item.id}, ${item.sortOrder})`));
+            await tx.$executeRaw(Prisma.sql`
+              UPDATE "Task" AS task
+              SET "sortOrder" = ordering."sortOrder",
+                  "lastChangedByDeviceId" = ${deviceId},
+                  "updatedAt" = NOW()
+              FROM (VALUES ${rows}) AS ordering("id", "sortOrder")
+              WHERE task."id" = ordering."id"
+                AND task."userId" = ${req.userId!}
+                AND task."status" = 'todo'
+                AND task."deletedAt" IS NULL
+            `);
           }
           const updatedState = await tx.userSyncState.update({
             where: { userId: req.userId! },
@@ -409,6 +507,10 @@ router.post('/push', asyncHandler(async (req, res) => {
           return { accepted: await recordOperation(tx, req.userId!, operationId, null, type, response) };
         }
 
+        // All mutations acquire the per-user state lock before touching task rows.
+        // This keeps task CAS writes, order writes, and change-sequence allocation
+        // in one lock order and prevents reorder/update deadlocks.
+        await lockTaskOrderState(tx, req.userId!);
         const taskId = normalizeString(operation.taskId, 120);
         if (!taskId) return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'taskId is required' } };
         const existing = await tx.task.findFirst({ where: { id: taskId, userId: req.userId! } });
@@ -423,7 +525,10 @@ router.post('/push', asyncHandler(async (req, res) => {
           return { rejected: { operationId, code: 'TASK_NOT_FOUND', error: 'Task not found' } };
         }
         const baseVersion = Number.isInteger(operation.baseVersion) ? operation.baseVersion as number : null;
-        if (baseVersion !== null && existing.version !== baseVersion) {
+        if (baseVersion === null) {
+          return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'baseVersion is required' } };
+        }
+        if (existing.version !== baseVersion) {
           return { conflict: { operationId, code: 'TASK_CONFLICT', serverTask: taskSnapshot(existing), serverVersion: existing.version, clientOperation: operation } };
         }
 
@@ -432,10 +537,12 @@ router.post('/push', asyncHandler(async (req, res) => {
           if (!data) return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'Invalid task payload' } };
           if (data.status === 'done' && existing.status !== 'done' && !existing.completedAt) data.completedAt = new Date().toISOString();
           else if (data.status !== undefined && data.status !== 'done' && existing.completedAt) data.completedAt = null;
-          const saved = await tx.task.update({
-            where: { id: taskId },
+          const changed = await tx.task.updateMany({
+            where: { id: taskId, userId: req.userId!, version: baseVersion },
             data: { ...data, version: { increment: 1 }, lastChangedByDeviceId: deviceId },
           });
+          if (changed.count !== 1) return taskCasFailure(tx, req.userId!, taskId, operationId, operation);
+          const saved = await tx.task.findUniqueOrThrow({ where: { id: taskId } });
           const snapshot = taskSnapshot(saved);
           const change = await recordChange(tx, req.userId!, { taskId, operationId, deviceId, type: 'update', snapshot });
           const response = { operationId, change, task: snapshot };
@@ -444,10 +551,12 @@ router.post('/push', asyncHandler(async (req, res) => {
 
         if (type === 'soft-delete' || type === 'restore') {
           const deletedAt = type === 'soft-delete' ? existing.deletedAt || new Date().toISOString() : null;
-          const saved = await tx.task.update({
-            where: { id: taskId },
+          const changed = await tx.task.updateMany({
+            where: { id: taskId, userId: req.userId!, version: baseVersion },
             data: { deletedAt, version: { increment: 1 }, lastChangedByDeviceId: deviceId },
           });
+          if (changed.count !== 1) return taskCasFailure(tx, req.userId!, taskId, operationId, operation);
+          const saved = await tx.task.findUniqueOrThrow({ where: { id: taskId } });
           const snapshot = taskSnapshot(saved);
           const tombstone = type === 'soft-delete' ? { taskId, deletedAt, version: saved.version } : undefined;
           const change = await recordChange(tx, req.userId!, { taskId, operationId, deviceId, type, snapshot, tombstone });
@@ -459,7 +568,10 @@ router.post('/push', asyncHandler(async (req, res) => {
           if (!existing.deletedAt) {
             return { rejected: { operationId, code: 'TASK_NOT_DELETED', error: 'Task must be soft-deleted before permanent deletion' } };
           }
-          await tx.task.delete({ where: { id: taskId } });
+          const deleted = await tx.task.deleteMany({
+            where: { id: taskId, userId: req.userId!, version: baseVersion, deletedAt: { not: null } },
+          });
+          if (deleted.count !== 1) return taskCasFailure(tx, req.userId!, taskId, operationId, operation);
           const tombstone = { taskId, deletedAt: existing.deletedAt, permanentlyDeletedAt: new Date().toISOString(), version: existing.version + 1 };
           const change = await recordChange(tx, req.userId!, { taskId, operationId, deviceId, type, tombstone });
           const response = { operationId, change, tombstone };
@@ -471,9 +583,7 @@ router.post('/push', asyncHandler(async (req, res) => {
 
       if ('accepted' in result) {
         accepted.push(result.accepted);
-        if (type === 'create' || type === 'update' || type === 'resolve-conflict' || type === 'permanent-delete') {
-          statsMayHaveChanged = true;
-        }
+        if (STATS_MUTATION_TYPES.has(type)) statsMayHaveChanged = true;
       }
       else if ('conflict' in result) conflicts.push(result.conflict);
       else rejected.push(result.rejected);
@@ -494,16 +604,9 @@ router.post('/push', asyncHandler(async (req, res) => {
     }
   }
 
-  if (statsMayHaveChanged) await recomputeUserStats(prisma, req.userId!);
-  const now = Date.now();
-  await Promise.all([
-    prisma.taskChange.deleteMany({ where: { createdAt: { lt: new Date(now - 180 * 24 * 60 * 60 * 1000) } } }),
-    prisma.taskOperation.deleteMany({ where: { createdAt: { lt: new Date(now - 365 * 24 * 60 * 60 * 1000) } } }),
-    prisma.rateLimitBucket.deleteMany({ where: { resetAt: { lt: new Date(now - 24 * 60 * 60 * 1000) } } }),
-    prisma.emailVerification.deleteMany({ where: { expiresAt: { lt: new Date(now - 24 * 60 * 60 * 1000) } } }),
-  ]);
+  const userStats = statsMayHaveChanged ? await recomputeUserStats(prisma, req.userId!) : undefined;
   const state = await prisma.userSyncState.upsert({ where: { userId: req.userId! }, create: { userId: req.userId! }, update: {} });
-  res.json({ accepted, conflicts, rejected, nextCursorHint: state.nextSeq - 1 });
+  res.json({ accepted, conflicts, rejected, nextCursorHint: state.nextSeq - 1, userStats });
 }));
 
 export default router;

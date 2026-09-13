@@ -7,53 +7,27 @@ export function classifySyncError(error) {
   return 'retryable';
 }
 
-export function createSingleFlight(operation) {
-  let inFlight = null;
-  return function run() {
-    if (!inFlight) {
-      inFlight = Promise.resolve().then(operation).finally(() => {
-        inFlight = null;
-      });
-    }
-    return inFlight;
+export function takeSyncBatch(operations, isReady, limit = 50, dependencyKey = () => null) {
+  const safeLimit = Number.isInteger(limit) && limit > 0 ? limit : 50;
+  const ready = operations.filter(isReady);
+  const claimedDependencies = new Set();
+  const batch = [];
+  for (const operation of ready) {
+    const key = dependencyKey(operation);
+    if (key !== null && claimedDependencies.has(key)) continue;
+    if (key !== null) claimedDependencies.add(key);
+    batch.push(operation);
+    if (batch.length >= safeLimit) break;
+  }
+  return {
+    batch,
+    hasMore: ready.length > batch.length,
   };
 }
 
-export function mergeFlushResult(current, before, flushed) {
-  const merged = [...current];
-  for (const original of before.filter(task => task._dirty)) {
-    const currentIndex = merged.findIndex(task => task.id === original.id || (original._clientKey && task._clientKey === original._clientKey));
-    if (currentIndex < 0) continue;
-    const currentTask = merged[currentIndex];
-    const result = flushed.find(task => task.id === original.id || (original._clientKey && task._clientKey === original._clientKey));
-    if (!result) {
-      if (original._syncState === 'permanent-delete' && currentTask._operationId === original._operationId) {
-        merged.splice(currentIndex, 1);
-      }
-      continue;
-    }
-
-    if (currentTask._operationId !== original._operationId) {
-      if (!result._dirty) {
-        merged[currentIndex] = {
-          ...currentTask,
-          ...(original.id.startsWith('local-') ? { id: result.id } : {}),
-          updatedAt: result.updatedAt,
-          completedAt: result.completedAt,
-          _dirty: true,
-          _syncState: original.id.startsWith('local-') ? 'update' : currentTask._syncState,
-        };
-      }
-      continue;
-    }
-
-    merged[currentIndex] = result._dirty
-      ? {
-          ...currentTask,
-          _conflict: result._conflict || currentTask._conflict,
-          _syncError: result._syncError || currentTask._syncError,
-        }
-      : { ...currentTask, ...result, _clientKey: currentTask._clientKey };
-  }
-  return merged;
+export function syncRetryDelay(attempt, random = Math.random) {
+  const normalizedAttempt = Number.isInteger(attempt) && attempt > 0 ? attempt : 1;
+  const base = Math.min(30_000, 750 * (2 ** Math.min(normalizedAttempt - 1, 6)));
+  const jitter = Math.max(0, Math.min(1, Number(random()) || 0));
+  return Math.round(base * (0.85 + jitter * 0.3));
 }

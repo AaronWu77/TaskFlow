@@ -1,19 +1,25 @@
 // API base URL — override with VITE_API_URL when targeting a different backend.
 import { Capacitor } from '@capacitor/core';
-import { createSingleFlight } from './sync-core.mjs';
 import { secureGet, secureRemove, secureSet } from './secure-storage';
+import { refreshHttpFailureKind, transportFailureKind } from './api-result-core.mjs';
 
-const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || 'https://taskflow.top/api';
+const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || 'https://taskflow.top/api/v1';
 
 // Access token stored in memory only (not localStorage) — reduces XSS risk.
 // On page refresh, the token is gone; a silent refresh via stored refreshToken re-issues it.
 let accessToken: string | null = null;
+let authGeneration = 0;
+let logoutRequested = false;
+let refreshInFlight: Promise<RefreshResult> | null = null;
+let refreshTokenMutationChain: Promise<void> = Promise.resolve();
 
 const REFRESH_TOKEN_KEY = 'taskflow_refresh_token';
-export type RefreshResult = 'ok' | 'unauthorized' | 'network';
+export type RefreshResult =
+  | { kind: 'ok'; user: AuthUser }
+  | { kind: 'unauthorized' | 'offline' | 'transport' | 'timeout' | 'service-unavailable' | 'incompatible' | 'rate-limited'; status?: number; code?: string; requestId?: string };
+export type LogoutResult = { kind: 'revoked' | 'unauthorized' | 'offline' | 'transport' | 'timeout' | 'server-error'; status?: number; requestId?: string };
 const IS_NATIVE_PLATFORM = Capacitor.isNativePlatform();
 const REQUEST_TIMEOUT_MS = 15000;
-let refreshedUser: AuthUser | null = null;
 
 export class ApiError extends Error {
   status: number;
@@ -35,27 +41,39 @@ export function isTaskConflictError(error: unknown): error is ApiError {
 
 // Callback invoked when both the access token and refresh cookie are expired.
 // The App component registers this to transition back to the login screen.
-let onAuthFailure: (() => void) | null = null;
-export function setAuthFailureHandler(fn: (() => void) | null) { onAuthFailure = fn; }
+let onAuthFailure: (() => void | Promise<void>) | null = null;
+export function setAuthFailureHandler(fn: (() => void | Promise<void>) | null) { onAuthFailure = fn; }
+let onRefreshFailure: ((result: RefreshResult) => void) | null = null;
+export function setRefreshFailureHandler(fn: typeof onRefreshFailure) { onRefreshFailure = fn; }
 
 function setAccessToken(token: string | null) {
   accessToken = token;
 }
 
 async function getStoredRefreshToken(): Promise<string | null> {
+  await refreshTokenMutationChain.catch(() => undefined);
   return IS_NATIVE_PLATFORM ? secureGet(REFRESH_TOKEN_KEY) : null;
 }
 
-async function setStoredRefreshToken(token: string | null): Promise<void> {
-  if (IS_NATIVE_PLATFORM) {
-    if (token) await secureSet(REFRESH_TOKEN_KEY, token);
-    else await secureRemove(REFRESH_TOKEN_KEY);
-  } else {
+function setStoredRefreshToken(token: string | null): Promise<void> {
+  const mutation = refreshTokenMutationChain.catch(() => undefined).then(async () => {
+    if (IS_NATIVE_PLATFORM) {
+      if (token) await secureSet(REFRESH_TOKEN_KEY, token);
+      else await secureRemove(REFRESH_TOKEN_KEY);
+      return;
+    }
     // Remove tokens written by older web builds. Web sessions use only the httpOnly cookie.
     try {
       localStorage.removeItem(REFRESH_TOKEN_KEY);
     } catch { /**/ }
-  }
+  });
+  const settled = mutation.catch(error => {
+    // The in-memory/session state must still be allowed to sign out. A signed-out
+    // session prevents reuse on next launch and the removal is retried there.
+    console.warn('TaskFlow: secure refresh-token storage mutation failed', error);
+  });
+  refreshTokenMutationChain = settled;
+  return settled;
 }
 
 function platformHeaders(): Record<string, string> {
@@ -75,6 +93,7 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}
 /** Attempt a silent token refresh using the httpOnly refresh cookie plus a stored fallback token.
  *  The fallback keeps dev web and Capacitor sessions alive when cookies are not persisted. */
 async function performRefresh(): Promise<RefreshResult> {
+  const generation = authGeneration;
   try {
     if (!IS_NATIVE_PLATFORM) await setStoredRefreshToken(null);
     const storedRefreshToken = await getStoredRefreshToken();
@@ -86,34 +105,54 @@ async function performRefresh(): Promise<RefreshResult> {
       credentials: 'include',
       headers,
     });
-    if (!res.ok) return res.status === 401 ? 'unauthorized' : 'network';
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({})) as { code?: string };
+      const context = {
+        status: res.status,
+        ...(data.code ? { code: data.code } : {}),
+        ...(res.headers.get('x-request-id') ? { requestId: res.headers.get('x-request-id')! } : {}),
+      };
+      return { kind: refreshHttpFailureKind(res.status), ...context };
+    }
     const data = await res.json() as { accessToken: string; refreshToken?: string; user?: AuthUser };
+    if (!data.accessToken || !data.user) {
+      return {
+        kind: 'service-unavailable',
+        status: res.status,
+        requestId: res.headers.get('x-request-id') ?? undefined,
+      };
+    }
+    if (generation !== authGeneration) {
+      return { kind: 'unauthorized', code: 'AUTH_SESSION_CHANGED' };
+    }
     setAccessToken(data.accessToken);
-    refreshedUser = data.user ?? null;
     if (data.refreshToken) await setStoredRefreshToken(data.refreshToken);
-    return 'ok';
-  } catch {
-    return 'network';
+    return { kind: 'ok', user: data.user };
+  } catch (error) {
+    return { kind: transportFailureKind(error, navigator.onLine) };
   }
 }
 
-const runRefreshSingleFlight = createSingleFlight(performRefresh);
-
 export async function apiRefreshDetailed(): Promise<RefreshResult> {
-  return runRefreshSingleFlight();
-}
-
-export function getRefreshedUser(): AuthUser | null {
-  return refreshedUser;
+  if (logoutRequested && !refreshInFlight) {
+    return { kind: 'unauthorized', code: 'AUTH_LOGOUT_IN_PROGRESS' };
+  }
+  if (!refreshInFlight) {
+    refreshInFlight = performRefresh().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
 }
 
 export async function apiRefresh(): Promise<boolean> {
-  return (await apiRefreshDetailed()) === 'ok';
+  return (await apiRefreshDetailed()).kind === 'ok';
 }
 
-export function clearLocalAuthTokens(): void {
+export async function clearLocalAuthTokens(): Promise<void> {
+  authGeneration += 1;
   setAccessToken(null);
-  void setStoredRefreshToken(null);
+  await setStoredRefreshToken(null);
 }
 
 export async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
@@ -128,11 +167,14 @@ export async function apiFetch(path: string, options: RequestInit = {}): Promise
   // Auto-refresh on 401 and retry once
   if (res.status === 401) {
     const refreshResult = await apiRefreshDetailed();
-    if (refreshResult === 'ok' && accessToken) {
+    if (refreshResult.kind === 'ok' && accessToken) {
       headers['Authorization'] = `Bearer ${accessToken}`;
       res = await fetchWithTimeout(`${BASE_URL}${path}`, { ...options, headers, credentials: 'include' });
-    } else if (refreshResult === 'unauthorized') {
-      onAuthFailure?.();
+    } else if (refreshResult.kind === 'unauthorized') {
+      await onAuthFailure?.();
+    } else {
+      onRefreshFailure?.(refreshResult);
+      throw new ApiError('Session refresh is temporarily unavailable', 503, 'AUTH_REFRESH_UNAVAILABLE', refreshResult);
     }
   }
 
@@ -184,6 +226,7 @@ async function parseAuthResponse(res: Response, fallback: string): Promise<AuthR
     return { requiresEmailVerification: true, user: data.user, devCode: data.devCode };
   }
   if (!data.accessToken || !data.user) throw new Error(fallback);
+  authGeneration += 1;
   setAccessToken(data.accessToken);
   await setStoredRefreshToken(data.refreshToken ?? null);
   return { user: data.user, accessToken: data.accessToken };
@@ -221,6 +264,7 @@ export async function apiVerifyEmail(email: string, code: string): Promise<AuthS
     throw new ApiError(err.error || 'Email verification failed', res.status, err.code, err);
   }
   const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken?: string };
+  authGeneration += 1;
   setAccessToken(data.accessToken);
   await setStoredRefreshToken(data.refreshToken ?? null);
   return data;
@@ -240,17 +284,28 @@ export async function apiResendVerification(email: string): Promise<{ ok: true; 
   return res.json() as Promise<{ ok: true; devCode?: string; alreadyVerified?: boolean }>;
 }
 
-export async function apiLogout(): Promise<void> {
+export async function apiLogout(): Promise<LogoutResult> {
+  logoutRequested = true;
   try {
+    if (refreshInFlight) await refreshInFlight.catch(() => undefined);
+    authGeneration += 1;
     const refreshToken = await getStoredRefreshToken();
-    await fetchWithTimeout(`${BASE_URL}/auth/logout`, {
+    const res = await fetchWithTimeout(`${BASE_URL}/auth/logout`, {
       method: 'POST',
       credentials: 'include',
       headers: { ...platformHeaders(), ...(refreshToken ? { Authorization: `Bearer ${refreshToken}` } : {}) },
     });
-  } catch { /* local sign-out must still complete */ }
-  setAccessToken(null);
-  await setStoredRefreshToken(null);
+    const requestId = res.headers.get('x-request-id') ?? undefined;
+    if (res.ok) return { kind: 'revoked', status: res.status, requestId };
+    if (res.status === 401) return { kind: 'unauthorized', status: res.status, requestId };
+    return { kind: 'server-error', status: res.status, requestId };
+  } catch (error) {
+    return { kind: transportFailureKind(error, navigator.onLine) };
+  } finally {
+    setAccessToken(null);
+    await setStoredRefreshToken(null);
+    logoutRequested = false;
+  }
 }
 
 // ── Task CRUD ──
@@ -261,12 +316,15 @@ export interface TaskDTO {
   title: string;
   priority: string;
   estimateMinutes: number | null;
+  progress: number;
   status: string;
   tag: string | null;
   dueDate: string | null;
   reminderAt: string | null;
   repeatRule: string | null;
   repeatUntilDate: string | null;
+  seriesId: string | null;
+  occurrenceDate: string | null;
   completedAt: string | null;
   deletedAt: string | null;
   sortOrder: number;
@@ -317,9 +375,10 @@ export interface PendingSyncOperationDTO {
 
 export interface SyncPushResponseDTO {
   accepted: Array<{ operationId: string; task?: TaskDTO; change?: SyncChangeDTO; clientTaskId?: string; order?: { order: Array<{ id: string; sortOrder: number }>; taskOrderVersion: number }; tombstone?: unknown; replayed?: boolean }>;
-  conflicts: Array<{ operationId: string; code: string; serverTask?: TaskDTO; serverVersion?: number; clientOperation?: PendingSyncOperationDTO; serverOrderVersion?: number }>;
+  conflicts: Array<{ operationId: string; code: string; serverTask?: TaskDTO; serverVersion?: number; clientOperation?: PendingSyncOperationDTO; serverOrderVersion?: number; serverOrder?: Array<{ id: string; sortOrder: number }> }>;
   rejected: Array<{ operationId?: string; code: string; error: string }>;
   nextCursorHint: number;
+  userStats?: UserStatsDTO | null;
 }
 
 export async function apiSyncBootstrap(): Promise<SyncBootstrapDTO> {
@@ -343,7 +402,12 @@ export async function apiPullChanges(cursor: number, limit = 500): Promise<{ cha
 export async function apiPushOperations(deviceId: string, operations: PendingSyncOperationDTO[]): Promise<SyncPushResponseDTO> {
   const res = await apiFetch('/sync/push', {
     method: 'POST',
-    body: JSON.stringify({ deviceId, operations }),
+    body: JSON.stringify({
+      deviceId,
+      deviceName: Capacitor.isNativePlatform() ? 'TaskFlow iOS' : 'TaskFlow Web',
+      platform: Capacitor.getPlatform(),
+      operations,
+    }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Failed to push sync operations' })) as { error?: string; code?: string };
@@ -378,8 +442,7 @@ export async function apiDeleteAccount(): Promise<void> {
   if (!res.ok && res.status !== 404) {
     throw new Error('Failed to delete account');
   }
-  setAccessToken(null);
-  await setStoredRefreshToken(null);
+  await clearLocalAuthTokens();
 }
 
 export async function apiExportUserData(): Promise<Blob> {

@@ -25,7 +25,8 @@ test('React controls are the only task interaction surface', () => {
   assert.match(app, /toLocaleDateString\(i18n\.language === 'zh'/);
   assert.match(app, /onClick=\{\(\) => !nativeControls && setDetailTaskId\(task\.id\)\}/);
   assert.match(app, /onClick=\{\(\) => !nativeControls && setRepeatTask\(task\)\}/);
-  assert.match(app, /progress:\s*_legacyProgress/);
+  assert.match(app, /progress: t\.progress \?\? 0/);
+  assert.match(app, /progress: Number\.isInteger\(task\.progress\) \? task\.progress : 0/);
   assert.doesNotMatch(app, /PRIVACY_POLICY_URL/);
   assert.doesNotMatch(app, /openPublicPrivacyPolicy/);
   assert.match(app, /onOpenPrivacy=\{\(\) => setPrivacyOpen\(true\)\}/);
@@ -33,14 +34,17 @@ test('React controls are the only task interaction surface', () => {
   assert.doesNotMatch(app, /account\.signOutBlockedPending/);
   assert.doesNotMatch(app, /account\.deleteAccountBlocked/);
   assert.match(app, /const effectiveSyncStatus = useMemo/);
-  assert.match(app, /visibleSyncStatus\(syncStatus, pendingOperations, syncMeta, cloudSyncEnabled\)/);
+  assert.match(app, /visibleSyncStatus\(syncStatus, pendingOperations, syncMeta, cloudSyncEnabled, connectionIssue\)/);
   assert.match(app, /if \(rawStatus === 'error'\) return 'error'/);
   assert.match(app, /if \(pending\.length > 0 && readyPending\.length === 0\)/);
   assert.match(app, /const syncRequiresUserAction = effectiveSyncStatus === 'conflict'/);
-  assert.match(app, /const shouldNotify = effectiveSyncStatus === 'error' \|\| effectiveSyncStatus === 'offline' \|\| effectiveSyncStatus === 'conflict'/);
+  assert.match(app, /\['error', 'offline', 'network', 'timeout', 'serviceUnavailable', 'incompatible', 'rateLimited', 'conflict'\]\.includes\(effectiveSyncStatus\)/);
   assert.match(app, /toast\(t\(`sync\.\$\{effectiveSyncStatus\}`\)/);
   assert.match(app, /duration: effectiveSyncStatus === 'conflict' \? 6000 : 3500/);
   assert.match(app, /TaskFlow sync failed/);
+  assert.match(app, /setRefreshFailureHandler\(result => \{/);
+  assert.match(app, /setConnectionIssue\(refreshFailureStatus\(result\)\)/);
+  assert.match(app, /error\.code === 'AUTH_REFRESH_UNAVAILABLE'/);
   assert.match(app, /syncStatus=\{effectiveSyncStatus\}/);
   assert.match(app, /account\.syncNotComplete/);
   assert.match(app, /const retryAllSyncOperations = React\.useCallback/);
@@ -79,14 +83,21 @@ test('core task behavior paths remain covered by regression checks', () => {
   assert.match(app, /normalizeCachedTask/);
 });
 
-test('task creation reads committed form controls on submit', () => {
+test('task creation uses one controlled state source and iOS-safe priority buttons', () => {
   const app = read('src/app/App.tsx');
-  assert.match(app, /const taskFormFromSubmit = \(formElement: HTMLFormElement, base: AddTaskState\): AddTaskState =>/);
-  for (const name of ['title', 'dueDate', 'priority', 'minutes', 'tag', 'reminderAt', 'repeatRule', 'repeatUntilDate']) {
+  assert.match(app, /taskDraftFromFieldValues\(formRef\.current, new FormData\(event\.currentTarget\)\)/);
+  assert.match(app, /taskDraftFromFieldValues\(formRef\.current, new FormData\(e\.currentTarget\)\)/);
+  for (const name of ['title', 'dueDate', 'minutes', 'tag', 'reminderAt', 'repeatRule', 'repeatUntilDate']) {
     assert.match(app, new RegExp(`name="${name}"`));
   }
-  assert.match(app, /const quickForm = taskFormFromSubmit\(event\.currentTarget/);
-  assert.match(app, /const submittedForm = taskFormFromSubmit\(e\.currentTarget, form\)/);
+  assert.match(app, /\(\['P1', 'P2', 'P3'\] as Priority\[\]\)\.map\(priority =>/);
+  assert.match(app, /aria-pressed=\{form\.priority === priority\}/);
+  assert.match(app, /role="radio"/);
+  assert.match(app, /aria-checked=\{form\.priority === priority\}/);
+  assert.equal((app.match(/type="hidden" name="priority" value=\{form\.priority\}/g) || []).length, 2);
+  assert.match(app, /onInput=\{\(event\) => onFormChange\(\{ title: event\.currentTarget\.value \}\)\}/);
+  assert.match(app, /onCompositionEnd=\{\(event\) => onFormChange\(\{ title: event\.currentTarget\.value \}\)\}/);
+  assert.match(app, /onPointerDown=\{\(event\) => event\.preventDefault\(\)\}/);
   assert.match(app, /validateTaskForm\(submittedForm\)/);
   assert.match(app, /createTaskFromForm\(submittedForm\)/);
   assert.match(app, /repeatInstanceCount\(submittedForm\.dueDate, submittedForm\.repeatUntilDate, submittedForm\.repeatRule\)/);
@@ -103,12 +114,23 @@ test('accent theme presets stay visually distinct', () => {
   assert.match(en, /"tcx140837": "14-0837 TCX"/);
 });
 
-test('legacy reorder sheet keeps the six-dot drag handle and move controls', () => {
+test('reorder sheet keeps pointer and layout coordinates aligned in its fixed scroll container', () => {
   const app = read('src/app/App.tsx');
   assert.match(app, /function ReorderSheet/);
   assert.match(app, /GripVertical/);
   assert.match(app, /ArrowUpDown/);
-  assert.match(app, /onHandlePointerDown/);
+  assert.match(app, /createPortal\([\s\S]*document\.body/);
+  assert.match(app, /layoutRoot/);
+  assert.match(app, /<Reorder\.Group[\s\S]*layoutScroll/);
+  assert.match(app, /<Reorder\.Item/);
+  assert.match(app, /dragListener=\{false\}/);
+  assert.match(app, /onPointerDownCapture=\{\(event\) => \{/);
+  assert.match(app, /event\.clientX > row\.left \+ 64/);
+  assert.match(app, /dragControls\.start\(event\)/);
+  assert.match(app, /-ml-2 -mt-2 touch-none cursor-grab/);
+  assert.match(app, /<GripVertical className="pointer-events-none/);
+  assert.doesNotMatch(app, /moveEvent\.clientY/);
+  assert.doesNotMatch(app, /rowRefs/);
   assert.match(app, /onMoveUp/);
   assert.match(app, /onMoveDown/);
   assert.match(app, /setIsReordering/);
@@ -123,7 +145,7 @@ test('npm run ios rebuilds, syncs, and opens the iOS project for device testing'
   assert.doesNotMatch(packageJson, /xcodebuild|simctl/);
 });
 
-test('Flow card position and task exit motion stay tuned for Phase 16', () => {
+test('Flow motion avoids full-page compositing and expensive blur filters', () => {
   const app = read('src/app/App.tsx');
   assert.match(app, /'mt-\[clamp\(1\.75rem,5vh,3\.25rem\)\]'/);
   assert.match(app, /offset=\{\{ top: isNativeShell \? 'calc\(env\(safe-area-inset-top\) \+ 28px\)' : '10px' \}\}/);
@@ -131,11 +153,17 @@ test('Flow card position and task exit motion stay tuned for Phase 16', () => {
   assert.match(app, /style=\{\{ '--width': '360px' \} as React\.CSSProperties\}/);
   assert.match(app, /minHeight: '42px'/);
   assert.match(app, /borderRadius: '24px'/);
-  assert.match(app, /className="h-full overflow-y-auto px-4 sm:px-6 pb-4"/);
+  assert.match(app, /className="h-full w-full overflow-y-auto px-4 pb-4 sm:px-6"/);
   assert.match(app, /if \(action === 'complete'\)[\s\S]*y: -82[\s\S]*scale: 0\.94/);
   assert.match(app, /if \(action === 'skip'\)[\s\S]*x: -132[\s\S]*rotate: -4/);
   assert.match(app, /if \(action === 'snooze'\)[\s\S]*y: 112[\s\S]*x: 72/);
   assert.match(app, /stiffness: 340, damping: 34, mass: 0\.72/);
+  assert.doesNotMatch(app, /style=\{\{ width: '200%', willChange: 'transform' \}\}/);
+  assert.doesNotMatch(app, /filter: 'blur/);
+  assert.match(app, /const visiblePendingTasks = useMemo/);
+  assert.match(app, /onExitComplete=\{\(\) => \{/);
+  assert.match(app, /commitTaskAction\(exitAction\)/);
+  assert.doesNotMatch(app, /const commitDelay/);
 });
 
 test('iOS release scope remains iPhone portrait on iOS 17 with privacy manifest', () => {
@@ -213,7 +241,8 @@ test('new sync engine uses cursor-based push-pull instead of legacy dirty flush'
   assert.doesNotMatch(app, /apiReorderTasks/);
   assert.doesNotMatch(app, /apiCreateTask/);
   assert.doesNotMatch(app, /apiUpdateTask/);
-  assert.match(api, /createSingleFlight\(performRefresh\)/);
+  assert.match(api, /refreshInFlight = performRefresh\(\)\.finally/);
+  assert.match(api, /generation !== authGeneration/);
   assert.match(api, /apiSyncBootstrap/);
   assert.match(api, /apiPushOperations/);
   assert.match(backend, /router\.post\('\/push'/);
@@ -231,8 +260,62 @@ test('sync mutations have one versioned write path with user-scoped idempotency'
   assert.match(tasksRoute, /SYNC_PROTOCOL_REQUIRED/);
   assert.match(syncRoute, /taskOperation\.findUnique/);
   assert.match(syncRoute, /CURSOR_EXPIRED/);
+  assert.match(syncRoute, /baseVersion is required/);
+  assert.match(syncRoute, /order and baseOrderVersion are required/);
+  assert.match(syncRoute, /lockTaskOrderState/);
+  assert.match(syncRoute, /FOR UPDATE/);
+  assert.match(syncRoute, /task\.updateMany/);
+  assert.match(syncRoute, /version: baseVersion/);
+  assert.match(syncRoute, /activeTodoIds\.size !== normalizedOrder\.length[\s\S]*code: 'ORDER_CONFLICT'/);
+  assert.match(syncRoute, /serverOrderVersion: currentOrderVersion, serverOrder/);
+  assert.match(syncRoute, /item\.sortOrder !== index/);
   assert.match(schema, /@@unique\(\[userId, operationId\]\)/);
   assert.match(migration, /Preserve idempotency/);
+});
+
+test('logout, native restore, and interrupted actions are race-safe', () => {
+  const app = read('src/app/App.tsx');
+  const api = read('src/app/api.ts');
+  const storage = read('src/app/storage.ts');
+  assert.match(api, /logoutRequested = true[\s\S]*if \(refreshInFlight\) await refreshInFlight/);
+  assert.match(api, /await onAuthFailure\?\.\(\)/);
+  assert.match(api, /export async function clearLocalAuthTokens/);
+  assert.doesNotMatch(app, /function finishSignedOutSession\(\) \{[\s\S]{0,120}clearLocalAuthTokens/);
+  assert.match(app, /userStorageKey\(user\.id, 'pending_operations'\)/);
+  assert.match(app, /userStorageKey\(user\.id, 'sync_meta'\)/);
+  assert.match(app, /if \(!nativeCacheReady\) return/);
+  assert.match(app, /commitTaskActionRef\.current\(exitAction\)/);
+  assert.match(app, /window\.setTimeout\(commitIfPending, 700\)/);
+  assert.match(storage, /while \(nativeWriteChains\.size > 0\)[\s\S]*await Promise\.all/);
+});
+
+test('new recurring tasks use durable occurrence identities without guessing legacy series', () => {
+  const app = read('src/app/App.tsx');
+  const syncRoute = read('backend/src/routes/sync.ts');
+  const schema = read('backend/src/prisma/schema.prisma');
+  const migration = read('backend/src/prisma/migrations/20260912100000_add_recurrence_identity/migration.sql');
+  assert.match(app, /const seriesId = repeatUntilDate \? syncOperationId\(\) : null/);
+  assert.match(app, /occurrenceDate: source\.seriesId \? dueDate : null/);
+  assert.match(app, /task\.seriesId === editedTask\.seriesId && task\.occurrenceDate === dueDate/);
+  assert.match(syncRoute, /Boolean\(data\.seriesId\) !== Boolean\(data\.occurrenceDate\)/);
+  assert.match(schema, /@@unique\(\[userId, seriesId, occurrenceDate\]\)/);
+  assert.match(migration, /Existing repeated tasks are intentionally left unlinked/);
+});
+
+test('production routing, maintenance, and Prisma schema paths stay deployable', () => {
+  const index = read('backend/src/index.ts');
+  const syncRoute = read('backend/src/routes/sync.ts');
+  const maintenance = read('backend/src/services/maintenance.ts');
+  const dockerfile = read('backend/Dockerfile');
+  const compose = read('docker-compose.yml');
+  assert.match(index, /app\.use\('\/v1\/sync', syncRouter\)/);
+  assert.match(index, /setInterval\(scheduleMaintenance, MAINTENANCE_INTERVAL_MS\)/);
+  assert.match(index, /process\.once\('SIGTERM'/);
+  assert.doesNotMatch(syncRoute, /taskChange\.deleteMany|taskOperation\.deleteMany|rateLimitBucket\.deleteMany/);
+  assert.match(maintenance, /taskChange\.deleteMany/);
+  assert.match(dockerfile, /src\/prisma\/schema\.prisma\s+\.\/prisma\/schema\.prisma/);
+  assert.match(compose, /VITE_API_URL: \/api\/v1/);
+  assert.equal(existsSync(new URL('../backend/prisma/schema.prisma', import.meta.url)), false);
 });
 
 test('refresh tokens remain out of web storage and native tokens use secure storage', () => {

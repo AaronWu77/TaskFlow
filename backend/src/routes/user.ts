@@ -38,6 +38,7 @@ router.patch('/preferences', asyncHandler(async (req, res) => {
     },
     select: { id: true, email: true, emailVerifiedAt: true, displayName: true, timezone: true, locale: true },
   });
+  if (timezone !== undefined) await recomputeUserStats(prisma, req.userId!);
   res.json(user);
 }));
 

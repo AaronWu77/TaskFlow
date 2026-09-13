@@ -1,40 +1,58 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { classifySyncError, createSingleFlight, mergeFlushResult } from '../src/app/sync-core.mjs';
+import { classifySyncError, syncRetryDelay, takeSyncBatch } from '../src/app/sync-core.mjs';
 
-test('a newer edit keeps its fields and absorbs the server version from the older response', () => {
-  const before = [{ id: 'task-1', title: 'first edit', updatedAt: 'T1', _dirty: true, _syncState: 'update', _operationId: 'op-a' }];
-  const current = [{ id: 'task-1', title: 'second edit', updatedAt: 'T1', _dirty: true, _syncState: 'update', _operationId: 'op-b' }];
-  const flushed = [{ id: 'task-1', title: 'first edit', updatedAt: 'T2', completedAt: null, _dirty: false }];
-
-  assert.deepEqual(mergeFlushResult(current, before, flushed), [{
-    ...current[0],
-    updatedAt: 'T2',
-    completedAt: null,
-  }]);
+test('sync retry delay backs off, adds bounded jitter, and caps at thirty seconds', () => {
+  assert.equal(syncRetryDelay(1, () => 0.5), 750);
+  assert.equal(syncRetryDelay(2, () => 0.5), 1500);
+  assert.equal(syncRetryDelay(20, () => 0.5), 30000);
+  assert.ok(syncRetryDelay(1, () => 0) < syncRetryDelay(1, () => 1));
 });
 
-test('an edited local create accepts the server id and remains a pending update', () => {
-  const before = [{ id: 'local-1', _clientKey: 'client-1', title: 'draft', _dirty: true, _syncState: 'create', _operationId: 'op-create' }];
-  const current = [{ ...before[0], title: 'new title', _operationId: 'op-edit' }];
-  const flushed = [{ ...before[0], id: 'server-1', updatedAt: 'T2', _dirty: false, _syncState: undefined, _operationId: undefined }];
-  const [result] = mergeFlushResult(current, before, flushed);
+test('sync batching never exceeds the API limit and reports remaining ready work', () => {
+  const operations = Array.from({ length: 137 }, (_, index) => ({ id: index, ready: index % 3 !== 0 }));
+  const first = takeSyncBatch(operations, operation => operation.ready, 50);
+  assert.equal(first.batch.length, 50);
+  assert.equal(first.batch.every(operation => operation.ready), true);
+  assert.equal(first.hasMore, true);
 
-  assert.equal(result.id, 'server-1');
-  assert.equal(result.title, 'new title');
-  assert.equal(result.updatedAt, 'T2');
-  assert.equal(result._operationId, 'op-edit');
-  assert.equal(result._syncState, 'update');
-  assert.equal(result._dirty, true);
+  const final = takeSyncBatch(operations.slice(0, 40), operation => operation.ready, 50);
+  assert.equal(final.batch.length, 26);
+  assert.equal(final.hasMore, false);
 });
 
-test('a confirmed permanent delete is removed only for the matching operation', () => {
-  const before = [{ id: 'task-1', _dirty: true, _syncState: 'permanent-delete', _operationId: 'op-delete' }];
-  assert.deepEqual(mergeFlushResult(before, before, []), []);
-
-  const newer = [{ ...before[0], _operationId: 'op-newer' }];
-  assert.deepEqual(mergeFlushResult(newer, before, []), newer);
+test('a batch serializes writes that target the same task or global order', () => {
+  const operations = [
+    { id: 'a1', taskId: 'a', type: 'update' },
+    { id: 'a2', taskId: 'a', type: 'restore' },
+    { id: 'b1', taskId: 'b', type: 'update' },
+    { id: 'r1', type: 'reorder' },
+    { id: 'r2', type: 'reorder' },
+  ];
+  const { batch, hasMore } = takeSyncBatch(
+    operations,
+    () => true,
+    50,
+    operation => operation.taskId ? `task:${operation.taskId}` : operation.type === 'reorder' ? 'order' : null,
+  );
+  assert.deepEqual(batch.map(operation => operation.id), ['a1', 'b1', 'r1']);
+  assert.equal(hasMore, true);
 });
+
+for (const operationCount of [99, 100, 101, 366]) {
+  test(`${operationCount} ready operations drain in ordered 50-item batches`, () => {
+    let remaining = Array.from({ length: operationCount }, (_, index) => ({ id: index }));
+    const drained = [];
+    while (remaining.length > 0) {
+      const { batch, hasMore } = takeSyncBatch(remaining, () => true, 50);
+      assert.ok(batch.length > 0 && batch.length <= 50);
+      drained.push(...batch);
+      remaining = remaining.slice(batch.length);
+      assert.equal(hasMore, remaining.length > 0);
+    }
+    assert.deepEqual(drained.map(operation => operation.id), Array.from({ length: operationCount }, (_, index) => index));
+  });
+}
 
 test('sync errors distinguish conflicts, missing records, invalid writes, and retryable failures', () => {
   assert.equal(classifySyncError({ status: 409, code: 'TASK_CONFLICT' }), 'conflict');
@@ -42,24 +60,4 @@ test('sync errors distinguish conflicts, missing records, invalid writes, and re
   assert.equal(classifySyncError({ status: 422 }), 'invalid');
   assert.equal(classifySyncError({ status: 503 }), 'retryable');
   assert.equal(classifySyncError(new TypeError('network failed')), 'retryable');
-});
-
-test('single-flight shares one operation across concurrent callers and resets afterward', async () => {
-  let calls = 0;
-  let release;
-  const gate = new Promise(resolve => { release = resolve; });
-  const run = createSingleFlight(async () => {
-    calls += 1;
-    await gate;
-    return calls;
-  });
-
-  const first = run();
-  const second = run();
-  assert.equal(calls, 0);
-  await Promise.resolve();
-  assert.equal(calls, 1);
-  release();
-  assert.deepEqual(await Promise.all([first, second]), [1, 1]);
-  assert.equal(await run(), 2);
 });

@@ -1,5 +1,32 @@
 export const MAX_REPEAT_INSTANCES = 366;
 
+export function normalizeTodoSortOrder(tasks) {
+  let sortOrder = 0;
+  return tasks.map(task => task.status === 'todo' && !task.deletedAt
+    ? { ...task, sortOrder: sortOrder++ }
+    : task);
+}
+
+export function applyTodoOrder(tasks, order) {
+  const orderMap = new Map(order.map(item => [item.id, item.sortOrder]));
+  const activeTodo = tasks
+    .filter(task => task.status === 'todo' && !task.deletedAt)
+    .map(task => orderMap.has(task.id) ? { ...task, sortOrder: orderMap.get(task.id) } : task)
+    .sort((left, right) => {
+      const leftRank = orderMap.get(left.id);
+      const rightRank = orderMap.get(right.id);
+      if (leftRank !== undefined || rightRank !== undefined) {
+        if (leftRank === undefined) return 1;
+        if (rightRank === undefined) return -1;
+        if (leftRank !== rightRank) return leftRank - rightRank;
+      }
+      if (left.sortOrder !== right.sortOrder) return left.sortOrder - right.sortOrder;
+      return String(left.id).localeCompare(String(right.id));
+    });
+  const activeIds = new Set(activeTodo.map(task => task.id));
+  return [...activeTodo, ...tasks.filter(task => !activeIds.has(task.id))];
+}
+
 export function dateOnlyKey(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }

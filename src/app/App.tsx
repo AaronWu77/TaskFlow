@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { motion, AnimatePresence, MotionConfig, useReducedMotion } from 'motion/react';
+import { createPortal } from 'react-dom';
+import { motion, AnimatePresence, MotionConfig, Reorder, useDragControls, useReducedMotion } from 'motion/react';
 import {
   Check, X, Clock, Plus, Flame, CheckCircle2,
   Calendar, Tag, XCircle, ChevronLeft, ChevronRight,
@@ -9,37 +10,44 @@ import {
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
-import { storageGet, storageSet, storageRemove, restoreFromNativeStorage } from './storage';
+import { flushDeferredStorage, storageGet, storageSet, storageSetDeferred, storageRemove, restoreFromNativeStorage } from './storage';
 import { AuthPage } from './AuthPage';
-import { ApiError, apiLogout, clearLocalAuthTokens, setAuthFailureHandler, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, getRefreshedUser, apiDeleteAccount, apiExportUserData, apiUpdateUserPreferences, apiSyncBootstrap, apiPullChanges, apiPushOperations, type AuthUser, type TaskDTO, type PendingSyncOperationDTO, type SyncChangeDTO } from './api';
+import { ApiError, apiLogout, clearLocalAuthTokens, setAuthFailureHandler, setRefreshFailureHandler, apiGetUserStats, apiUpdateUserStats, apiRefreshDetailed, apiDeleteAccount, apiExportUserData, apiUpdateUserPreferences, apiSyncBootstrap, apiPullChanges, apiPushOperations, type AuthUser, type TaskDTO, type PendingSyncOperationDTO, type SyncChangeDTO, type RefreshResult } from './api';
 import { toast, Toaster } from 'sonner';
 import { cn } from './components/ui/utils';
-import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { Capacitor } from '@capacitor/core';
 import { LocalNotifications } from '@capacitor/local-notifications';
-import { MAX_REPEAT_INSTANCES, dateOnlyKey, nextRepeatDate, repeatDatesAfterStart, repeatInstanceCount } from './task-core.mjs';
+import { MAX_REPEAT_INSTANCES, applyTodoOrder, dateOnlyKey, nextRepeatDate, normalizeTodoSortOrder, repeatDatesAfterStart, repeatInstanceCount } from './task-core.mjs';
+import { classifySyncError, syncRetryDelay, takeSyncBatch } from './sync-core.mjs';
+import { patchTaskDraft, taskDraftFromFieldValues } from './task-draft-core.mjs';
+import { createReorderFeedback } from './reorder-feedback.mjs';
+import { refreshConnectionIssue } from './api-result-core.mjs';
+import { hapticImpactLight, hapticImpactMedium, hapticSelectionChanged, hapticSelectionEnd, hapticSelectionStart } from './haptics';
 
 // --- Types ---
 type Priority = 'P1' | 'P2' | 'P3';
-type TaskStatus = 'todo' | 'doing' | 'done' | 'snoozed' | 'skipped';
+type TaskStatus = 'todo' | 'done' | 'skipped';
 type ViewMode = 'flow' | 'calendar';
-type AppState = 'loading' | 'auth' | 'app';
 type ExitAction = 'complete' | 'skip' | 'snooze';
 type TaskActionState = { taskId: string; action: ExitAction };
 type NotificationPermissionState = 'unsupported' | 'prompt' | 'granted' | 'denied';
-type SyncStatus = 'idle' | 'syncing' | 'offline' | 'pending' | 'conflict' | 'error';
+type SyncStatus = 'idle' | 'syncing' | 'offline' | 'network' | 'timeout' | 'serviceUnavailable' | 'incompatible' | 'rateLimited' | 'pending' | 'conflict' | 'error';
+type CloudConnectionIssue = Extract<SyncStatus, 'offline' | 'network' | 'timeout' | 'serviceUnavailable' | 'incompatible' | 'rateLimited'> | null;
 
 interface Task {
   id: string;
   title: string;
   priority: Priority;
   estimateMinutes: number | null;
+  progress?: number;
   status: TaskStatus;
   tag?: string | null;
   dueDate?: string | null;
   reminderAt?: string | null;
   repeatRule?: 'none' | 'daily' | 'weekly' | 'monthly' | null;
   repeatUntilDate?: string | null;
+  seriesId?: string | null;
+  occurrenceDate?: string | null;
   completedAt?: string | null;
   deletedAt?: string | null;
   sortOrder: number;
@@ -65,14 +73,19 @@ type PendingOperation = PendingSyncOperationDTO & {
   serverTask?: TaskDTO;
   serverVersion?: number;
   serverOrderVersion?: number;
+  serverOrder?: Array<{ id: string; sortOrder: number }>;
   clientPayload?: unknown;
   baseTaskSnapshot?: Record<string, unknown>;
   conflictedFields?: string[];
   detectedAt?: string;
 };
 
-function visibleSyncStatus(rawStatus: SyncStatus, operations: PendingOperation[], meta: SyncMeta, cloudSyncEnabled: boolean): SyncStatus {
-  if (!cloudSyncEnabled) return 'idle';
+function refreshFailureStatus(result: RefreshResult): CloudConnectionIssue {
+  return refreshConnectionIssue(result.kind);
+}
+
+function visibleSyncStatus(rawStatus: SyncStatus, operations: PendingOperation[], meta: SyncMeta, cloudSyncEnabled: boolean, connectionIssue: CloudConnectionIssue): SyncStatus {
+  if (!cloudSyncEnabled) return connectionIssue ?? 'offline';
   if (operations.some(operation => operation.status === 'conflict')) return 'conflict';
   if (operations.some(operation => operation.status === 'failed')) return 'error';
   if (rawStatus === 'error') return 'error';
@@ -203,7 +216,7 @@ function loadSyncMeta(userId: string): SyncMeta {
 }
 
 function saveSyncMeta(userId: string, meta: SyncMeta) {
-  storageSet(userStorageKey(userId, 'sync_meta'), JSON.stringify(meta));
+  storageSetDeferred(userStorageKey(userId, 'sync_meta'), () => JSON.stringify(meta));
 }
 
 function loadPendingOperations(userId: string): PendingOperation[] {
@@ -223,7 +236,7 @@ function loadPendingOperations(userId: string): PendingOperation[] {
 }
 
 function savePendingOperations(userId: string, operations: PendingOperation[]) {
-  storageSet(userStorageKey(userId, 'pending_operations'), JSON.stringify(operations));
+  storageSetDeferred(userStorageKey(userId, 'pending_operations'), () => JSON.stringify(operations));
 }
 
 function getDeviceId(userId: string): string {
@@ -305,12 +318,15 @@ function taskPatch(t: Task) {
     title: t.title,
     priority: t.priority,
     estimateMinutes: t.estimateMinutes,
+    progress: t.progress ?? 0,
     status: t.status,
     tag: t.tag,
     dueDate: t.dueDate,
     reminderAt: t.reminderAt,
     repeatRule: t.repeatRule,
     repeatUntilDate: t.repeatUntilDate,
+    seriesId: t.seriesId,
+    occurrenceDate: t.occurrenceDate,
     deletedAt: t.deletedAt,
     sortOrder: t.sortOrder,
   };
@@ -468,16 +484,13 @@ async function getNotificationPermission(request: boolean): Promise<Notification
 
 // --- Constants ---
 const PRESET_TAGS = ['Work', 'Personal', 'Study', 'Planning', 'Health', 'Other'];
-const STATUSES_FOR_CLIENT = new Set(['todo', 'doing', 'done', 'snoozed', 'skipped']);
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const STATUSES_FOR_CLIENT = new Set(['todo', 'done', 'skipped']);
 
 const PRIORITY_BADGE = {
   P1: 'text-rose-600 bg-rose-100',
   P2: 'text-amber-600 bg-amber-100',
   P3: 'text-emerald-600 bg-emerald-100',
 };
-const PRIORITY_LABEL = { P1: 'High Priority', P2: 'Medium Priority', P3: 'Low Priority' };
 const PRIORITY_LABEL_KEY: Record<Priority, string> = { P1: 'priority.P1', P2: 'priority.P2', P3: 'priority.P3' };
 const DOT_COLOR = { P1: 'bg-rose-500', P2: 'bg-amber-400', P3: 'bg-emerald-500' };
 const ACCENT_THEME_KEY = 'taskflow_accent_theme';
@@ -546,8 +559,6 @@ function applyAccentTheme(theme: AccentTheme): void {
 }
 
 // --- Translation-aware helpers ---
-const PRIORITY_TAGS = ['P1', 'P2', 'P3'] as const;
-
 function getGreeting(t: (key: string) => string): string {
   const h = new Date().getHours();
   if (h >= 5 && h < 12) return t('greeting.morning');
@@ -573,10 +584,10 @@ async function restoreNativeStorageWithTimeout(keys: string[], timeoutMs = 3000)
 }
 
 function normalizeCachedTask(task: Task): Task {
-  const { progress: _legacyProgress, ...rest } = task as Task & { progress?: unknown };
   return {
-    ...rest,
-    version: Number.isInteger(rest.version) ? rest.version : 1,
+    ...task,
+    progress: Number.isInteger(task.progress) ? task.progress : 0,
+    version: Number.isInteger(task.version) ? task.version : 1,
   };
 }
 
@@ -586,15 +597,20 @@ function loadTasks(userId: string): Task[] {
     if (raw) {
       const parsed = JSON.parse(raw) as unknown;
       if (Array.isArray(parsed)) return parsed.map(task => normalizeCachedTask(task as Task));
+      if (parsed && typeof parsed === 'object' && (parsed as { version?: unknown }).version === 1) {
+        const cachedTasks = (parsed as { tasks?: unknown }).tasks;
+        if (Array.isArray(cachedTasks)) return cachedTasks.map(task => normalizeCachedTask(task as Task));
+      }
     }
   } catch { /**/ }
   return [];
 }
 
 function saveTasksToCache(userId: string, tasks: Task[]) {
-  try {
-    storageSet(userStorageKey(userId, 'tasks'), JSON.stringify(tasks.map(normalizeCachedTask)));
-  } catch { /**/ }
+  storageSetDeferred(
+    userStorageKey(userId, 'tasks'),
+    () => JSON.stringify({ version: 1, tasks: tasks.map(normalizeCachedTask) }),
+  );
 }
 
 // --- Persistence helpers ---
@@ -624,8 +640,8 @@ function loadStatsFromCache(userId: string): { streak: number; completedToday: n
 
 function saveStatsToCache(userId: string, streak: number, completedToday: number, lastDate?: string | null) {
   const today = todayStr();
-  storageSet(userStorageKey(userId, 'streak'), JSON.stringify({ count: streak, lastDate: lastDate || today }));
-  storageSet(userStorageKey(userId, 'completed_today'), JSON.stringify({ date: today, count: completedToday }));
+  storageSetDeferred(userStorageKey(userId, 'streak'), () => JSON.stringify({ count: streak, lastDate: lastDate || today }));
+  storageSetDeferred(userStorageKey(userId, 'completed_today'), () => JSON.stringify({ date: today, count: completedToday }));
 }
 
 function fmtDate(y: number, m: number, d: number) {
@@ -656,6 +672,7 @@ function buildRepeatedTasks(source: Task, dueDates: string[], sortOrderStart: nu
     _clientKey: syncOperationId(),
     status: 'todo',
     dueDate,
+    occurrenceDate: source.seriesId ? dueDate : null,
     reminderAt: null,
     deletedAt: null,
     completedAt: null,
@@ -687,7 +704,6 @@ function taskExitMotion(action: ExitAction | null, shouldReduceMotion = false): 
       x: 0,
       rotate: 0,
       scale: 0.94,
-      filter: 'blur(0.5px)',
       transition: { duration: 0.32, ease: [0.16, 1, 0.3, 1] },
     };
   }
@@ -698,7 +714,6 @@ function taskExitMotion(action: ExitAction | null, shouldReduceMotion = false): 
       x: -132,
       rotate: -4,
       scale: 0.93,
-      filter: 'blur(0.5px)',
       transition: { duration: 0.34, ease: [0.2, 0.9, 0.25, 1] },
     };
   }
@@ -709,7 +724,6 @@ function taskExitMotion(action: ExitAction | null, shouldReduceMotion = false): 
       x: 72,
       rotate: 3,
       scale: 0.92,
-      filter: 'blur(0.5px)',
       transition: { duration: 0.38, ease: [0.22, 1, 0.36, 1] },
     };
   }
@@ -814,8 +828,7 @@ interface TaskCardProps {
 
 function TaskCard({ task, onAction, pendingAction = null, actionDisabled = false, onOpen }: TaskCardProps) {
   const { t, i18n } = useTranslation();
-  const [pressedAction, setPressedAction] = React.useState<ExitAction | null>(null);
-  const visualAction = pendingAction ?? pressedAction;
+  const visualAction = pendingAction;
   const dueLabel = relativeDueLabel(task.dueDate, t, i18n.language);
   const hasEstimate = Number.isInteger(task.estimateMinutes) && (task.estimateMinutes as number) > 0;
 
@@ -823,15 +836,8 @@ function TaskCard({ task, onAction, pendingAction = null, actionDisabled = false
     e.preventDefault();
     e.stopPropagation();
     if (actionDisabled) return;
-    setPressedAction(action);
     onAction(task.id, action);
   };
-
-  React.useEffect(() => {
-    if (!pressedAction) return;
-    const timer = window.setTimeout(() => setPressedAction(null), 260);
-    return () => window.clearTimeout(timer);
-  }, [pressedAction]);
 
   const actionButtonClass = (action: ExitAction, base: string) => cn(
     'relative overflow-hidden flex min-h-11 items-center justify-center gap-2 rounded-xl font-semibold transition-[background-color,opacity,transform,box-shadow] duration-150 touch-manipulation select-none',
@@ -900,18 +906,47 @@ function TaskCard({ task, onAction, pendingAction = null, actionDisabled = false
   );
 }
 
-function ReorderRow({ task, position, isFirst, isDragging, setRowRef, onHandlePointerDown, onMoveUp, onMoveDown, canMoveUp, canMoveDown }: {
+function ReorderRow({ task, position, isFirst, isDragging, onDragStart, onDragEnd, onMoveUp, onMoveDown, canMoveUp, canMoveDown }: {
   task: Task; position: number; isFirst: boolean; isDragging: boolean;
-  setRowRef: (node: HTMLDivElement | null) => void;
-  onHandlePointerDown: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onDragStart: () => void; onDragEnd: () => void;
   onMoveUp: () => void; onMoveDown: () => void; canMoveUp: boolean; canMoveDown: boolean;
 }) {
   const { t } = useTranslation();
+  const dragControls = useDragControls();
   return (
-    <motion.div ref={setRowRef} layout className={cn('select-none rounded-2xl border px-3 py-3.5', isFirst ? 'border-primary/20 bg-primary/5 shadow-sm' : 'border-border bg-card', isDragging && 'relative z-10 border-primary/40 shadow-lg shadow-black/10')} animate={{ scale: isDragging ? 1.015 : 1 }} transition={isDragging ? { type: 'tween', duration: 0.02 } : { type: 'spring', stiffness: 420, damping: 34, mass: 0.75 }}>
+    <Reorder.Item
+      value={task.id}
+      layout="position"
+      dragListener={false}
+      dragControls={dragControls}
+      dragElastic={0.04}
+      dragMomentum={false}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onPointerDownCapture={(event) => {
+        const row = event.currentTarget.getBoundingClientRect();
+        if (event.clientX > row.left + 64) return;
+        event.preventDefault();
+        event.stopPropagation();
+        dragControls.start(event);
+      }}
+      whileDrag={{ scale: 1.015 }}
+      transition={{ layout: { type: 'spring', stiffness: 420, damping: 34, mass: 0.75 } }}
+      className={cn(
+        'relative select-none rounded-2xl border px-3 py-3.5',
+        isFirst ? 'border-primary/20 bg-primary/5 shadow-sm' : 'border-border bg-card',
+        isDragging && 'z-10 border-primary/40 shadow-lg shadow-black/10',
+      )}
+    >
       <div className="flex items-start gap-3">
         <div className="flex min-w-0 flex-1 items-start gap-3">
-          <button onPointerDown={onHandlePointerDown} className="-ml-2 -mt-2 touch-none cursor-grab rounded-xl p-3 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:cursor-grabbing" aria-label={`Reorder ${task.title}`} type="button"><GripVertical className="h-5 w-5" /></button>
+          <button
+            className="-ml-2 -mt-2 touch-none cursor-grab rounded-xl p-3 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:cursor-grabbing"
+            aria-label={`Reorder ${task.title}`}
+            type="button"
+          >
+            <GripVertical className="pointer-events-none h-5 w-5" />
+          </button>
           <div className="mt-1 flex w-8 flex-col items-center gap-2"><span className="text-xs font-semibold text-muted-foreground tabular-nums">{position}</span><span className={`h-2.5 w-2.5 rounded-full ${DOT_COLOR[task.priority]}`} /></div>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2"><p className="min-w-0 flex-1 text-sm font-semibold leading-snug text-foreground">{task.title}</p>{isFirst && <span className="rounded-full bg-primary/10 px-2 py-1 text-[11px] font-semibold text-primary">{t('task.now')}</span>}</div>
@@ -923,7 +958,7 @@ function ReorderRow({ task, position, isFirst, isDragging, setRowRef, onHandlePo
           <button type="button" onClick={onMoveDown} disabled={!canMoveDown} aria-label={`Move ${task.title} down`} className="rounded-lg border border-border p-1.5 text-muted-foreground transition-colors hover:border-primary/30 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"><ChevronDown className="h-4 w-4" /></button>
         </div>
       </div>
-    </motion.div>
+    </Reorder.Item>
   );
 }
 
@@ -935,31 +970,126 @@ function ReorderSheet({ isOpen, pendingTasks, onClose, onSave }: { isOpen: boole
   const pendingTaskIdsKey = pendingTaskIds.join('\u001f');
   const order = useMemo(() => orderIds.map(id => taskById.get(id)).filter((task): task is Task => !!task), [orderIds, taskById]);
   const [draggedId, setDraggedId] = useState<string | null>(null);
-  const rowRefs = React.useRef(new Map<string, HTMLDivElement>());
+  const [reorderAnnouncement, setReorderAnnouncement] = useState('');
+  const orderIdsRef = React.useRef(orderIds);
+  const feedbackRef = React.useRef<ReturnType<typeof createReorderFeedback> | null>(null);
+  if (!feedbackRef.current) {
+    feedbackRef.current = createReorderFeedback({
+      start: hapticSelectionStart,
+      change: hapticSelectionChanged,
+      end: hapticSelectionEnd,
+    });
+  }
 
-  useEffect(() => { if (isOpen) { setOrderIds(pendingTaskIds); setDraggedId(null); } }, [isOpen, pendingTaskIdsKey]);
+  orderIdsRef.current = orderIds;
+
+  const endSelection = React.useCallback(() => feedbackRef.current?.end(), []);
+
+  useEffect(() => () => endSelection(), [endSelection]);
+
+  useEffect(() => {
+    if (isOpen) {
+      orderIdsRef.current = pendingTaskIds;
+      feedbackRef.current?.reset(pendingTaskIds);
+      setOrderIds(pendingTaskIds);
+      setDraggedId(null);
+      setReorderAnnouncement('');
+      return;
+    }
+    endSelection();
+  }, [endSelection, isOpen, pendingTaskIdsKey]);
   const hasChanges = orderIds.join('\u001f') !== pendingTaskIdsKey;
-  const setRowRef = React.useCallback((id: string, node: HTMLDivElement | null) => { if (node) rowRefs.current.set(id, node); else rowRefs.current.delete(id); }, []);
   const moveByStep = React.useCallback((id: string, direction: -1 | 1) => setOrderIds(previous => {
     const from = previous.indexOf(id); const to = from + direction;
-    return from < 0 || to < 0 || to >= previous.length ? previous : arrayMove(previous, from, to);
-  }), []);
-  const startDrag = React.useCallback((id: string, event: React.PointerEvent<HTMLButtonElement>) => {
-    event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture?.(event.pointerId); setDraggedId(id);
-    const move = (moveEvent: PointerEvent) => setOrderIds(previous => {
-      const remaining = previous.filter(item => item !== id); let target = remaining.length;
-      for (let index = 0; index < remaining.length; index += 1) {
-        const row = rowRefs.current.get(remaining[index]);
-        if (row && moveEvent.clientY < row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2) { target = index; break; }
-      }
-      const next = [...remaining]; next.splice(target, 0, id); return next;
-    });
-    const finish = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', finish); window.removeEventListener('pointercancel', finish); setDraggedId(null); };
-    window.addEventListener('pointermove', move, { passive: false }); window.addEventListener('pointerup', finish); window.addEventListener('pointercancel', finish);
-  }, []);
-  const close = () => { setOrderIds(pendingTaskIds); setDraggedId(null); onClose(); };
+    if (from < 0 || to < 0 || to >= previous.length) return previous;
+    const next = arrayMove(previous, from, to);
+    orderIdsRef.current = next;
+    hapticImpactLight();
+    setReorderAnnouncement(t('task.reorderPosition', { position: to + 1 }));
+    return next;
+  }), [t]);
+  const handleReorder = (nextOrderIds: string[]) => {
+    const transition = feedbackRef.current!.change(nextOrderIds);
+    orderIdsRef.current = nextOrderIds;
+    setOrderIds(nextOrderIds);
+    if (!transition.changed) return;
+    setReorderAnnouncement(t('task.reorderPosition', { position: transition.nextIndex + 1 }));
+  };
+  const startDrag = (id: string) => {
+    feedbackRef.current!.start(id, orderIdsRef.current);
+    setDraggedId(id);
+  };
+  const finishDrag = (id: string) => {
+    endSelection();
+    setDraggedId(current => current === id ? null : current);
+  };
+  const close = () => {
+    feedbackRef.current?.reset(pendingTaskIds);
+    orderIdsRef.current = pendingTaskIds;
+    setOrderIds(pendingTaskIds);
+    setDraggedId(null);
+    onClose();
+  };
 
-  return <AnimatePresence>{isOpen && <><motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40" onClick={close} /><motion.div initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }} transition={{ type: 'spring', stiffness: 380, damping: 38, mass: 0.9 }} className="fixed bottom-0 left-0 right-0 z-50 flex max-h-[82vh] flex-col rounded-t-3xl border-t border-border bg-card"><div className="flex justify-center pb-1 pt-3"><div className="h-1 w-10 rounded-full bg-muted-foreground/30" /></div><div className="flex items-center justify-between gap-3 border-b border-border px-5 py-3"><div><h2 className="text-base font-bold">{t('task.reorderTasks')}</h2><p className="mt-0.5 text-xs text-muted-foreground">{t('task.reorderHint')}</p></div><div className="flex shrink-0 gap-2"><button onClick={close} className="rounded-xl border border-border px-3 py-2 text-sm font-semibold text-muted-foreground">{t('task.cancel')}</button><button onClick={() => { if (hasChanges) onSave(order); onClose(); }} className="flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"><Check className="h-4 w-4" />{t('task.done')}</button></div></div><div className="flex-1 overflow-y-auto px-4 py-3"><div className="space-y-2">{order.map((task, index) => <ReorderRow key={task.id} task={task} position={index + 1} isFirst={index === 0} isDragging={draggedId === task.id} setRowRef={node => setRowRef(task.id, node)} onHandlePointerDown={event => startDrag(task.id, event)} onMoveUp={() => moveByStep(task.id, -1)} onMoveDown={() => moveByStep(task.id, 1)} canMoveUp={index > 0} canMoveDown={index < order.length - 1} />)}</div></div></motion.div></>}</AnimatePresence>;
+  return createPortal(
+    <AnimatePresence>
+      {isOpen && (
+        <>
+          <motion.div
+            key="reorder-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-40 bg-black/40"
+            onClick={close}
+          />
+          <motion.div
+            key="reorder-sheet"
+            layoutRoot
+            initial={{ y: '100%' }}
+            animate={{ y: 0 }}
+            exit={{ y: '100%' }}
+            transition={{ type: 'spring', stiffness: 380, damping: 38, mass: 0.9 }}
+            className="fixed inset-x-0 bottom-0 z-50 flex max-h-[82dvh] flex-col rounded-t-3xl border-t border-border bg-card pb-[env(safe-area-inset-bottom)]"
+          >
+            <div className="flex justify-center pb-1 pt-3"><div className="h-1 w-10 rounded-full bg-muted-foreground/30" /></div>
+            <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-3">
+              <div><h2 className="text-base font-bold">{t('task.reorderTasks')}</h2><p className="mt-0.5 text-xs text-muted-foreground">{t('task.reorderHint')}</p></div>
+              <div className="flex shrink-0 gap-2">
+                <button onClick={close} className="rounded-xl border border-border px-3 py-2 text-sm font-semibold text-muted-foreground">{t('task.cancel')}</button>
+                <button onClick={() => { endSelection(); if (hasChanges) { onSave(order); hapticImpactLight(); } onClose(); }} className="flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"><Check className="h-4 w-4" />{t('task.done')}</button>
+              </div>
+            </div>
+            <p className="sr-only" aria-live="polite" aria-atomic="true">{reorderAnnouncement}</p>
+            <Reorder.Group
+              axis="y"
+              values={orderIds}
+              onReorder={handleReorder}
+              layoutScroll
+              className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3"
+            >
+              {order.map((task, index) => (
+                <ReorderRow
+                  key={task.id}
+                  task={task}
+                  position={index + 1}
+                  isFirst={index === 0}
+                  isDragging={draggedId === task.id}
+                  onDragStart={() => startDrag(task.id)}
+                  onDragEnd={() => finishDrag(task.id)}
+                  onMoveUp={() => moveByStep(task.id, -1)}
+                  onMoveDown={() => moveByStep(task.id, 1)}
+                  canMoveUp={index > 0}
+                  canMoveDown={index < order.length - 1}
+                />
+              ))}
+            </Reorder.Group>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>,
+    document.body,
+  );
 }
 
 function QuickCreateDialog({
@@ -973,6 +1103,7 @@ function QuickCreateDialog({
   onFormChange,
   onReminderChange,
   onShowReminderChange,
+  submitting,
 }: {
   open: boolean;
   form: AddTaskState;
@@ -984,12 +1115,13 @@ function QuickCreateDialog({
   onFormChange: (patch: Partial<AddTaskState>) => void;
   onReminderChange: (value: string) => void;
   onShowReminderChange: (show: boolean) => void;
+  submitting: boolean;
 }) {
   const { t } = useTranslation();
   return (
     <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <Dialog.Content className="fixed inset-x-0 bottom-0 z-50 mx-auto w-full max-w-md rounded-t-2xl border-x border-t border-border bg-background shadow-2xl focus:outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom">
           <div className="flex items-start justify-between gap-4 px-5 pb-3 pt-5">
             <div className="min-w-0">
@@ -1014,7 +1146,8 @@ function QuickCreateDialog({
                 aria-invalid={!!errors.title}
                 className={cn('h-14 w-full border-0 border-b-2 bg-transparent px-0 text-xl font-semibold outline-none placeholder:text-muted-foreground/70 focus:border-primary', errors.title ? 'border-destructive' : 'border-border')}
                 value={form.title}
-                onChange={(event) => onFormChange({ title: event.target.value })}
+                onInput={(event) => onFormChange({ title: event.currentTarget.value })}
+                onCompositionEnd={(event) => onFormChange({ title: event.currentTarget.value })}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
                     event.preventDefault();
@@ -1040,20 +1173,28 @@ function QuickCreateDialog({
                 </button>
               ))}
 
-              <label className="relative flex min-h-11 shrink-0 items-center gap-1.5 rounded-full border border-border bg-muted/60 px-3 text-sm font-semibold text-muted-foreground focus-within:border-primary/40 focus-within:text-primary">
-                <Flag className="h-4 w-4" />
-                <span className="sr-only">{t('task.priority')}</span>
-                <select
-                  name="priority"
-                  aria-label={t('task.priority')}
-                  value={form.priority}
-                  onChange={(event) => onFormChange({ priority: event.target.value as Priority })}
-                  className="appearance-none bg-transparent pr-4 font-semibold outline-none"
-                >
-                  {(['P1', 'P2', 'P3'] as Priority[]).map(priority => <option key={priority} value={priority}>{t(PRIORITY_LABEL_KEY[priority])}</option>)}
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-2 h-3.5 w-3.5" />
-              </label>
+              <fieldset className="flex min-h-11 shrink-0 items-center gap-1 rounded-full border border-border bg-muted/60 p-1" aria-label={t('task.priority')}>
+                <legend className="sr-only">{t('task.priority')}</legend>
+                <Flag className="ml-2 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                {(['P1', 'P2', 'P3'] as Priority[]).map(priority => (
+                  <button
+                    key={priority}
+                    type="button"
+                    aria-pressed={form.priority === priority}
+                    aria-label={t(PRIORITY_LABEL_KEY[priority])}
+                    onPointerDown={(event) => event.preventDefault()}
+                    onClick={() => onFormChange({ priority })}
+                    className={cn(
+                      'flex min-h-9 min-w-9 items-center justify-center rounded-full px-2 text-xs font-bold transition-colors',
+                      form.priority === priority
+                        ? 'bg-card text-foreground shadow-sm ring-1 ring-border'
+                        : 'text-muted-foreground hover:text-foreground',
+                    )}
+                  >
+                    {priority}
+                  </button>
+                ))}
+              </fieldset>
 
               <button
                 type="button"
@@ -1087,10 +1228,11 @@ function QuickCreateDialog({
 
             <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-2">
               <input type="hidden" name="dueDate" value={form.dueDate} />
+              <input type="hidden" name="priority" value={form.priority} />
               <button type="button" onClick={onOpenDetails} className="flex min-h-12 items-center justify-center gap-2 rounded-lg px-3 text-sm font-semibold text-muted-foreground hover:bg-muted hover:text-foreground">
                 <SlidersHorizontal className="h-4 w-4" />{t('task.completeDetails')}
               </button>
-              <button type="submit" className="min-h-12 rounded-lg bg-primary px-5 text-base font-bold text-primary-foreground shadow-sm hover:bg-primary/90">
+              <button type="submit" disabled={submitting} className="min-h-12 rounded-lg bg-primary px-5 text-base font-bold text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-wait disabled:opacity-60">
                 {t('task.addTask')}
               </button>
             </div>
@@ -1112,6 +1254,7 @@ function TaskDetailsSheet({
   onSubmit,
   onFormChange,
   onReminderChange,
+  submitting,
 }: {
   open: boolean;
   form: AddTaskState;
@@ -1123,12 +1266,13 @@ function TaskDetailsSheet({
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
   onFormChange: (patch: Partial<AddTaskState>) => void;
   onReminderChange: (value: string) => void;
+  submitting: boolean;
 }) {
   const { t } = useTranslation();
   return (
     <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <Dialog.Content className="fixed inset-x-0 bottom-0 z-50 mx-auto flex max-h-[min(88dvh,760px)] w-full max-w-md flex-col rounded-t-2xl border-x border-t border-border bg-background shadow-2xl focus:outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom">
           <div className="flex shrink-0 items-start justify-between gap-4 border-b border-border px-5 pb-4 pt-5">
             <div className="min-w-0">
@@ -1141,10 +1285,11 @@ function TaskDetailsSheet({
           </div>
 
           <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col">
+            <input type="hidden" name="priority" value={form.priority} />
             <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-5">
               <div className="space-y-2">
                 <label htmlFor="details-title" className="text-sm font-semibold">{t('task.taskName')}</label>
-                <input id="details-title" name="title" type="text" value={form.title} aria-invalid={!!errors.title} onChange={(event) => onFormChange({ title: event.target.value })} className={cn('h-11 w-full rounded-lg border bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring', errors.title ? 'border-destructive' : 'border-input')} />
+                <input id="details-title" name="title" type="text" value={form.title} aria-invalid={!!errors.title} onInput={(event) => onFormChange({ title: event.currentTarget.value })} onCompositionEnd={(event) => onFormChange({ title: event.currentTarget.value })} className={cn('h-11 w-full rounded-lg border bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring', errors.title ? 'border-destructive' : 'border-input')} />
                 {errors.title && <p className="text-xs font-medium text-destructive">{errors.title}</p>}
               </div>
 
@@ -1154,12 +1299,29 @@ function TaskDetailsSheet({
                   <input id="details-due-date" name="dueDate" type="date" value={form.dueDate} aria-invalid={!!errors.dueDate} onChange={(event) => onFormChange({ dueDate: event.target.value })} className={cn('h-11 w-full appearance-none rounded-lg border bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring', errors.dueDate ? 'border-destructive' : 'border-input')} />
                   {errors.dueDate && <p className="text-xs font-medium text-destructive">{errors.dueDate}</p>}
                 </div>
-                <div className="space-y-2">
-                  <label htmlFor="details-priority" className="text-sm font-semibold">{t('task.priority')}</label>
-                  <select id="details-priority" name="priority" value={form.priority} onChange={(event) => onFormChange({ priority: event.target.value as Priority })} className="h-11 w-full rounded-lg border border-input bg-input-background px-3 text-base outline-none focus:ring-2 focus:ring-ring">
-                    {(['P1', 'P2', 'P3'] as Priority[]).map(priority => <option key={priority} value={priority}>{t(PRIORITY_LABEL_KEY[priority])}</option>)}
-                  </select>
-                </div>
+                <fieldset className="space-y-2">
+                  <legend className="text-sm font-semibold">{t('task.priority')}</legend>
+                  <div className="grid h-11 grid-cols-3 rounded-lg border border-input bg-input-background p-1" role="radiogroup" aria-label={t('task.priority')}>
+                    {(['P1', 'P2', 'P3'] as Priority[]).map(priority => (
+                      <button
+                        key={priority}
+                        type="button"
+                        role="radio"
+                        aria-checked={form.priority === priority}
+                        onPointerDown={(event) => event.preventDefault()}
+                        onClick={() => onFormChange({ priority })}
+                        className={cn(
+                          'rounded-md text-sm font-bold transition-colors',
+                          form.priority === priority
+                            ? 'bg-card text-foreground shadow-sm ring-1 ring-border'
+                            : 'text-muted-foreground hover:text-foreground',
+                        )}
+                      >
+                        {priority}
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -1211,7 +1373,7 @@ function TaskDetailsSheet({
 
             <div className="grid shrink-0 grid-cols-[auto_minmax(0,1fr)] gap-2 border-t border-border bg-background px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-3">
               <button type="button" onClick={onClose} className="min-h-12 rounded-lg px-4 text-sm font-semibold text-muted-foreground hover:bg-muted">{t('task.cancel')}</button>
-              <button type="submit" className="min-h-12 rounded-lg bg-primary px-5 text-base font-bold text-primary-foreground hover:bg-primary/90">{editing ? t('task.saveChanges') : repeatMode ? t('task.addRepeatedTask') : t('task.addTask')}</button>
+              <button type="submit" disabled={submitting} className="min-h-12 rounded-lg bg-primary px-5 text-base font-bold text-primary-foreground hover:bg-primary/90 disabled:cursor-wait disabled:opacity-60">{editing ? t('task.saveChanges') : repeatMode ? t('task.addRepeatedTask') : t('task.addTask')}</button>
             </div>
           </form>
         </Dialog.Content>
@@ -1231,7 +1393,7 @@ function TaskDetailModal({ task, onClose, onAction, actionDisabled = false, onMa
   return (
     <Dialog.Root open={!!task} onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 backdrop-blur-md z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <Dialog.Content className="fixed left-[50%] top-[50%] z-50 w-full max-w-[360px] h-[520px] translate-x-[-50%] translate-y-[-50%] duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 rounded-3xl focus:outline-none shadow-2xl">
           <Dialog.Title className="sr-only">{task?.title}</Dialog.Title>
           <Dialog.Description className="sr-only">Task actions</Dialog.Description>
@@ -1273,7 +1435,7 @@ function TaskManageDialog({ task, onClose, onEdit, onDelete }: {
   return (
     <Dialog.Root open={!!task} onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 backdrop-blur-md z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <Dialog.Content className="fixed left-[50%] top-[50%] z-50 w-[calc(100%-2rem)] max-w-sm translate-x-[-50%] translate-y-[-50%] rounded-3xl border border-border bg-card p-5 shadow-2xl focus:outline-none">
           <Dialog.Title className="text-base font-bold">{task?.title}</Dialog.Title>
           <Dialog.Description className="mt-1 text-sm text-muted-foreground">{t('task.manageTaskDesc')}</Dialog.Description>
@@ -1314,7 +1476,7 @@ function RepeatTaskModal({ task, onClose, onRepeat }: {
   return (
     <Dialog.Root open={!!task} onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/20 backdrop-blur-md z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <Dialog.Content className="fixed left-[50%] top-[50%] z-50 w-full max-w-sm translate-x-[-50%] translate-y-[-50%] border border-border bg-card rounded-2xl p-6 shadow-xl duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 focus:outline-none">
           <Dialog.Title className="text-base font-bold mb-1">{t('task.completedTask')}</Dialog.Title>
           <Dialog.Description className="text-sm text-muted-foreground mb-4">{t('task.donePrompt')}</Dialog.Description>
@@ -1415,7 +1577,7 @@ function CalendarView({ tasks, onAction, onAddTask, onRepeatTask, onManageTask, 
     <>
       {!nativeControls && (
         <>
-          <TaskDetailModal task={detailTask} onClose={() => setDetailTaskId(null)} onAction={onAction} actionDisabled={detailTask ? actingTaskIds?.has(detailTask.id) : false} onManage={onManageTask} />
+          <TaskDetailModal task={detailTask} onClose={() => setDetailTaskId(null)} onAction={onAction} actionDisabled={(actingTaskIds?.size ?? 0) > 0} onManage={onManageTask} />
           <RepeatTaskModal task={repeatTask} onClose={() => setRepeatTask(null)} onRepeat={onRepeatTask} />
         </>
       )}
@@ -1889,7 +2051,7 @@ function AccountPage({ email, emailVerified, notificationPermission, accentTheme
   const { t, i18n } = useTranslation();
   const displayName = email.split('@')[0];
   const lastSyncLabel = lastSync ? new Date(lastSync).toLocaleString(i18n.language === 'zh' ? 'zh-CN' : 'en-US') : t('account.neverSynced');
-  const syncNeedsAttention = syncStatus === 'conflict' || syncStatus === 'error';
+  const syncNeedsAttention = ['conflict', 'error', 'network', 'timeout', 'serviceUnavailable', 'incompatible', 'rateLimited'].includes(syncStatus);
   const syncSummaryLabel = syncStatus === 'idle'
     ? t('account.syncHealthy')
     : syncNeedsAttention
@@ -2113,7 +2275,7 @@ function DeletedTasksDialog({ open, tasks, loading, onClose, onRestore, onPerman
   return (
     <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-[60] backdrop-blur-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Overlay className="fixed inset-0 z-[60] bg-black/30 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <Dialog.Content className="fixed left-[50%] top-[50%] z-[61] flex max-h-[78vh] w-[calc(100%-2rem)] max-w-md translate-x-[-50%] translate-y-[-50%] flex-col rounded-3xl border border-border bg-card p-5 shadow-2xl focus:outline-none">
           <div className="mb-4 flex items-start justify-between gap-4">
             <div>
@@ -2187,7 +2349,7 @@ function PrivacyPolicyDialog({ open, onClose }: { open: boolean; onClose: () => 
   return (
     <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-[60] backdrop-blur-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Overlay className="fixed inset-0 z-[60] bg-black/30 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <Dialog.Content className="fixed left-[50%] top-[50%] z-[61] max-h-[78vh] w-[calc(100%-2rem)] max-w-md translate-x-[-50%] translate-y-[-50%] overflow-y-auto rounded-3xl border border-border bg-card p-5 shadow-2xl focus:outline-none">
           <div className="mb-4 flex items-start justify-between gap-4">
             <div>
@@ -2222,14 +2384,18 @@ function AppShell({
   onAccountDeleted,
   isLoggingOut,
   cloudSyncEnabled,
+  connectionIssue,
+  onReconnectCloud,
 }: {
   user: AuthUser;
   accentTheme: AccentTheme;
   onAccentThemeChange: (theme: AccentTheme) => void;
   onLogout: () => void;
-  onAccountDeleted: () => void;
+  onAccountDeleted: () => Promise<void>;
   isLoggingOut: boolean;
   cloudSyncEnabled: boolean;
+  connectionIssue: CloudConnectionIssue;
+  onReconnectCloud: () => Promise<boolean>;
 }) {
   const { t, i18n } = useTranslation();
   const shouldReduceMotion = useReducedMotion() ?? false;
@@ -2248,11 +2414,15 @@ function AppShell({
   syncMetaRef.current = syncMeta;
   const hasInteractedRef = React.useRef(false);
   const actionLocksRef = React.useRef(new Set<string>());
+  const commitTaskActionRef = React.useRef<(action: TaskActionState) => void>(() => {});
   const syncInFlightRef = React.useRef(false);
   const syncRequestedRef = React.useRef(false);
+  const syncFailureCountRef = React.useRef(0);
+  const syncRetryTimerRef = React.useRef<number | null>(null);
   const syncNoticeKeyRef = React.useRef('');
   const scheduledNotificationsRef = React.useRef(new Map<number, string>());
   const notificationErrorShownRef = React.useRef(false);
+  const [nativeCacheReady, setNativeCacheReady] = useState(() => !Capacitor.isNativePlatform());
   const [tasksLoading, setTasksLoading] = useState(true);
   const [exitAction, setExitAction] = useState<TaskActionState | null>(null);
   const [actingTaskIds, setActingTaskIds] = useState<Set<string>>(() => new Set());
@@ -2273,6 +2443,9 @@ function AppShell({
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermissionState>('unsupported');
   const [form, setForm] = useState<AddTaskState>(() => defaultAddTaskForm());
+  const formRef = React.useRef(form);
+  const [isTaskSubmitting, setIsTaskSubmitting] = useState(false);
+  const taskSubmittingRef = React.useRef(false);
   const [formErrors, setFormErrors] = useState<AddTaskErrors>({});
   const [deletedTasksOpen, setDeletedTasksOpen] = useState(false);
   const [deletedTasks, setDeletedTasks] = useState<Task[]>([]);
@@ -2305,12 +2478,15 @@ function AppShell({
     title: t.title,
     priority: t.priority as Priority,
     estimateMinutes: t.estimateMinutes,
+    progress: t.progress ?? 0,
     status: t.status as TaskStatus,
     tag: t.tag ?? undefined,
     dueDate: t.dueDate,
     reminderAt: t.reminderAt,
     repeatRule: (t.repeatRule as Task['repeatRule']) ?? 'none',
     repeatUntilDate: t.repeatUntilDate,
+    seriesId: t.seriesId ?? null,
+    occurrenceDate: t.occurrenceDate ?? null,
     completedAt: t.completedAt,
     deletedAt: t.deletedAt,
     sortOrder: t.sortOrder,
@@ -2351,22 +2527,35 @@ function AppShell({
     });
   }, [user.id]);
 
-  const queueOperation = React.useCallback((operation: PendingSyncOperationDTO) => {
-    const baseTask = operation.taskId ? tasksRef.current.find(task => task.id === operation.taskId) : null;
-    const pending: PendingOperation = {
-      ...operation,
-      baseTaskSnapshot: baseTask ? taskPatch(baseTask) : undefined,
-      createdAt: new Date().toISOString(),
-      retryCount: 0,
-      status: 'pending',
-    };
-    setPendingOperationsAndCache(prev => [...prev.filter(item => item.operationId !== pending.operationId), pending]);
-    return pending.operationId;
+  const queueOperations = React.useCallback((operations: PendingSyncOperationDTO[]) => {
+    if (operations.length === 0) return [];
+    const createdAt = new Date().toISOString();
+    const pending = operations.map(operation => {
+      const baseTask = operation.taskId ? tasksRef.current.find(task => task.id === operation.taskId) : null;
+      return {
+        ...operation,
+        baseTaskSnapshot: baseTask ? taskPatch(baseTask) : undefined,
+        createdAt,
+        retryCount: 0,
+        status: 'pending' as const,
+      };
+    });
+    const operationIds = new Set(pending.map(operation => operation.operationId));
+    setPendingOperationsAndCache(prev => [
+      ...prev.filter(operation => !operationIds.has(operation.operationId)),
+      ...pending,
+    ]);
+    return pending.map(operation => operation.operationId);
   }, [setPendingOperationsAndCache]);
+
+  const queueOperation = React.useCallback((operation: PendingSyncOperationDTO) => {
+    queueOperations([operation]);
+    return operation.operationId;
+  }, [queueOperations]);
 
   const updateSyncStatusFromTasks = React.useCallback((nextTasks: Task[]) => {
     if (!cloudSyncEnabled) {
-      setSyncStatus('idle');
+      setSyncStatus('offline');
       return;
     }
     if (nextTasks.some(task => task._conflict)) {
@@ -2436,15 +2625,16 @@ function AppShell({
     return () => { cancelled = true; };
   }, [i18n.language, notificationPermission, tasks, t]);
 
-  // On mount: pull all tasks from cloud (cloud-primary), fall back to cache
+  // Pull from cloud only after the native mirror has restored the local queue/cursor.
   useEffect(() => {
+    if (!nativeCacheReady) return;
     let cancelled = false;
     async function init() {
       if (!cloudSyncEnabled) {
         const cached = loadTasks(user.id);
         setTasksAndCache(cached.length > 0 ? cached : []);
         setTasksLoading(false);
-        setSyncStatus('idle');
+        setSyncStatus('offline');
         return;
       }
       let serverReachable = false;
@@ -2452,8 +2642,20 @@ function AppShell({
         const remote = await apiSyncBootstrap();
         if (!cancelled) {
           serverReachable = true;
-          const remoteTasks = remote.tasks.map(toTask);
-          setTasksAndCache(remoteTasks);
+          const rebuilt = new Map(remote.tasks.map(task => [task.id, toTask(task)]));
+          const pendingTaskIds = new Set(pendingOperationsRef.current.flatMap(operation =>
+            [operation.taskId, operation.clientTaskId].filter((id): id is string => !!id)
+          ));
+          for (const localTask of tasksRef.current) {
+            if (pendingTaskIds.has(localTask.id)) rebuilt.set(localTask.id, localTask);
+          }
+          const mergedTasks = pendingOperationsRef.current.reduce(
+            (current, operation) => hasOrderPayload(operation.payload)
+              ? applyTodoOrder(current, operation.payload.order)
+              : current,
+            [...rebuilt.values()].sort((a, b) => a.sortOrder - b.sortOrder),
+          );
+          setTasksAndCache(mergedTasks);
           setDeletedTasks(remote.deletedTasks.map(toTask));
           setSyncMetaAndCache({
             syncCursor: remote.currentCursor,
@@ -2493,8 +2695,7 @@ function AppShell({
         // Background: sync with server (only populate cache, don't overwrite state)
         if (serverReachable) {
           apiGetUserStats().then(stats => {
-            if (!hasInteractedRef.current && cached.streak === 0) {
-              // First-ever login — sync initial streak from server
+            if (!hasInteractedRef.current) {
               setStreak(stats.streak);
               setCompletedToday(stats.todayCount);
             }
@@ -2509,7 +2710,7 @@ function AppShell({
     init();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cloudSyncEnabled, setSyncMetaAndCache, setTasksAndCache, toTask, user.id]);
+  }, [cloudSyncEnabled, nativeCacheReady, setSyncMetaAndCache, setTasksAndCache, toTask, user.id]);
 
   // On native cold-start, restore data from Capacitor Preferences if localStorage was cleared
   useEffect(() => {
@@ -2517,15 +2718,28 @@ function AppShell({
       userStorageKey(user.id, 'tasks'),
       userStorageKey(user.id, 'streak'),
       userStorageKey(user.id, 'completed_today'),
+      userStorageKey(user.id, 'sync_meta'),
+      userStorageKey(user.id, 'pending_operations'),
     ];
+    let cancelled = false;
+    setNativeCacheReady(!Capacitor.isNativePlatform());
     restoreFromNativeStorage(STORAGE_KEYS).then(() => {
-      // Re-read from localStorage into state; if API already loaded, don't overwrite
-      setTasksAndCache(prev => prev.length === 0 ? loadTasks(user.id) : prev);
+      if (cancelled) return;
+      const restoredTasks = loadTasks(user.id);
+      const restoredOperations = loadPendingOperations(user.id);
+      const restoredMeta = loadSyncMeta(user.id);
+      tasksRef.current = restoredTasks;
+      pendingOperationsRef.current = restoredOperations;
+      syncMetaRef.current = restoredMeta;
+      setTasks(restoredTasks);
+      setPendingOperations(restoredOperations);
+      setSyncMeta(restoredMeta);
       const cached = loadStatsFromCache(user.id);
-      setStreak(prev => prev === 0 ? cached.streak : prev);
-      setCompletedToday(prev => prev === 0 ? cached.completedToday : prev);
+      setStreak(cached.streak);
+      setCompletedToday(cached.completedToday);
+      setNativeCacheReady(true);
     });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => { cancelled = true; };
   }, [user.id]);
 
   useEffect(() => {
@@ -2541,7 +2755,7 @@ function AppShell({
   // Cache tasks to localStorage whenever they change
   useEffect(() => {
     if (!cloudSyncEnabled) {
-      setSyncStatus('idle');
+      setSyncStatus('offline');
       return;
     }
     if (pendingOperations.some(operation => operation.status === 'conflict')) setSyncStatus('conflict');
@@ -2565,8 +2779,7 @@ function AppShell({
 
   const applyRemoteChange = React.useCallback((currentTasks: Task[], change: SyncChangeDTO): Task[] => {
     if (change.type === 'reorder' && change.snapshot && 'order' in change.snapshot && Array.isArray(change.snapshot.order)) {
-      const orderMap = new Map(change.snapshot.order.map(item => [item.id, item.sortOrder]));
-      return currentTasks.map(task => orderMap.has(task.id) ? { ...task, sortOrder: orderMap.get(task.id)! } : task);
+      return applyTodoOrder(currentTasks, change.snapshot.order);
     }
     if (change.type === 'permanent-delete') {
       const taskId = change.taskId || change.tombstone?.taskId;
@@ -2580,8 +2793,9 @@ function AppShell({
   }, [toTask]);
 
   const runSync = React.useCallback(async () => {
+    if (!nativeCacheReady) return;
     if (!cloudSyncEnabled) {
-      setSyncStatus('idle');
+      setSyncStatus('offline');
       return;
     }
     if (syncInFlightRef.current) {
@@ -2598,7 +2812,12 @@ function AppShell({
     let attemptedOperationIds = new Set<string>();
     try {
       const pending = pendingOperationsRef.current.filter(operation => operation.status === 'pending');
-      const readyPending = pending.filter(isOperationReady);
+      const { batch: readyPending, hasMore: hasMoreReadyPending } = takeSyncBatch(
+        pending,
+        isOperationReady,
+        50,
+        operation => operation.taskId ? `task:${operation.taskId}` : operation.type === 'reorder' ? 'task-order' : null,
+      );
       if (pending.length > 0 && readyPending.length === 0) {
         console.warn('TaskFlow sync queue has pending operations waiting on unresolved local ids', pending);
         setSyncStatus('error');
@@ -2611,6 +2830,8 @@ function AppShell({
         const conflictById = new Map(response.conflicts.map(item => [item.operationId, item]));
         const rejectedIds = new Set(response.rejected.map(item => item.operationId).filter((id): id is string => !!id));
         const idReplacements = new Map<string, string>();
+        const taskVersions = new Map<string, number>();
+        let acceptedOrderVersion: number | null = null;
         let autoMergedConflict = false;
 
         for (const accepted of response.accepted) {
@@ -2619,6 +2840,8 @@ function AppShell({
             if (accepted.clientTaskId && accepted.clientTaskId !== savedTask.id) {
               idReplacements.set(accepted.clientTaskId, savedTask.id);
             }
+            taskVersions.set(savedTask.id, accepted.task.version);
+            if (accepted.clientTaskId) taskVersions.set(accepted.clientTaskId, accepted.task.version);
             setTasksAndCache(current => current.map(task =>
               task.id === savedTask.id || (accepted.clientTaskId && task.id === accepted.clientTaskId)
                 ? { ...task, ...savedTask, _dirty: false, _syncState: undefined, _operationId: undefined, _conflict: false }
@@ -2626,6 +2849,7 @@ function AppShell({
             ));
           }
           if (accepted.order) {
+            acceptedOrderVersion = accepted.order.taskOrderVersion;
             setSyncMetaAndCache(current => ({ ...current, taskOrderVersion: accepted.order!.taskOrderVersion }));
           }
           if (accepted.tombstone && typeof accepted.tombstone === 'object' && 'taskId' in accepted.tombstone) {
@@ -2634,9 +2858,30 @@ function AppShell({
           }
         }
 
+        if (response.userStats) {
+          saveStatsToCache(
+            user.id,
+            response.userStats.streak,
+            response.userStats.todayCount,
+            response.userStats.streakDate,
+          );
+          setStreak(response.userStats.streak);
+          setCompletedToday(response.userStats.todayCount);
+        }
+
         setPendingOperationsAndCache(current => current
           .filter(operation => !acceptedIds.has(operation.operationId))
           .map(operation => idReplacements.size > 0 ? remapOperationIds(operation, idReplacements) : operation)
+          .map(operation => {
+            const nextVersion = operation.taskId ? taskVersions.get(operation.taskId) : undefined;
+            if (nextVersion !== undefined && operation.baseVersion !== undefined) {
+              return { ...operation, baseVersion: nextVersion };
+            }
+            if (operation.type === 'reorder' && acceptedOrderVersion !== null) {
+              return { ...operation, baseOrderVersion: acceptedOrderVersion };
+            }
+            return operation;
+          })
           .map(operation => {
             const conflict = conflictById.get(operation.operationId);
             if (!conflict) return operation;
@@ -2667,6 +2912,7 @@ function AppShell({
               serverTask: conflict.serverTask,
               serverVersion: conflict.serverVersion ?? conflict.serverTask?.version,
               serverOrderVersion: conflict.serverOrderVersion,
+              serverOrder: conflict.serverOrder,
               clientPayload: clientOperation.payload ?? operation.payload,
               conflictedFields,
               detectedAt: new Date().toISOString(),
@@ -2680,6 +2926,9 @@ function AppShell({
           syncRequestedRef.current = true;
         }
         if (autoMergedConflict) {
+          syncRequestedRef.current = true;
+        }
+        if (hasMoreReadyPending) {
           syncRequestedRef.current = true;
         }
       }
@@ -2704,7 +2953,13 @@ function AppShell({
           for (const localTask of tasksRef.current) {
             if (pendingTaskIds.has(localTask.id)) rebuilt.set(localTask.id, localTask);
           }
-          setTasksAndCache([...rebuilt.values()].sort((a, b) => a.sortOrder - b.sortOrder));
+          const mergedTasks = pendingOperationsRef.current.reduce(
+            (current, operation) => hasOrderPayload(operation.payload)
+              ? applyTodoOrder(current, operation.payload.order)
+              : current,
+            [...rebuilt.values()].sort((a, b) => a.sortOrder - b.sortOrder),
+          );
+          setTasksAndCache(mergedTasks);
           setDeletedTasks(remote.deletedTasks.map(toTask));
           setSyncMetaAndCache(current => ({ ...current, taskOrderVersion: remote.taskOrderVersion }));
           pulled = {
@@ -2723,12 +2978,19 @@ function AppShell({
         lastServerTime = pulled.serverTime;
       }
       setSyncMetaAndCache(current => ({ ...current, syncCursor: cursor, lastSuccessfulSyncAt: lastServerTime }));
+      syncFailureCountRef.current = 0;
+      if (syncRetryTimerRef.current !== null) {
+        window.clearTimeout(syncRetryTimerRef.current);
+        syncRetryTimerRef.current = null;
+      }
       const nextPending = pendingOperationsRef.current;
       const hasConflict = nextPending.some(operation => operation.status === 'conflict');
       const hasFailed = nextPending.some(operation => operation.status === 'failed');
       const hasPending = nextPending.some(operation => operation.status === 'pending');
       setSyncStatus(hasConflict ? 'conflict' : hasFailed ? 'error' : hasPending ? 'pending' : 'idle');
     } catch (error) {
+      const errorKind = classifySyncError(error);
+      syncFailureCountRef.current += 1;
       console.error('TaskFlow sync failed', {
         error,
         attemptedOperationIds: Array.from(attemptedOperationIds),
@@ -2738,9 +3000,21 @@ function AppShell({
       if (attemptedOperationIds.size > 0) {
         setPendingOperationsAndCache(current => current.map(operation =>
           attemptedOperationIds.has(operation.operationId)
-            ? { ...operation, retryCount: operation.retryCount + 1 }
+            ? {
+                ...operation,
+                retryCount: operation.retryCount + 1,
+                status: errorKind === 'invalid' || errorKind === 'missing' ? 'failed' as const : operation.status,
+              }
             : operation
         ));
+      }
+      const refreshUnavailable = error instanceof ApiError && error.code === 'AUTH_REFRESH_UNAVAILABLE';
+      if (errorKind === 'retryable' && !refreshUnavailable && navigator.onLine && syncRetryTimerRef.current === null) {
+        const delay = syncRetryDelay(syncFailureCountRef.current);
+        syncRetryTimerRef.current = window.setTimeout(() => {
+          syncRetryTimerRef.current = null;
+          void runSync();
+        }, delay);
       }
       void error;
     } finally {
@@ -2750,9 +3024,13 @@ function AppShell({
         window.setTimeout(() => void runSync(), 0);
       }
     }
-  }, [applyRemoteChange, cloudSyncEnabled, setPendingOperationsAndCache, setSyncMetaAndCache, setTasksAndCache, toTask, user.id]);
+  }, [applyRemoteChange, cloudSyncEnabled, nativeCacheReady, setPendingOperationsAndCache, setSyncMetaAndCache, setTasksAndCache, toTask, user.id]);
 
   const retryDirtyTasks = runSync;
+
+  useEffect(() => () => {
+    if (syncRetryTimerRef.current !== null) window.clearTimeout(syncRetryTimerRef.current);
+  }, []);
   const retryAllSyncOperations = React.useCallback(() => {
     const failedOperations = pendingOperationsRef.current.filter(operation => operation.status === 'failed');
     if (failedOperations.length > 0) {
@@ -2769,17 +3047,25 @@ function AppShell({
   }, [runSync, user.id]);
 
   useEffect(() => {
-    retryDirtyTasks();
-    const handleOnline = () => retryDirtyTasks();
+    const reconnectOrSync = () => {
+      if (cloudSyncEnabled) {
+        void retryDirtyTasks();
+        return;
+      }
+      setSyncStatus('offline');
+      void onReconnectCloud();
+    };
+    reconnectOrSync();
+    const handleOnline = () => reconnectOrSync();
     const handleOffline = () => {
       if (!cloudSyncEnabled) {
-        setSyncStatus('idle');
+        setSyncStatus('offline');
         return;
       }
       if (pendingOperationsRef.current.some(operation => operation.status === 'pending')) setSyncStatus('offline');
       else setSyncStatus('idle');
     };
-    const handleFocus = () => retryDirtyTasks();
+    const handleFocus = () => reconnectOrSync();
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     window.addEventListener('focus', handleFocus);
@@ -2788,22 +3074,26 @@ function AppShell({
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('focus', handleFocus);
     };
-  }, [cloudSyncEnabled, retryDirtyTasks, user.id]);
+  }, [cloudSyncEnabled, onReconnectCloud, retryDirtyTasks, user.id]);
 
   const activeTasks = useMemo(() => tasks.filter(t => !t.deletedAt), [tasks]);
   const pendingTasks = useMemo(() => activeTasks.filter(t => t.status === 'todo'), [activeTasks]);
+  const visiblePendingTasks = useMemo(
+    () => exitAction ? pendingTasks.filter(task => task.id !== exitAction.taskId) : pendingTasks,
+    [exitAction, pendingTasks],
+  );
   const pendingSyncCount = useMemo(() => pendingOperations.length, [pendingOperations]);
   const conflictOperations = useMemo(() => pendingOperations.filter(operation => operation.status === 'conflict'), [pendingOperations]);
   const effectiveSyncStatus = useMemo(
-    () => visibleSyncStatus(syncStatus, pendingOperations, syncMeta, cloudSyncEnabled),
-    [cloudSyncEnabled, pendingOperations, syncMeta, syncStatus]
+    () => visibleSyncStatus(syncStatus, pendingOperations, syncMeta, cloudSyncEnabled, connectionIssue),
+    [cloudSyncEnabled, connectionIssue, pendingOperations, syncMeta, syncStatus]
   );
   const syncRequiresUserAction = effectiveSyncStatus === 'conflict';
   const flowDetailTask = flowDetailTaskId ? activeTasks.find(t => t.id === flowDetailTaskId) ?? null : null;
   const manageTask = manageTaskId ? activeTasks.find(t => t.id === manageTaskId) ?? null : null;
 
   useEffect(() => {
-    const shouldNotify = effectiveSyncStatus === 'error' || effectiveSyncStatus === 'offline' || effectiveSyncStatus === 'conflict';
+    const shouldNotify = ['error', 'offline', 'network', 'timeout', 'serviceUnavailable', 'incompatible', 'rateLimited', 'conflict'].includes(effectiveSyncStatus);
     if (!shouldNotify) {
       if (effectiveSyncStatus === 'idle') syncNoticeKeyRef.current = '';
       return;
@@ -2845,6 +3135,9 @@ function AppShell({
     }
     if (operation.conflictType === 'order' && operation.serverOrderVersion) {
       setSyncMetaAndCache(current => ({ ...current, taskOrderVersion: operation.serverOrderVersion! }));
+      if (operation.serverOrder) {
+        setTasksAndCache(current => applyTodoOrder(current, operation.serverOrder!));
+      }
     }
     removeConflictOperation(operation.operationId);
   }, [removeConflictOperation, setSyncMetaAndCache, setTasksAndCache, toTask]);
@@ -2875,20 +3168,32 @@ function AppShell({
   }, [cloudSyncEnabled, retryDirtyTasks, setPendingOperationsAndCache, setTasksAndCache]);
 
   const handleReapplyOrderConflict = React.useCallback((operation: PendingOperation) => {
+    const requestedOrder = hasOrderPayload(operation.payload) ? operation.payload.order : [];
+    const activeTodoIds = tasksRef.current
+      .filter(task => task.status === 'todo' && !task.deletedAt)
+      .map(task => task.id);
+    const activeTodoIdSet = new Set(activeTodoIds);
+    const requestedIds = requestedOrder.map(item => item.id).filter(id => activeTodoIdSet.has(id));
+    const requestedIdSet = new Set(requestedIds);
+    const mergedIds = [...requestedIds, ...activeTodoIds.filter(id => !requestedIdSet.has(id))];
+    const mergedOrder = mergedIds.map((id, sortOrder) => ({ id, sortOrder }));
     const nextOperation: PendingOperation = {
       ...operation,
       operationId: syncOperationId(),
       baseOrderVersion: operation.serverOrderVersion ?? syncMetaRef.current.taskOrderVersion,
+      payload: { order: mergedOrder },
       createdAt: new Date().toISOString(),
       retryCount: 0,
       status: 'pending',
       conflictType: undefined,
       serverOrderVersion: undefined,
+      serverOrder: undefined,
       detectedAt: undefined,
     };
+    setTasksAndCache(current => applyTodoOrder(current, mergedOrder));
     setPendingOperationsAndCache(prev => [...prev.filter(item => item.operationId !== operation.operationId), nextOperation]);
     if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
-  }, [cloudSyncEnabled, retryDirtyTasks, setPendingOperationsAndCache]);
+  }, [cloudSyncEnabled, retryDirtyTasks, setPendingOperationsAndCache, setTasksAndCache]);
 
   const handleCopyConflictAsNewTask = React.useCallback((operation: PendingOperation) => {
     const sourceTask = operation.taskId ? tasksRef.current.find(task => task.id === operation.taskId) : null;
@@ -2932,26 +3237,25 @@ function AppShell({
   }, [cloudSyncEnabled, retryDirtyTasks, setPendingOperationsAndCache, setTasksAndCache]);
 
   const applyPendingOrder = React.useCallback((orderedIds: string[]) => {
-    setTasksAndCache(prev => {
-      const pending = prev.filter(task => task.status === 'todo' && !task.deletedAt);
-      const pendingById = new Map(pending.map(task => [task.id, task]));
-      const orderedPending = orderedIds
-        .map(id => pendingById.get(id))
-        .filter((task): task is Task => !!task);
-      const includedIds = new Set(orderedPending.map(task => task.id));
-      const newlyAddedPending = pending.filter(task => !includedIds.has(task.id));
-      const nonPending = prev.filter(task => task.status !== 'todo' || task.deletedAt);
-      const next = [...orderedPending, ...newlyAddedPending]
-        .map((task, index) => ({ ...task, sortOrder: index }))
-        .concat(nonPending);
-      updateSyncStatusFromTasks(next);
-      return next;
-    });
+    const current = tasksRef.current;
+    const pending = current.filter(task => task.status === 'todo' && !task.deletedAt);
+    const pendingById = new Map(pending.map(task => [task.id, task]));
+    const orderedPending = orderedIds
+      .map(id => pendingById.get(id))
+      .filter((task): task is Task => !!task);
+    const includedIds = new Set(orderedPending.map(task => task.id));
+    const newlyAddedPending = pending.filter(task => !includedIds.has(task.id));
+    const nonPending = current.filter(task => task.status !== 'todo' || task.deletedAt);
+    const normalizedPending = [...orderedPending, ...newlyAddedPending]
+      .map((task, index) => ({ ...task, sortOrder: index }));
+    const next = [...normalizedPending, ...nonPending];
+    setTasksAndCache(next);
+    updateSyncStatusFromTasks(next);
     queueOperation({
       operationId: syncOperationId(),
       type: 'reorder',
       baseOrderVersion: syncMetaRef.current.taskOrderVersion,
-      payload: { order: orderedIds.map((id, index) => ({ id, sortOrder: index })) },
+      payload: { order: normalizedPending.map(task => ({ id: task.id, sortOrder: task.sortOrder })) },
     });
     if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
   }, [cloudSyncEnabled, queueOperation, retryDirtyTasks, setTasksAndCache, updateSyncStatusFromTasks]);
@@ -2960,12 +3264,7 @@ function AppShell({
     applyPendingOrder(newPendingOrder.map(task => task.id));
   }, [applyPendingOrder]);
 
-  const handleAction = (id: string, action: ExitAction) => {
-    if (actionLocksRef.current.has(id)) return;
-    actionLocksRef.current.add(id);
-    Haptics.impact({ style: ImpactStyle.Medium }).catch(() => {});
-    setExitAction({ taskId: id, action });
-    setActingTaskIds(prev => new Set(prev).add(id));
+  const commitTaskAction = ({ taskId: id, action }: TaskActionState) => {
     const unlock = () => {
       actionLocksRef.current.delete(id);
       setActingTaskIds(prev => {
@@ -2975,93 +3274,69 @@ function AppShell({
       });
     };
 
-    hasInteractedRef.current = true;
-    if (action === 'snooze') {
-      setTimeout(() => {
+      if (action === 'snooze') {
         const latestTasks = tasksRef.current;
         const task = latestTasks.find(t => t.id === id);
         if (!task) {
+          setExitAction(current => current?.taskId === id ? null : current);
           unlock();
           return;
         }
         const previousPendingIds = latestTasks
           .filter(t => t.status === 'todo' && !t.deletedAt)
           .map(t => t.id);
-        let undoRequested = false;
-        const reordered = [...latestTasks.filter(t => t.id !== id), task];
-        const nextPendingIds = reordered
-          .filter(t => t.status === 'todo' && !t.deletedAt)
-          .map(t => t.id);
-        let sortOrder = 0;
-        const normalized = reordered.map(t => {
-          if (t.status !== 'todo' || t.deletedAt) return t;
-          return { ...t, sortOrder: sortOrder++ };
-        });
-        setTasksAndCache(prev => {
-          if (!task) return prev;
-          if (prev !== latestTasks) {
-            const nextTask = prev.find(t => t.id === id);
-            if (!nextTask) return prev;
-            let nextSortOrder = 0;
-            return [...prev.filter(t => t.id !== id), nextTask].map(t => {
-              if (t.status !== 'todo' || t.deletedAt) return t;
-              return { ...t, sortOrder: nextSortOrder++ };
-            });
-          }
-          return normalized;
-        });
-        window.setTimeout(() => {
-          setExitAction(current => current?.taskId === id && current.action === action ? null : current);
-        }, 520);
+        const nextPendingIds = [...previousPendingIds.filter(taskId => taskId !== id), id];
+        applyPendingOrder(nextPendingIds);
         toast(t('task.snoozeMoved'), {
           description: t('task.snoozeMovedDesc'),
           action: {
             label: t('task.undo'),
-            onClick: () => {
-              undoRequested = true;
-              applyPendingOrder(previousPendingIds);
-            },
+            onClick: () => applyPendingOrder(previousPendingIds),
           },
         });
-        window.setTimeout(() => {
-          unlock();
-          if (!undoRequested) applyPendingOrder(nextPendingIds);
-        }, 520);
-      }, 170);
-    } else {
-      const newStatus = action === 'complete' ? 'done' : 'skipped';
-      setTimeout(() => {
+      } else {
+        const newStatus = action === 'complete' ? 'done' : 'skipped';
         const task = tasksRef.current.find(t => t.id === id);
+        if (!task) {
+          setExitAction(current => current?.taskId === id ? null : current);
+          unlock();
+          return;
+        }
         const shouldCreateLegacyRepeat = action === 'complete' && task && task.repeatRule && task.repeatRule !== 'none' && !task.repeatUntilDate;
         const legacyRepeatDueDate = shouldCreateLegacyRepeat ? nextRepeatDate(task.dueDate, task.repeatRule) : null;
         const legacyRepeatTask = task && legacyRepeatDueDate
           ? buildRepeatedTasks(task, [legacyRepeatDueDate], tasksRef.current.filter(t => t.status === 'todo' && !t.deletedAt).length)[0]
           : null;
         const operationId = syncOperationId();
-        queueOperation({
-          operationId,
-          type: 'update',
-          taskId: id,
-          baseVersion: task?.version ?? 1,
-          payload: { status: newStatus },
-        });
-        if (legacyRepeatTask) {
-          queueOperation({
+        const updatedTasks = normalizeTodoSortOrder([
+          ...tasksRef.current.map(currentTask => currentTask.id !== id ? currentTask : { ...currentTask, status: newStatus as TaskStatus }),
+          ...(legacyRepeatTask ? [legacyRepeatTask] : []),
+        ]);
+        const dirtyTasks = markDirty(updatedTasks, id, 'update', operationId);
+        const nextPendingOrder = dirtyTasks.filter(currentTask => currentTask.status === 'todo' && !currentTask.deletedAt);
+        queueOperations([
+          {
+            operationId,
+            type: 'update',
+            taskId: id,
+            baseVersion: task?.version ?? 1,
+            payload: { status: newStatus },
+          },
+          ...(legacyRepeatTask ? [{
             operationId: legacyRepeatTask._operationId || syncOperationId(),
-            type: 'create',
+            type: 'create' as const,
             clientTaskId: legacyRepeatTask.id,
             payload: taskPatch(legacyRepeatTask),
-          });
-        }
-
-        setTasksAndCache(prev => {
-          const updated = prev.map(t => t.id !== id ? t : { ...t, status: newStatus as TaskStatus });
-          return markDirty(legacyRepeatTask ? [...updated, legacyRepeatTask] : updated, id, 'update', operationId);
-        });
-        window.setTimeout(() => {
-          if (cloudSyncEnabled) void retryDirtyTasks();
-          unlock();
-        }, 0);
+          }] : []),
+          {
+            operationId: syncOperationId(),
+            type: 'reorder' as const,
+            baseOrderVersion: syncMetaRef.current.taskOrderVersion,
+            payload: { order: nextPendingOrder.map(currentTask => ({ id: currentTask.id, sortOrder: currentTask.sortOrder })) },
+          },
+        ]);
+        setTasksAndCache(dirtyTasks);
+        if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
         if (action === 'complete') {
           const newCount = completedTodayRef.current + 1;
           setCompletedToday(newCount);
@@ -3090,31 +3365,50 @@ function AppShell({
           // Ask the server to recompute stats from completed tasks.
           if (cloudSyncEnabled) void retryDirtyTasks();
         }
-        window.setTimeout(() => {
-          setExitAction(current => current?.taskId === id && current.action === action ? null : current);
-        }, 520);
-      }, 170);
-    }
+      }
+      setExitAction(current => current?.taskId === id && current.action === action ? null : current);
+      unlock();
+  };
+  commitTaskActionRef.current = commitTaskAction;
+
+  const handleAction = (id: string, action: ExitAction) => {
+    // exitAction is intentionally a single-slot state machine; reject a second
+    // action until the current task has committed so no task can be orphaned.
+    if (actionLocksRef.current.size > 0) return;
+    actionLocksRef.current.add(id);
+    hasInteractedRef.current = true;
+    hapticImpactMedium();
+    const pendingAction = { taskId: id, action };
+    setExitAction(pendingAction);
+    setActingTaskIds(prev => new Set(prev).add(id));
   };
 
-  const persistTaskUpdate = (id: string, data: Partial<Task>, operationId?: string): Promise<boolean> => {
-    const task = tasksRef.current.find(item => item.id === id);
-    queueOperation({
-      operationId: operationId || syncOperationId(),
-      type: 'update',
-      taskId: id,
-      baseVersion: task?.version ?? 1,
-      payload: data,
-    });
-    if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
-    return Promise.resolve(true);
-  };
+  useEffect(() => {
+    if (!exitAction) return;
+    const commitIfPending = () => {
+      if (actionLocksRef.current.has(exitAction.taskId)) {
+        commitTaskActionRef.current(exitAction);
+      }
+    };
+    if (viewMode !== 'flow') {
+      const frame = window.requestAnimationFrame(commitIfPending);
+      return () => window.cancelAnimationFrame(frame);
+    }
+    // Exit animation normally commits through onExitComplete. This guarantees the
+    // action still commits if the animated subtree is replaced or interrupted.
+    const fallback = window.setTimeout(commitIfPending, 700);
+    return () => window.clearTimeout(fallback);
+  }, [exitAction, viewMode]);
 
   const resetTaskForm = () => {
+    taskSubmittingRef.current = false;
+    setIsTaskSubmitting(false);
     setIsRepeatMode(false);
     setEditingTaskId(null);
     setShowQuickReminder(false);
-    setForm(defaultAddTaskForm());
+    const nextForm = defaultAddTaskForm();
+    formRef.current = nextForm;
+    setForm(nextForm);
     setFormErrors({});
   };
 
@@ -3135,7 +3429,7 @@ function AppShell({
   };
 
   const openEditTask = (task: Task) => {
-    setForm({
+    const nextForm: AddTaskState = {
       title: task.title,
       minutes: task.estimateMinutes ? String(task.estimateMinutes) : '',
       priority: task.priority,
@@ -3144,7 +3438,9 @@ function AppShell({
       repeatRule: task.repeatRule || 'none',
       repeatUntilDate: task.repeatUntilDate || '',
       tag: task.tag || '',
-    });
+    };
+    formRef.current = nextForm;
+    setForm(nextForm);
     setEditingTaskId(task.id);
     setIsRepeatMode(false);
     setFormErrors({});
@@ -3152,7 +3448,9 @@ function AppShell({
   };
 
   const updateTaskForm = (patch: Partial<AddTaskState>) => {
-    setForm(current => ({ ...current, ...patch }));
+    const nextForm = patchTaskDraft(formRef.current, patch);
+    formRef.current = nextForm;
+    setForm(nextForm);
     setFormErrors(current => {
       const next = { ...current };
       Object.keys(patch).forEach(key => { delete next[key as keyof AddTaskErrors]; });
@@ -3191,22 +3489,31 @@ function AppShell({
 
   const handleRestoreDeletedTask = React.useCallback((task: Task) => {
     const operationId = syncOperationId();
-    queueOperation({
-      operationId,
-      type: 'restore',
-      taskId: task.id,
-      baseVersion: task.version ?? 1,
-    });
+    const restored = { ...task, deletedAt: null, _dirty: true, _syncState: 'update' as const, _operationId: operationId, _conflict: false };
+    const existingIndex = tasksRef.current.findIndex(currentTask => currentTask.id === task.id);
+    const withRestoredTask = existingIndex >= 0
+      ? tasksRef.current.map(currentTask => currentTask.id === task.id ? { ...currentTask, ...restored } : currentTask)
+      : [...tasksRef.current, restored];
+    const normalized = normalizeTodoSortOrder(withRestoredTask);
+    const pendingOrder = normalized.filter(currentTask => currentTask.status === 'todo' && !currentTask.deletedAt);
+    queueOperations([
+      {
+        operationId,
+        type: 'restore',
+        taskId: task.id,
+        baseVersion: task.version ?? 1,
+      },
+      {
+        operationId: syncOperationId(),
+        type: 'reorder',
+        baseOrderVersion: syncMetaRef.current.taskOrderVersion,
+        payload: { order: pendingOrder.map(currentTask => ({ id: currentTask.id, sortOrder: currentTask.sortOrder })) },
+      },
+    ]);
     setDeletedTasks(prev => prev.filter(t => t.id !== task.id));
-    setTasksAndCache(prev => {
-      const restored = { ...task, deletedAt: null, _dirty: true, _syncState: 'update' as const, _operationId: operationId, _conflict: false };
-      const exists = prev.some(t => t.id === task.id);
-      return exists
-        ? prev.map(t => t.id === task.id ? { ...t, deletedAt: null, _dirty: restored._dirty, _syncState: restored._syncState, _operationId: operationId } : t)
-        : [...prev, restored];
-    });
+    setTasksAndCache(normalized);
     if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
-  }, [cloudSyncEnabled, queueOperation, retryDirtyTasks, setTasksAndCache]);
+  }, [cloudSyncEnabled, queueOperations, retryDirtyTasks, setTasksAndCache]);
 
   const handlePermanentDeleteTask = React.useCallback((task: Task) => {
     const confirmed = window.confirm(t('task.deleteForeverConfirm'));
@@ -3242,7 +3549,7 @@ function AppShell({
     try {
       await apiDeleteAccount();
       clearUserLocalCache(user.id);
-      onAccountDeleted();
+      await onAccountDeleted();
       toast.success(t('account.deleteAccountSuccess'));
     } catch {
       toast.error(t('account.deleteAccountFailed'));
@@ -3281,26 +3588,52 @@ function AppShell({
   const handleDeleteTask = (task: Task) => {
     const deletedAt = new Date().toISOString();
     const operationId = syncOperationId();
-    queueOperation({
-      operationId,
-      type: 'soft-delete',
-      taskId: task.id,
-      baseVersion: task.version ?? 1,
-    });
-    setTasksAndCache(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt } : t), task.id, 'update', operationId));
+    const deletedState = normalizeTodoSortOrder(tasksRef.current.map(currentTask =>
+      currentTask.id === task.id ? { ...currentTask, deletedAt } : currentTask
+    ));
+    const dirtyDeletedState = markDirty(deletedState, task.id, 'update', operationId);
+    const deletedPendingOrder = dirtyDeletedState.filter(currentTask => currentTask.status === 'todo' && !currentTask.deletedAt);
+    queueOperations([
+      {
+        operationId,
+        type: 'soft-delete',
+        taskId: task.id,
+        baseVersion: task.version ?? 1,
+      },
+      {
+        operationId: syncOperationId(),
+        type: 'reorder',
+        baseOrderVersion: syncMetaRef.current.taskOrderVersion,
+        payload: { order: deletedPendingOrder.map(currentTask => ({ id: currentTask.id, sortOrder: currentTask.sortOrder })) },
+      },
+    ]);
+    setTasksAndCache(dirtyDeletedState);
     toast(t('task.deleted'), {
       description: t('task.deletedDesc'),
       action: {
         label: t('task.undo'),
         onClick: () => {
           const undoOperationId = syncOperationId();
-          queueOperation({
-            operationId: undoOperationId,
-            type: 'restore',
-            taskId: task.id,
-            baseVersion: (tasksRef.current.find(item => item.id === task.id)?.version ?? task.version) ?? 1,
-          });
-          setTasksAndCache(prev => markDirty(prev.map(t => t.id === task.id ? { ...t, deletedAt: null } : t), task.id, 'update', undoOperationId));
+          const restoredState = normalizeTodoSortOrder(tasksRef.current.map(currentTask =>
+            currentTask.id === task.id ? { ...currentTask, deletedAt: null } : currentTask
+          ));
+          const dirtyRestoredState = markDirty(restoredState, task.id, 'update', undoOperationId);
+          const restoredPendingOrder = dirtyRestoredState.filter(currentTask => currentTask.status === 'todo' && !currentTask.deletedAt);
+          queueOperations([
+            {
+              operationId: undoOperationId,
+              type: 'restore',
+              taskId: task.id,
+              baseVersion: (tasksRef.current.find(item => item.id === task.id)?.version ?? task.version) ?? 1,
+            },
+            {
+              operationId: syncOperationId(),
+              type: 'reorder',
+              baseOrderVersion: syncMetaRef.current.taskOrderVersion,
+              payload: { order: restoredPendingOrder.map(currentTask => ({ id: currentTask.id, sortOrder: currentTask.sortOrder })) },
+            },
+          ]);
+          setTasksAndCache(dirtyRestoredState);
           if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
         },
       },
@@ -3309,7 +3642,7 @@ function AppShell({
   };
 
   const handleRepeatTask = (task: Task) => {
-    setForm({
+    const nextForm: AddTaskState = {
       title: task.title,
       minutes: task.estimateMinutes ? String(task.estimateMinutes) : '',
       priority: task.priority,
@@ -3318,7 +3651,9 @@ function AppShell({
       repeatRule: task.repeatRule || 'none',
       repeatUntilDate: task.repeatUntilDate || '',
       tag: task.tag || '',
-    });
+    };
+    formRef.current = nextForm;
+    setForm(nextForm);
     setIsRepeatMode(true);
     setEditingTaskId(null);
     setFormErrors({});
@@ -3326,7 +3661,9 @@ function AppShell({
   };
 
   const openAddTask = () => {
-    setForm(defaultAddTaskForm());
+    const nextForm = defaultAddTaskForm();
+    formRef.current = nextForm;
+    setForm(nextForm);
     setFormErrors({});
     setIsRepeatMode(false);
     setEditingTaskId(null);
@@ -3337,26 +3674,6 @@ function AppShell({
   const openDraftDetails = () => {
     setIsAddingTask(false);
     setIsTaskDetailsOpen(true);
-  };
-
-  const taskFormFromSubmit = (formElement: HTMLFormElement, base: AddTaskState): AddTaskState => {
-    const data = new FormData(formElement);
-    const getValue = (key: keyof AddTaskState) => {
-      const value = data.get(key);
-      return typeof value === 'string' ? value : base[key];
-    };
-    const priority = getValue('priority');
-    const repeatRule = getValue('repeatRule');
-    return {
-      title: getValue('title'),
-      minutes: getValue('minutes'),
-      priority: priority === 'P1' || priority === 'P2' || priority === 'P3' ? priority : base.priority,
-      dueDate: getValue('dueDate'),
-      reminderAt: getValue('reminderAt'),
-      repeatRule: repeatRule === 'daily' || repeatRule === 'weekly' || repeatRule === 'monthly' || repeatRule === 'none' ? repeatRule : base.repeatRule,
-      repeatUntilDate: getValue('repeatUntilDate'),
-      tag: getValue('tag'),
-    };
   };
 
   const validateTaskForm = (candidate: AddTaskState): AddTaskErrors => {
@@ -3391,6 +3708,7 @@ function AppShell({
     const tempId = localTaskId();
     const clientKey = syncOperationId();
     const repeatUntilDate = candidate.repeatRule === 'none' ? null : candidate.repeatUntilDate;
+    const seriesId = repeatUntilDate ? syncOperationId() : null;
     const estimateMinutes = candidate.minutes.trim() ? Number.parseInt(candidate.minutes, 10) : null;
     const currentTasks = tasksRef.current;
     const idx = insertIndex(currentTasks, { id: tempId, title: '', priority: candidate.priority, estimateMinutes: null, status: 'todo', dueDate: candidate.dueDate, sortOrder: 0 } as Task);
@@ -3408,6 +3726,8 @@ function AppShell({
       reminderAt: candidate.reminderAt || null,
       repeatRule: candidate.repeatRule,
       repeatUntilDate,
+      seriesId,
+      occurrenceDate: seriesId ? candidate.dueDate : null,
       deletedAt: null,
       tag: candidate.tag || null,
       sortOrder: idx,
@@ -3417,39 +3737,55 @@ function AppShell({
     const repeatedTasks = repeatUntilDate
       ? buildRepeatedTasks(optimisticTask, repeatDatesAfterStart(candidate.dueDate, repeatUntilDate, candidate.repeatRule), idx + 1)
       : [];
-    setTasksAndCache(previous => {
-      const next = [optimisticTask, ...repeatedTasks].reduce((ordered, task) => {
-        const insertAt = insertIndex(ordered, task);
-        return [...ordered.slice(0, insertAt), task, ...ordered.slice(insertAt)];
-      }, previous);
-      updateSyncStatusFromTasks(next);
-      return next;
-    });
-    queueOperation({
-      operationId: optimisticTask._operationId || syncOperationId(),
-      type: 'create',
-      clientTaskId: optimisticTask.id,
-      payload: taskPatch(optimisticTask),
-    });
-    for (const repeatedTask of repeatedTasks) {
-      queueOperation({
-        operationId: repeatedTask._operationId || syncOperationId(),
-        type: 'create',
-        clientTaskId: repeatedTask.id,
-        payload: taskPatch(repeatedTask),
-      });
-    }
+    const inserted = [optimisticTask, ...repeatedTasks].reduce((ordered, task) => {
+      const insertAt = insertIndex(ordered, task);
+      return [...ordered.slice(0, insertAt), task, ...ordered.slice(insertAt)];
+    }, currentTasks);
+    const normalized = normalizeTodoSortOrder(inserted);
+    const createdIds = new Set([optimisticTask, ...repeatedTasks].map(task => task.id));
+    const normalizedCreatedTasks = normalized.filter(task => createdIds.has(task.id));
+    const normalizedPendingTasks = normalized.filter(task => task.status === 'todo' && !task.deletedAt);
+    setTasksAndCache(normalized);
+    updateSyncStatusFromTasks(normalized);
+    queueOperations([
+      ...normalizedCreatedTasks.map(task => ({
+        operationId: task._operationId || syncOperationId(),
+        type: 'create' as const,
+        clientTaskId: task.id,
+        payload: taskPatch(task),
+      })),
+      {
+        operationId: syncOperationId(),
+        type: 'reorder' as const,
+        baseOrderVersion: syncMetaRef.current.taskOrderVersion,
+        payload: { order: normalizedPendingTasks.map(task => ({ id: task.id, sortOrder: task.sortOrder })) },
+      },
+    ]);
     if (cloudSyncEnabled) window.setTimeout(() => retryDirtyTasks(), 0);
     return clientKey;
   };
 
   const handleQuickCreate = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const quickForm = taskFormFromSubmit(event.currentTarget, { ...form, repeatRule: 'none' as const, repeatUntilDate: '', minutes: '', tag: '' });
+    if (taskSubmittingRef.current) return;
+    taskSubmittingRef.current = true;
+    setIsTaskSubmitting(true);
+    const quickForm: AddTaskState = {
+      ...taskDraftFromFieldValues(formRef.current, new FormData(event.currentTarget)),
+      repeatRule: 'none',
+      repeatUntilDate: '',
+      minutes: '',
+      tag: '',
+    };
     const errors = validateTaskForm(quickForm);
+    formRef.current = quickForm;
     setForm(quickForm);
     setFormErrors(errors);
-    if (Object.keys(errors).length > 0) return;
+    if (Object.keys(errors).length > 0) {
+      taskSubmittingRef.current = false;
+      setIsTaskSubmitting(false);
+      return;
+    }
     createTaskFromForm(quickForm);
     setViewMode('flow');
     closeQuickCreate();
@@ -3457,13 +3793,23 @@ function AppShell({
 
   const handleAddTask = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const submittedForm = taskFormFromSubmit(e.currentTarget, form);
+    if (taskSubmittingRef.current) return;
+    taskSubmittingRef.current = true;
+    setIsTaskSubmitting(true);
+    const submittedForm = taskDraftFromFieldValues(formRef.current, new FormData(e.currentTarget));
     const errors = validateTaskForm(submittedForm);
+    formRef.current = submittedForm;
     setForm(submittedForm);
     setFormErrors(errors);
-    if (Object.keys(errors).length > 0) return;
+    if (Object.keys(errors).length > 0) {
+      taskSubmittingRef.current = false;
+      setIsTaskSubmitting(false);
+      return;
+    }
     const submittedRepeatPreviewCount = repeatInstanceCount(submittedForm.dueDate, submittedForm.repeatUntilDate, submittedForm.repeatRule);
     if (submittedRepeatPreviewCount > 30 && !window.confirm(t('task.repeatLargeConfirm', { count: submittedRepeatPreviewCount }))) {
+      taskSubmittingRef.current = false;
+      setIsTaskSubmitting(false);
       return;
     }
     if (editingTaskId) {
@@ -3486,30 +3832,46 @@ function AppShell({
             !tasksRef.current.some(task =>
               task.id !== editingTaskId
               && !task.deletedAt
-              && task.dueDate === dueDate
-              && task.title === editedTask.title
-              && task.repeatRule === editedTask.repeatRule
+              && (
+                editedTask.seriesId
+                  ? task.seriesId === editedTask.seriesId && task.occurrenceDate === dueDate
+                  : task.dueDate === dueDate && task.title === editedTask.title && task.repeatRule === editedTask.repeatRule
+              )
             )
           ),
           tasksRef.current.filter(t => t.status === 'todo' && !t.deletedAt).length
         )
         : [];
       const operationId = syncOperationId();
-      setTasksAndCache(prev => {
-        const updated = prev.map(t => t.id === editingTaskId ? { ...t, ...patch } : t);
-        return markDirty([...updated, ...repeatedTasks], editingTaskId, 'update', operationId);
-      });
-      for (const repeatedTask of repeatedTasks) {
-        queueOperation({
+      const updated = tasksRef.current.map(task => task.id === editingTaskId ? { ...task, ...patch } : task);
+      const normalized = normalizeTodoSortOrder([...updated, ...repeatedTasks]);
+      const dirtyTasks = markDirty(normalized, editingTaskId, 'update', operationId);
+      const repeatedIds = new Set(repeatedTasks.map(task => task.id));
+      const normalizedRepeated = dirtyTasks.filter(task => repeatedIds.has(task.id));
+      const pendingOrder = dirtyTasks.filter(task => task.status === 'todo' && !task.deletedAt);
+      queueOperations([
+        {
+          operationId,
+          type: 'update',
+          taskId: editingTaskId,
+          baseVersion: existingTask?.version ?? 1,
+          payload: patch,
+        },
+        ...normalizedRepeated.map(repeatedTask => ({
           operationId: repeatedTask._operationId || syncOperationId(),
-          type: 'create',
+          type: 'create' as const,
           clientTaskId: repeatedTask.id,
           payload: taskPatch(repeatedTask),
-        });
-      }
-      persistTaskUpdate(editingTaskId, patch, operationId).then((canFlushRepeatedTasks) => {
-        if (canFlushRepeatedTasks && repeatedTasks.length > 0) void retryDirtyTasks();
-      });
+        })),
+        {
+          operationId: syncOperationId(),
+          type: 'reorder',
+          baseOrderVersion: syncMetaRef.current.taskOrderVersion,
+          payload: { order: pendingOrder.map(task => ({ id: task.id, sortOrder: task.sortOrder })) },
+        },
+      ]);
+      setTasksAndCache(dirtyTasks);
+      if (cloudSyncEnabled) window.setTimeout(() => void retryDirtyTasks(), 0);
       closeTaskDetails();
       return;
     }
@@ -3524,7 +3886,7 @@ function AppShell({
         task={flowDetailTask}
         onClose={() => setFlowDetailTaskId(null)}
         onAction={handleAction}
-        actionDisabled={flowDetailTask ? actingTaskIds.has(flowDetailTask.id) : false}
+        actionDisabled={actingTaskIds.size > 0}
         onManage={(task) => setManageTaskId(task.id)}
       />
 
@@ -3672,34 +4034,37 @@ function AppShell({
         </div>
       ) : (
         <>
-      {/*
-       * Sliding container: both views rendered side-by-side, container translates
-       * to reveal the active panel. Eliminates AnimatePresence exit/enter timing
-       * issues and produces perfectly smooth transitions in both directions.
-       */}
       <div className="w-full max-w-md overflow-x-hidden flex-1 overflow-hidden relative">
+        <AnimatePresence initial={false} mode="wait">
         <motion.div
-          className="flex items-stretch h-full"
-          style={{ width: '200%', willChange: 'transform' }}
-          animate={{ x: viewMode === 'flow' ? '0%' : '-50%' }}
-          initial={false}
-          transition={shouldReduceMotion ? { duration: 0 } : { type: 'spring', stiffness: 360, damping: 36, mass: 0.85 }}
+          key={viewMode}
+          className="h-full w-full"
+          initial={shouldReduceMotion ? false : { opacity: 0, x: viewMode === 'flow' ? -18 : 18 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, x: viewMode === 'flow' ? -12 : 12 }}
+          transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.18, ease: [0.2, 0.8, 0.2, 1] }}
         >
-          {/* ── Flow panel ── */}
-          <div className="h-full overflow-y-auto px-4 sm:px-6 pb-4" style={{ width: '50%' }}>
+          {viewMode === 'flow' ? (
+          <div className="h-full w-full overflow-y-auto px-4 pb-4 sm:px-6">
             {pendingTasks.length > 0 ? (
               <div className="mx-auto flex min-h-full w-full max-w-sm flex-col items-center gap-3">
                 <div className={cn(
                   'relative h-[clamp(360px,54vh,470px)] w-full max-w-[360px] shrink-0',
                   'mt-[clamp(1.75rem,5vh,3.25rem)]'
                 )}>
-                  <AnimatePresence custom={exitAction} mode="popLayout">
-                    {pendingTasks.slice(0, 3).map((task, index) => {
+                  <AnimatePresence
+                    custom={exitAction}
+                    onExitComplete={() => {
+                      if (exitAction && actionLocksRef.current.has(exitAction.taskId)) {
+                        commitTaskAction(exitAction);
+                      }
+                    }}
+                  >
+                    {visiblePendingTasks.slice(0, 3).map((task, index) => {
                       const isTop = index === 0;
                       return (
                         <motion.div
                           key={task.id}
-                          layout
                           custom={exitAction}
                           initial={shouldReduceMotion ? false : { opacity: 0, y: 50, scale: 0.9 }}
                           animate={{
@@ -3708,7 +4073,13 @@ function AppShell({
                             scale: 1 - index * 0.035,
                             zIndex: 10 - index,
                           }}
-                          exit={taskExitMotion(exitAction?.taskId === task.id ? exitAction.action : null, shouldReduceMotion)}
+                          variants={{
+                            exit: (currentExit: TaskActionState | null) => taskExitMotion(
+                              currentExit?.taskId === task.id ? currentExit.action : null,
+                              shouldReduceMotion,
+                            ),
+                          }}
+                          exit="exit"
                           transition={shouldReduceMotion ? { duration: 0 } : { type: 'spring', stiffness: 340, damping: 34, mass: 0.72 }}
                           className={`absolute inset-0 w-full h-full ${!isTop ? 'pointer-events-none' : ''}`}
                         >
@@ -3716,7 +4087,7 @@ function AppShell({
                             task={task}
                             onAction={handleAction}
                             pendingAction={exitAction?.taskId === task.id ? exitAction.action : null}
-                            actionDisabled={actingTaskIds.has(task.id)}
+                            actionDisabled={actingTaskIds.size > 0}
                             onOpen={isTop ? () => setFlowDetailTaskId(task.id) : undefined}
                           />
                         </motion.div>
@@ -3771,9 +4142,8 @@ function AppShell({
               </motion.div>
             )}
           </div>
-
-          {/* ── Calendar panel ── */}
-          <div className="flex flex-col items-center px-4 sm:px-6 pb-4 h-full overflow-y-auto" style={{ width: '50%' }}>
+          ) : (
+          <div className="flex h-full w-full flex-col items-center overflow-y-auto px-4 pb-4 sm:px-6">
             <CalendarView
               tasks={activeTasks}
               onAction={handleAction}
@@ -3785,7 +4155,9 @@ function AppShell({
               nativeControls={false}
             />
           </div>
+          )}
         </motion.div>
+        </AnimatePresence>
       </div>
 
       <ReorderSheet isOpen={isReordering} pendingTasks={pendingTasks} onClose={() => setIsReordering(false)} onSave={handleSaveOrder} />
@@ -3812,6 +4184,7 @@ function AppShell({
             onFormChange={updateTaskForm}
             onReminderChange={updateReminder}
             onShowReminderChange={setShowQuickReminder}
+            submitting={isTaskSubmitting}
           />
 
           <TaskDetailsSheet
@@ -3825,6 +4198,7 @@ function AppShell({
             onSubmit={handleAddTask}
             onFormChange={updateTaskForm}
             onReminderChange={updateReminder}
+            submitting={isTaskSubmitting}
           />
       </>
     </div>
@@ -3844,9 +4218,24 @@ export default function App() {
       : null;
   });
   const [cloudSyncEnabled, setCloudSyncEnabled] = useState(false);
+  const [connectionIssue, setConnectionIssue] = useState<CloudConnectionIssue>(null);
   const [accentTheme, setAccentTheme] = useState<AccentTheme>('tcx111400');
   const [accentThemeReady, setAccentThemeReady] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const reconnectPromiseRef = React.useRef<Promise<boolean> | null>(null);
+
+  useEffect(() => {
+    const flushWhenHidden = () => {
+      if (document.visibilityState === 'hidden') void flushDeferredStorage();
+    };
+    const flushOnPageHide = () => { void flushDeferredStorage(); };
+    document.addEventListener('visibilitychange', flushWhenHidden);
+    window.addEventListener('pagehide', flushOnPageHide);
+    return () => {
+      document.removeEventListener('visibilitychange', flushWhenHidden);
+      window.removeEventListener('pagehide', flushOnPageHide);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -3859,6 +4248,41 @@ export default function App() {
     initAccentTheme();
     return () => { cancelled = true; };
   }, []);
+
+  const handleReconnectCloud = React.useCallback((): Promise<boolean> => {
+    if (cloudSyncEnabled) return Promise.resolve(true);
+    if (!navigator.onLine || !currentUser) {
+      if (!navigator.onLine) setConnectionIssue('offline');
+      return Promise.resolve(false);
+    }
+    if (reconnectPromiseRef.current) return reconnectPromiseRef.current;
+
+    const attempt = (async () => {
+      const result = await apiRefreshDetailed();
+      if (result.kind === 'ok') {
+        saveSession(result.user);
+        setCurrentUser(result.user);
+        setCloudSyncEnabled(true);
+        setConnectionIssue(null);
+        return true;
+      }
+      if (result.kind === 'unauthorized') {
+        await clearLocalAuthTokens();
+        clearSession();
+        setCurrentUser(null);
+        setCloudSyncEnabled(false);
+        setConnectionIssue(null);
+        setAppState('auth');
+        return false;
+      }
+      setConnectionIssue(refreshFailureStatus(result));
+      return false;
+    })().finally(() => {
+      reconnectPromiseRef.current = null;
+    });
+    reconnectPromiseRef.current = attempt;
+    return attempt;
+  }, [cloudSyncEnabled, currentUser]);
 
   useEffect(() => {
     if (!accentThemeReady) return;
@@ -3909,14 +4333,22 @@ export default function App() {
 
   // Register a global auth-failure callback so apiFetch can trigger logout
   useEffect(() => {
-    setAuthFailureHandler(() => {
-      clearLocalAuthTokens();
+    setAuthFailureHandler(async () => {
+      await clearLocalAuthTokens();
       clearSession();
       setCurrentUser(null);
       setCloudSyncEnabled(false);
+      setConnectionIssue(null);
       setAppState('auth');
     });
-    return () => setAuthFailureHandler(null);
+    setRefreshFailureHandler(result => {
+      setCloudSyncEnabled(false);
+      setConnectionIssue(refreshFailureStatus(result));
+    });
+    return () => {
+      setAuthFailureHandler(null);
+      setRefreshFailureHandler(null);
+    };
   }, []);
 
   // On mount: restore native storage, then restore the access token using the refresh cookie/token.
@@ -3933,38 +4365,34 @@ export default function App() {
 
         // If user explicitly logged out or session is invalid, skip refresh and go to auth
         if (!canUseSession && session?.signedOut) {
-          clearLocalAuthTokens();
+          await clearLocalAuthTokens();
           setCloudSyncEnabled(false);
+          setConnectionIssue(null);
           setAppState('auth');
           return;
         }
 
         const refreshResult = await apiRefreshDetailed();
         if (cancelled) return;
-        if (refreshResult === 'ok') {
-          const refreshedUser = getRefreshedUser();
-          if (!refreshedUser) {
-            clearLocalAuthTokens();
-            clearSession();
-            setCloudSyncEnabled(false);
-            setAppState('auth');
-            return;
-          }
-          saveSession(refreshedUser);
-          setCurrentUser(refreshedUser);
+        if (refreshResult.kind === 'ok') {
+          saveSession(refreshResult.user);
+          setCurrentUser(refreshResult.user);
           setCloudSyncEnabled(true);
+          setConnectionIssue(null);
           setAppState('app');
           return;
         }
-        if (refreshResult === 'network' && canUseSession) {
+        if (refreshResult.kind !== 'unauthorized' && canUseSession) {
           setCurrentUser({ id: session.userId, email: session.email, emailVerifiedAt: session.emailVerifiedAt ?? null });
           setCloudSyncEnabled(false);
+          setConnectionIssue(refreshFailureStatus(refreshResult));
           setAppState('app');
           return;
         }
-        clearLocalAuthTokens();
+        await clearLocalAuthTokens();
         clearSession();
         setCloudSyncEnabled(false);
+        setConnectionIssue(null);
         setAppState('auth');
       } catch {
         if (cancelled) return;
@@ -3972,12 +4400,14 @@ export default function App() {
         if (session && session.userId && !session.signedOut && !isSessionExpired(session)) {
           setCurrentUser({ id: session.userId, email: session.email, emailVerifiedAt: session.emailVerifiedAt ?? null });
           setCloudSyncEnabled(false);
+          setConnectionIssue(navigator.onLine ? 'serviceUnavailable' : 'offline');
           setAppState('app');
           return;
         }
-        clearLocalAuthTokens();
+        await clearLocalAuthTokens();
         clearSession();
         setCloudSyncEnabled(false);
+        setConnectionIssue(null);
         setAppState('auth');
       }
     }
@@ -3992,16 +4422,18 @@ export default function App() {
     setCurrentUser(user);
     saveSession(user);
     setCloudSyncEnabled(true);
+    setConnectionIssue(null);
     setAppState('app');
   }
 
-  function finishSignedOutSession() {
+  async function finishSignedOutSession(): Promise<void> {
     clearSession();
-    clearLocalAuthTokens();
     setCloudSyncEnabled(false);
+    setConnectionIssue(null);
     setAppState('auth');
     setCurrentUser(null);
     setIsLoggingOut(false);
+    await flushDeferredStorage();
   }
 
   async function handleLogout() {
@@ -4013,9 +4445,12 @@ export default function App() {
     if (cloudSyncEnabled) {
       try { await apiUpdateUserStats(); } catch { /* signing out is a local user choice */ }
     }
-    try { await apiLogout(); } catch { /* still clean up locally */ }
-    if (currentUser?.id) clearUserLocalCache(currentUser.id);
-    finishSignedOutSession();
+    await flushDeferredStorage();
+    const logoutResult = await apiLogout();
+    if (logoutResult.kind !== 'revoked' && logoutResult.kind !== 'unauthorized') {
+      console.warn('TaskFlow: server session revocation could not be confirmed', logoutResult);
+    }
+    await finishSignedOutSession();
   }
 
   if (appState === 'loading') {
@@ -4043,6 +4478,8 @@ export default function App() {
       onAccountDeleted={finishSignedOutSession}
       isLoggingOut={isLoggingOut}
       cloudSyncEnabled={cloudSyncEnabled}
+      connectionIssue={connectionIssue}
+      onReconnectCloud={handleReconnectCloud}
     />
   );
 }

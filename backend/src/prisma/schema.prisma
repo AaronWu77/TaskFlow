@@ -38,13 +38,15 @@ model Task {
   title           String
   priority        String   // P1 | P2 | P3
   estimateMinutes Int?
-  status          String   // todo | doing | done | snoozed | skipped
+  status          String   // todo | done | skipped
   tag             String?
   progress        Int      @default(0)
   dueDate         String?  // YYYY-MM-DD
   reminderAt      String?  // ISO datetime
   repeatRule      String?  // none | daily | weekly | monthly
   repeatUntilDate String?  // YYYY-MM-DD
+  seriesId        String?
+  occurrenceDate  String?  // YYYY-MM-DD; stable identity within a recurrence series
   completedAt     String?  // ISO datetime set by server when completed
   deletedAt       String?  // ISO datetime for soft delete / undo
   sortOrder       Int      @default(0)
@@ -60,6 +62,8 @@ model Task {
   @@index([userId, deletedAt])
   @@index([userId, sortOrder])
   @@index([userId, version])
+  @@index([userId, seriesId])
+  @@unique([userId, seriesId, occurrenceDate])
 }
 
 model Device {

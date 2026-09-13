@@ -184,13 +184,17 @@ function refreshTokenHash(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-function refreshExpiry(): Date {
+function refreshTtlMs(): number {
   const raw = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
   const match = /^(\d+)([smhd])$/.exec(raw);
   const amount = match ? Number(match[1]) : 7;
   const unit = match?.[2] ?? 'd';
   const factor = unit === 's' ? 1000 : unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : 86_400_000;
-  return new Date(Date.now() + amount * factor);
+  return amount * factor;
+}
+
+function refreshExpiry(): Date {
+  return new Date(Date.now() + refreshTtlMs());
 }
 
 function buildRefreshSession(userId: string): { token: string; tokenHash: string; expiresAt: Date } {
@@ -242,7 +246,7 @@ const COOKIE_OPTS = {
   httpOnly: true,
   secure: process.env.COOKIE_SECURE === 'true',
   sameSite: 'lax' as const,
-  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in ms
+  maxAge: refreshTtlMs(),
 };
 // Matching options for clearCookie (without maxAge)
 const CLEAR_COOKIE_OPTS = { httpOnly: COOKIE_OPTS.httpOnly, secure: COOKIE_OPTS.secure, sameSite: COOKIE_OPTS.sameSite };

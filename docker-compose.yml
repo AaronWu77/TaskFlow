@@ -45,7 +45,7 @@ services:
       context: .
       dockerfile: Dockerfile.web
       args:
-        VITE_API_URL: /api
+        VITE_API_URL: /api/v1
     restart: unless-stopped
     ports:
       - "80:80"

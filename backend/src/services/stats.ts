@@ -5,7 +5,7 @@ export async function recomputeUserStats(prisma: PrismaClient, userId: string, n
   const [user, completedTasks] = await Promise.all([
     prisma.user.findUnique({ where: { id: userId }, select: { timezone: true } }),
     prisma.task.findMany({
-      where: { userId, completedAt: { not: null } },
+      where: { userId, status: 'done', deletedAt: null, completedAt: { not: null } },
       select: { completedAt: true },
     }),
   ]);

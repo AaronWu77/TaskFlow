@@ -38,7 +38,12 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
       if (err.code === 'INVALID_CREDENTIALS') return t('auth.errors.invalidCredentials');
       if (err.code === 'EMAIL_NOT_VERIFIED' || err.code === 'INVALID_VERIFICATION_CODE') return t('auth.errors.invalidCode');
       if (err.code === 'EMAIL_DELIVERY_FAILED') return t('auth.errors.emailDelivery');
+      if (err.code === 'RATE_LIMITED' || err.status === 429) return t('auth.errors.rateLimited');
+      if (err.code === 'NOT_FOUND' || err.code === 'API_VERSION_UNSUPPORTED' || err.status === 404 || err.status === 426) return t('auth.errors.apiIncompatible');
+      if (err.status >= 500) return t('auth.errors.serviceUnavailable');
     }
+    if (err instanceof DOMException && err.name === 'AbortError') return t('auth.errors.timeout');
+    if (!navigator.onLine || err instanceof TypeError) return t('auth.errors.network');
     const message = err instanceof Error ? err.message : '';
     const normalized = message.toLowerCase();
     if (normalized.includes('invalid credentials') || normalized.includes('invalid email or password')) return t('auth.errors.invalidCredentials');

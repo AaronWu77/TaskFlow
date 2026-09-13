@@ -107,6 +107,7 @@
     "reorder": "排序",
     "reorderTasks": "任务排序",
     "reorderHint": "拖拽手柄来重新排列你的任务流",
+    "reorderPosition": "任务已移动到第 {{position}} 位",
     "queuedCount": "后面还有 {{count}} 项",
     "now": "当前",
     "done": "完成",
@@ -185,6 +186,11 @@
       "emailExists": "该邮箱已经注册。",
       "invalidCode": "验证码错误或已过期。",
       "emailDelivery": "邮件发送尚未配置，请稍后再试。",
+      "rateLimited": "尝试次数过多，请稍后再试。",
+      "apiIncompatible": "当前客户端与云服务版本不兼容，请更新后重试。",
+      "serviceUnavailable": "云服务暂时不可用，请稍后再试。",
+      "network": "无法连接云服务，请检查网络后重试。",
+      "timeout": "连接云服务超时，请稍后重试。",
       "generic": "操作失败，请稍后再试。"
     },
     "privacyNote": "你的任务数据仅自己可见，跨设备同步。"
@@ -192,7 +198,7 @@
   "account": {
     "signOut": "退出登录",
     "signingOut": "正在退出登录...",
-    "signOutConfirm": "退出登录后会回到登录页，并清理本机缓存；未上传的本机修改会被丢弃，已同步的数据仍保留在云端。确定退出吗？",
+    "signOutConfirm": "退出登录后会回到登录页。本机任务和待同步修改会安全保留，下次登录同一账号后继续同步。确定退出吗？",
     "signOutFailed": "退出登录失败，请稍后再试。",
     "data": "数据",
     "exportData": "导出我的数据",
@@ -245,6 +251,11 @@
     "syncing": "正在上传修改...",
     "pending": "本地已保存，等待同步",
     "offline": "离线可用，本地已保存",
+    "network": "网络连接异常",
+    "timeout": "连接云端超时",
+    "serviceUnavailable": "云服务暂时不可用",
+    "incompatible": "客户端与云服务版本不兼容",
+    "rateLimited": "云端请求过于频繁",
     "conflict": "云端有新版本",
     "error": "同步未完成 — 点击重试",
     "idle": "已同步"
@@ -253,6 +264,11 @@
     "syncing": "正在把本机修改上传到云端。",
     "pending": "修改已经保存在本机，点击可立即上传。",
     "offline": "当前可继续使用；重新联网后会同步到云端。",
+    "network": "设备仍已联网，但暂时无法连接云端；本机数据已保留。",
+    "timeout": "本机数据已保留；连接超时后会自动重试。",
+    "serviceUnavailable": "本机数据已保留；云服务恢复后会自动同步。",
+    "incompatible": "本机数据已保留；请更新客户端或联系服务支持。",
+    "rateLimited": "本机数据已保留；请稍后再尝试同步。",
     "conflict": "其他设备修改了任务，请先检查再覆盖。",
     "error": "本机数据仍已保存，点击可再次同步。",
     "idle": "所有内容均已同步。"

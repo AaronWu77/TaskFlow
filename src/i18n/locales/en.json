@@ -107,6 +107,7 @@
     "reorder": "Reorder",
     "reorderTasks": "Reorder Tasks",
     "reorderHint": "Drag the handle to rearrange your flow",
+    "reorderPosition": "Task moved to position {{position}}",
     "queuedCount": "{{count}} queued",
     "now": "Now",
     "done": "Done",
@@ -185,6 +186,11 @@
       "emailExists": "This email is already registered.",
       "invalidCode": "Verification code is invalid or expired.",
       "emailDelivery": "Email delivery is not configured. Please try again later.",
+      "rateLimited": "Too many attempts. Please try again later.",
+      "apiIncompatible": "This app version is not compatible with the cloud service. Update and try again.",
+      "serviceUnavailable": "The cloud service is temporarily unavailable. Please try again later.",
+      "network": "Could not reach the cloud service. Check your connection and try again.",
+      "timeout": "The cloud service took too long to respond. Please try again.",
       "generic": "Something went wrong. Please try again."
     },
     "privacyNote": "Your tasks stay private and sync across devices."
@@ -192,7 +198,7 @@
   "account": {
     "signOut": "Sign Out",
     "signingOut": "Signing out...",
-    "signOutConfirm": "Signing out returns to the login screen and clears this device's cache. Unsynced local changes will be discarded, while synced cloud data is kept. Continue?",
+    "signOutConfirm": "Signing out returns to the login screen. Tasks and pending changes stay safely on this device and resume syncing when you sign in to the same account. Continue?",
     "signOutFailed": "Could not sign out. Please try again.",
     "data": "Data",
     "exportData": "Export my data",
@@ -245,6 +251,11 @@
     "syncing": "Uploading changes...",
     "pending": "Saved locally, waiting to sync",
     "offline": "Offline, saved locally",
+    "network": "Network connection issue",
+    "timeout": "Cloud connection timed out",
+    "serviceUnavailable": "Cloud service temporarily unavailable",
+    "incompatible": "App and cloud versions are incompatible",
+    "rateLimited": "Too many cloud requests",
     "conflict": "Cloud version changed",
     "error": "Sync not finished — tap to retry",
     "idle": "Synced"
@@ -253,6 +264,11 @@
     "syncing": "Uploading this device's changes to the cloud.",
     "pending": "Your changes are saved on this device. Tap to upload now.",
     "offline": "You can keep working. Changes will sync after reconnecting.",
+    "network": "This device is online but cannot reach the cloud right now. Your local data is safe.",
+    "timeout": "Your local data is safe. Sync will retry after the timeout.",
+    "serviceUnavailable": "Your local data is safe and will sync when the cloud service recovers.",
+    "incompatible": "Your local data is safe. Update the app or contact support.",
+    "rateLimited": "Your local data is safe. Try syncing again later.",
     "conflict": "Another device changed a task. Review before overwriting.",
     "error": "Your local data is still saved. Tap to try syncing again.",
     "idle": "Everything is up to date."
