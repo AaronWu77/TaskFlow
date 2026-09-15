@@ -31,6 +31,7 @@ services:
       context: ./backend
       args:
         NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org/}
+        PRISMA_ENGINES_MIRROR: ${PRISMA_ENGINES_MIRROR:-https://binaries.prisma.sh}
     restart: unless-stopped
     mem_limit: ${API_MEMORY_LIMIT:-512m}
     cpus: ${API_CPU_LIMIT:-1.0}

@@ -2,6 +2,7 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 RUN apk add --no-cache openssl
 ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
+ARG PRISMA_ENGINES_MIRROR=https://binaries.prisma.sh
 COPY package*.json ./
 RUN npm ci --no-audit --no-fund
 COPY . .
