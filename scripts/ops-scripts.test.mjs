@@ -330,6 +330,10 @@ test('deployment rolls both immutable images back when final web checks fail', a
   const calls = path.join(work, 'docker-calls.log');
   await mkdir(fakeBin);
   await writeFile(path.join(fakeBin, 'sleep'), '#!/usr/bin/env bash\nexit 0\n');
+  await writeFile(path.join(fakeBin, 'systemctl'), `#!/usr/bin/env bash
+if [[ $1 == is-failed ]]; then exit 1; fi
+exit 0
+`);
   await writeFile(path.join(fakeBin, 'docker'), `#!/usr/bin/env bash
 printf '%s|api=%s|web=%s\\n' "$*" "$TASKFLOW_API_IMAGE" "$TASKFLOW_WEB_IMAGE" >>"$DEPLOY_TEST_LOG"
 if [[ $1 == inspect && $* == *api-container* ]]; then printf 'registry/api:previous\\n'; exit 0; fi
@@ -342,6 +346,7 @@ exit 0
 `);
   await chmod(path.join(fakeBin, 'docker'), 0o755);
   await chmod(path.join(fakeBin, 'sleep'), 0o755);
+  await chmod(path.join(fakeBin, 'systemctl'), 0o755);
 
   const result = spawnSync('bash', [deployScript, 'registry/api:new-sha', 'registry/web:new-sha'], {
     env: {
