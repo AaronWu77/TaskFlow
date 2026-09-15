@@ -104,7 +104,7 @@
     min-height: 100vh;
     min-height: 100dvh;
     min-height: -webkit-fill-available;
-    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-family: 'Plus Jakarta Sans Variable', 'Plus Jakarta Sans', sans-serif;
   }
 
   /**

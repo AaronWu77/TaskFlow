@@ -1,0 +1,11 @@
+[Unit]
+Description=Verify the latest TaskFlow PostgreSQL backup weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 03:10:00 Asia/Shanghai
+RandomizedDelaySec=20m
+Persistent=true
+Unit=taskflow-backup-verify.service
+
+[Install]
+WantedBy=timers.target

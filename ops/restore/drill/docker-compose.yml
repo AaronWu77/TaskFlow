@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: taskflow
+      POSTGRES_USER: taskflow
+      POSTGRES_PASSWORD: taskflow_restore_drill_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskflow"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - restore_data:/var/lib/postgresql/data
+
+  api:
+    image: ${TASKFLOW_RESTORE_API_IMAGE:-taskflow-restore-api:local}
+    build:
+      context: ../../../backend
+    environment:
+      DATABASE_URL: postgresql://taskflow:taskflow_restore_drill_password@postgres:5432/taskflow
+      JWT_ACCESS_SECRET: taskflow-restore-drill-access-secret-only
+      JWT_REFRESH_SECRET: taskflow-restore-drill-refresh-secret-only
+      COOKIE_SECURE: "false"
+      CORS_ORIGIN: http://localhost
+      EMAIL_VERIFICATION_CONSOLE: "false"
+      PORT: "3000"
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "npx prisma migrate deploy --schema=prisma/schema.prisma && node dist/index.js"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  restore_data:

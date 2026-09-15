@@ -6,7 +6,9 @@ import './styles/index.css';
 
 createRoot(document.getElementById('root')!).render(<App />);
 
-if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+// Capacitor already serves immutable bundled assets. Registering a service worker
+// for the capacitor:// origin adds a second cache and can preserve stale bundles.
+if (import.meta.env.PROD && window.location.protocol.startsWith('http') && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     void navigator.serviceWorker.register('/sw.js');
   });

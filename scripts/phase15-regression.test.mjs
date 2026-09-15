@@ -6,6 +6,7 @@ const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf
 
 test('React controls are the only task interaction surface', () => {
   const app = read('src/app/App.tsx');
+  const syncPresentation = read('src/app/sync-presentation.ts');
   assert.doesNotMatch(app, /taskflowNative/);
   assert.doesNotMatch(app, /taskflow:native/);
   assert.doesNotMatch(app, /NativeBridge/);
@@ -34,8 +35,9 @@ test('React controls are the only task interaction surface', () => {
   assert.doesNotMatch(app, /account\.signOutBlockedPending/);
   assert.doesNotMatch(app, /account\.deleteAccountBlocked/);
   assert.match(app, /const effectiveSyncStatus = useMemo/);
-  assert.match(app, /visibleSyncStatus\(syncStatus, pendingOperations, syncMeta, cloudSyncEnabled, connectionIssue\)/);
-  assert.match(app, /if \(rawStatus === 'error'\) return 'error'/);
+  assert.match(app, /visibleSyncStatus\(syncStateModel, syncMeta\)/);
+  assert.match(syncPresentation, /type ConnectivityState = 'online' \| 'offline' \| 'cloud-unreachable'/);
+  assert.match(syncPresentation, /if \(model\.queue === 'failed'\) return 'error'/);
   assert.match(app, /if \(pending\.length > 0 && readyPending\.length === 0\)/);
   assert.match(app, /const syncRequiresUserAction = effectiveSyncStatus === 'conflict'/);
   assert.match(app, /\['error', 'offline', 'network', 'timeout', 'serviceUnavailable', 'incompatible', 'rateLimited', 'conflict'\]\.includes\(effectiveSyncStatus\)/);
@@ -65,7 +67,7 @@ test('iOS shell is a thin Capacitor container without SwiftUI native controls', 
 test('core task behavior paths remain covered by regression checks', () => {
   const app = read('src/app/App.tsx');
   assert.match(app, /const createTaskFromForm =/);
-  assert.match(app, /const repeatedTasks = repeatUntilDate/);
+  assert.match(app, /type: repeatUntilDate \? 'create-series' : 'create'/);
   assert.match(app, /function TaskCard/);
   assert.match(app, /const handleAction =/);
   assert.match(app, /onAction\(task\.id, action\)/);
@@ -78,7 +80,7 @@ test('core task behavior paths remain covered by regression checks', () => {
   assert.match(app, /type:\s*'resolve-conflict'/);
   assert.match(app, /syncConflict\.open/);
   assert.match(app, /apiPushOperations\(getDeviceId\(user\.id\), readyPending\)/);
-  assert.match(app, /apiPullChanges\(cursor\)/);
+  assert.match(app, /apiPullChanges\(cursor, 500, getDeviceId\(user\.id\)\)/);
   assert.match(app, /status === 'conflict'/);
   assert.match(app, /normalizeCachedTask/);
 });
@@ -166,6 +168,14 @@ test('Flow motion avoids full-page compositing and expensive blur filters', () =
   assert.doesNotMatch(app, /const commitDelay/);
 });
 
+test('production startup has no render-blocking remote font and native skips the web service worker', () => {
+  const fonts = read('src/styles/fonts.css');
+  const main = read('src/main.tsx');
+  assert.doesNotMatch(fonts, /fonts\.(googleapis|gstatic)\.com/);
+  assert.match(fonts, /@fontsource-variable\/plus-jakarta-sans/);
+  assert.match(main, /window\.location\.protocol\.startsWith\('http'\)/);
+});
+
 test('iOS release scope remains iPhone portrait on iOS 17 with privacy manifest', () => {
   const project = read('ios/App/App.xcodeproj/project.pbxproj');
   const info = read('ios/App/App/Info.plist');
@@ -241,8 +251,9 @@ test('new sync engine uses cursor-based push-pull instead of legacy dirty flush'
   assert.doesNotMatch(app, /apiReorderTasks/);
   assert.doesNotMatch(app, /apiCreateTask/);
   assert.doesNotMatch(app, /apiUpdateTask/);
-  assert.match(api, /refreshInFlight = performRefresh\(\)\.finally/);
-  assert.match(api, /generation !== authGeneration/);
+  assert.match(api, /refreshInFlight = \{ generation, promise \}/);
+  assert.match(api, /generation !== authSessions\.generation/);
+  assert.match(api, /assertAuthSession\(requestContext\)/);
   assert.match(api, /apiSyncBootstrap/);
   assert.match(api, /apiPushOperations/);
   assert.match(backend, /router\.post\('\/push'/);
@@ -277,7 +288,8 @@ test('logout, native restore, and interrupted actions are race-safe', () => {
   const app = read('src/app/App.tsx');
   const api = read('src/app/api.ts');
   const storage = read('src/app/storage.ts');
-  assert.match(api, /logoutRequested = true[\s\S]*if \(refreshInFlight\) await refreshInFlight/);
+  assert.match(api, /logoutRequested = true[\s\S]*replaceAuthContext\(null, null\)/);
+  assert.doesNotMatch(api, /if \(refreshInFlight\) await refreshInFlight/);
   assert.match(api, /await onAuthFailure\?\.\(\)/);
   assert.match(api, /export async function clearLocalAuthTokens/);
   assert.doesNotMatch(app, /function finishSignedOutSession\(\) \{[\s\S]{0,120}clearLocalAuthTokens/);
@@ -289,16 +301,20 @@ test('logout, native restore, and interrupted actions are race-safe', () => {
   assert.match(storage, /while \(nativeWriteChains\.size > 0\)[\s\S]*await Promise\.all/);
 });
 
-test('new recurring tasks use durable occurrence identities without guessing legacy series', () => {
+test('new recurring tasks use an authoritative series without guessing legacy relationships', () => {
   const app = read('src/app/App.tsx');
   const syncRoute = read('backend/src/routes/sync.ts');
   const schema = read('backend/src/prisma/schema.prisma');
   const migration = read('backend/src/prisma/migrations/20260912100000_add_recurrence_identity/migration.sql');
   assert.match(app, /const seriesId = repeatUntilDate \? syncOperationId\(\) : null/);
   assert.match(app, /occurrenceDate: source\.seriesId \? dueDate : null/);
-  assert.match(app, /task\.seriesId === editedTask\.seriesId && task\.occurrenceDate === dueDate/);
+  assert.match(app, /type: repeatUntilDate \? 'create-series' : 'create'/);
+  assert.doesNotMatch(app, /task\.seriesId === editedTask\.seriesId && task\.occurrenceDate === dueDate/);
+  assert.match(syncRoute, /type === 'create-series'/);
+  assert.match(syncRoute, /type === 'update-series' \|\| type === 'delete-series'/);
   assert.match(syncRoute, /Boolean\(data\.seriesId\) !== Boolean\(data\.occurrenceDate\)/);
   assert.match(schema, /@@unique\(\[userId, seriesId, occurrenceDate\]\)/);
+  assert.match(schema, /model TaskSeries/);
   assert.match(migration, /Existing repeated tasks are intentionally left unlinked/);
 });
 

@@ -35,3 +35,12 @@ Thumbs.db
 # Logs
 npm-debug.log*
 pnpm-debug.log*
+
+# Local operations output and credentials
+ops/*.env
+ops/**/*.local
+ops/**/*.dump
+ops/**/*.sha256
+ops/**/*.meta
+ops/**/*.success
+test-results/

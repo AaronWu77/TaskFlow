@@ -7,6 +7,17 @@ export function classifySyncError(error) {
   return 'retryable';
 }
 
+export function syncFailureStatus(error, online) {
+  if (!online) return 'offline';
+  if (error && typeof error === 'object' && error.name === 'AbortError') return 'timeout';
+  const status = typeof error?.status === 'number' ? error.status : null;
+  const code = typeof error?.code === 'string' ? error.code : null;
+  if (status === 426 || code === 'SYNC_PROTOCOL_REQUIRED') return 'incompatible';
+  if (status === 429) return 'rateLimited';
+  if (status !== null && status >= 500) return 'serviceUnavailable';
+  return 'network';
+}
+
 export function takeSyncBatch(operations, isReady, limit = 50, dependencyKey = () => null) {
   const safeLimit = Number.isInteger(limit) && limit > 0 ? limit : 50;
   const ready = operations.filter(isReady);

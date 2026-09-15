@@ -1,0 +1,20 @@
+[Unit]
+Description=Restore the latest TaskFlow backup into an isolated environment
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/taskflow/ops.env
+ExecStart=/opt/TaskFlow/ops/restore/run-restore-drill.sh
+TimeoutStartSec=45m
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/taskflow-restore-reports /run/lock /var/lib/docker

@@ -1,0 +1,51 @@
+name: Production health
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: taskflow-production-health
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      ALERT_WEBHOOK_URL: ${{ secrets.TASKFLOW_ALERT_WEBHOOK_URL }}
+    steps:
+      - name: Check HTTPS readiness and latency
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          result=$(curl --fail --silent --show-error --max-time 10 \
+            --output /tmp/taskflow-health.json \
+            --write-out '%{http_code} %{time_total}' \
+            https://taskflow.top/api/v1/health)
+          read -r status elapsed <<<"${result}"
+          test "${status}" = "200"
+          grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' /tmp/taskflow-health.json
+          awk -v elapsed="${elapsed}" 'BEGIN { exit !(elapsed <= 5) }'
+
+      - name: Require at least 14 days of TLS validity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          openssl s_client -servername taskflow.top -connect taskflow.top:443 </dev/null 2>/dev/null \
+            | openssl x509 -noout -checkend 1209600
+
+      - name: Notify configured webhook on failure
+        if: failure() && env.ALERT_WEBHOOK_URL != ''
+        env:
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --max-time 10 \
+            -H 'Content-Type: application/json' \
+            --data "{\"service\":\"taskflow\",\"severity\":\"critical\",\"message\":\"External production health check failed: ${RUN_URL}\"}" \
+            "${ALERT_WEBHOOK_URL}"

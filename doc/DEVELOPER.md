@@ -17,7 +17,7 @@ ios/                    Capacitor iOS 工程
 scripts/                Node 内建测试运行器的回归测试
 ```
 
-生产请求链路为：`iOS/Web -> HTTPS Nginx -> /api -> Express -> Prisma -> PostgreSQL`。Nginx 将 `/api/` 转发到 API 容器，`/health` 用于健康检查。
+生产请求链路为：`iOS/Web -> HTTPS Nginx -> /api -> Express -> Prisma -> PostgreSQL`。Nginx 将 `/api/` 转发到 API 容器；`/live` 只验证进程存活，`/ready` 和兼容路径 `/health` 还会验证数据库可用。
 
 ## 环境要求与本地运行
 
@@ -125,7 +125,7 @@ docker compose up -d --build api
 docker compose logs -f api
 ```
 
-同步故障优先检查 `https://taskflow.top/api/health`、API 日志和 `/api/sync/bootstrap`（未登录应返回 401；返回 404 代表线上服务未更新）。备份生产数据库：
+同步故障优先检查 `https://taskflow.top/api/health`、API 日志和 `/api/sync/bootstrap`（未登录应返回 401；返回 404 代表线上服务未更新）。生产备份、OSS 上传、恢复演练、监控阈值和 systemd timer 的唯一操作手册位于 `ops/README.md`；不要再以同机纯 SQL 文件作为正式备份。紧急手工导出可使用：
 
 ```bash
 docker compose exec postgres pg_dump -U taskflow taskflow > taskflow-backup.sql

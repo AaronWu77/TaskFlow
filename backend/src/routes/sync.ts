@@ -1,16 +1,20 @@
 import { Router, Response, NextFunction, RequestHandler } from 'express';
 import { Prisma } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import { recomputeUserStats } from '../services/stats';
+import { applyTaskStatsDelta, recomputeUserStats } from '../services/stats';
 import { prisma } from '../prisma-client';
+import { recordSyncMetric } from '../services/metrics';
+import { addCalendarDays, isValidTimeZone, occurrenceDates, RepeatRule } from '../date-utils';
 
 const router = Router();
 const PRIORITIES = new Set(['P1', 'P2', 'P3']);
 const STATUSES = new Set(['todo', 'done', 'skipped']);
 const REPEAT_RULES = new Set(['none', 'daily', 'weekly', 'monthly']);
-const OP_TYPES = new Set(['create', 'update', 'soft-delete', 'restore', 'permanent-delete', 'reorder', 'resolve-conflict']);
+const OP_TYPES = new Set(['create', 'update', 'soft-delete', 'restore', 'permanent-delete', 'reorder', 'resolve-conflict', 'create-series', 'update-series', 'delete-series']);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const STATS_MUTATION_TYPES = new Set(['create', 'update', 'soft-delete', 'restore', 'permanent-delete', 'resolve-conflict']);
+const STATS_MUTATION_TYPES = new Set(['create', 'update', 'soft-delete', 'restore', 'permanent-delete', 'resolve-conflict', 'update-series', 'delete-series']);
+const SYNC_PROTOCOL_VERSION = 2;
 
 router.use(authMiddleware);
 
@@ -75,24 +79,187 @@ function taskSnapshot(task: {
   tag: string | null;
   progress: number;
   dueDate: string | null;
+  dueDateTyped: Date | null;
   reminderAt: string | null;
+  reminderAtTyped: Date | null;
   repeatRule: string | null;
   repeatUntilDate: string | null;
+  repeatUntilDateTyped: Date | null;
   seriesId: string | null;
+  seriesVersion: number | null;
   occurrenceDate: string | null;
+  occurrenceDateTyped: Date | null;
   completedAt: string | null;
+  completedAtTyped: Date | null;
   deletedAt: string | null;
+  deletedAtTyped: Date | null;
+  scheduleExcludedAt: Date | null;
   sortOrder: number;
   version: number;
   lastChangedByDeviceId: string | null;
   createdAt: Date;
   updatedAt: Date;
 }) {
+  const {
+    dueDateTyped,
+    reminderAtTyped,
+    repeatUntilDateTyped,
+    occurrenceDateTyped,
+    completedAtTyped,
+    deletedAtTyped,
+    scheduleExcludedAt: _scheduleExcludedAt,
+    ...legacyTask
+  } = task;
   return {
-    ...task,
+    ...legacyTask,
+    dueDate: dueDateTyped?.toISOString().slice(0, 10) ?? task.dueDate,
+    reminderAt: reminderAtTyped?.toISOString() ?? task.reminderAt,
+    repeatUntilDate: repeatUntilDateTyped?.toISOString().slice(0, 10) ?? task.repeatUntilDate,
+    occurrenceDate: occurrenceDateTyped?.toISOString().slice(0, 10) ?? task.occurrenceDate,
+    completedAt: completedAtTyped?.toISOString() ?? task.completedAt,
+    deletedAt: deletedAtTyped?.toISOString() ?? task.deletedAt,
     createdAt: task.createdAt.toISOString(),
     updatedAt: task.updatedAt.toISOString(),
   };
+}
+
+function dateOnlyValue(value: string | number | null | undefined): Date | null | undefined {
+  if (value === undefined) return undefined;
+  return typeof value === 'string' ? new Date(`${value}T00:00:00.000Z`) : null;
+}
+
+function dateTimeValue(value: string | number | null | undefined): Date | null | undefined {
+  if (value === undefined) return undefined;
+  return typeof value === 'string' ? new Date(value) : null;
+}
+
+function typedTaskFields(data: Record<string, string | number | null>): Prisma.TaskUpdateManyMutationInput {
+  return {
+    ...data,
+    dueDateTyped: dateOnlyValue(data.dueDate),
+    reminderAtTyped: dateTimeValue(data.reminderAt),
+    repeatUntilDateTyped: dateOnlyValue(data.repeatUntilDate),
+    occurrenceDateTyped: dateOnlyValue(data.occurrenceDate),
+    completedAtTyped: dateTimeValue(data.completedAt),
+    deletedAtTyped: dateTimeValue(data.deletedAt),
+  };
+}
+
+function seriesSnapshot(series: {
+  id: string;
+  userId: string;
+  title: string;
+  priority: string;
+  estimateMinutes: number | null;
+  tag: string | null;
+  repeatRule: string;
+  startDate: Date;
+  untilDate: Date;
+  timezone: string;
+  reminderAt: Date | null;
+  generatedThrough: Date | null;
+  version: number;
+  deletedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  return {
+    ...series,
+    startDate: series.startDate.toISOString().slice(0, 10),
+    untilDate: series.untilDate.toISOString().slice(0, 10),
+    reminderAt: series.reminderAt?.toISOString() ?? null,
+    generatedThrough: series.generatedThrough?.toISOString().slice(0, 10) ?? null,
+    deletedAt: series.deletedAt?.toISOString() ?? null,
+    createdAt: series.createdAt.toISOString(),
+    updatedAt: series.updatedAt.toISOString(),
+  };
+}
+
+function generationHorizon(startDate: string): string {
+  const rolling = addCalendarDays(new Date().toISOString().slice(0, 10), 90);
+  return startDate > rolling ? startDate : rolling;
+}
+
+async function createSeriesTask(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  series: {
+    id: string;
+    title: string;
+    priority: string;
+    estimateMinutes: number | null;
+    tag: string | null;
+    repeatRule: string;
+    untilDate: Date;
+    reminderAt: Date | null;
+    version: number;
+  },
+  dueDate: string,
+  sortOrder: number,
+  deviceId: string | null,
+  includeReminder: boolean,
+) {
+  const untilDate = series.untilDate.toISOString().slice(0, 10);
+  return tx.task.create({
+    data: {
+      userId,
+      title: series.title,
+      priority: series.priority,
+      estimateMinutes: series.estimateMinutes,
+      progress: 0,
+      status: 'todo',
+      tag: series.tag,
+      dueDate,
+      dueDateTyped: dateOnlyValue(dueDate),
+      reminderAt: includeReminder ? series.reminderAt?.toISOString() ?? null : null,
+      reminderAtTyped: includeReminder ? series.reminderAt : null,
+      repeatRule: series.repeatRule,
+      repeatUntilDate: untilDate,
+      repeatUntilDateTyped: dateOnlyValue(untilDate),
+      seriesId: series.id,
+      seriesVersion: series.version,
+      occurrenceDate: dueDate,
+      occurrenceDateTyped: dateOnlyValue(dueDate),
+      completedAt: null,
+      completedAtTyped: null,
+      deletedAt: null,
+      deletedAtTyped: null,
+      sortOrder,
+      lastChangedByDeviceId: deviceId,
+    },
+  });
+}
+
+async function materializeSeries(userId: string): Promise<void> {
+  await prisma.$transaction(async tx => {
+    await lockTaskOrderState(tx, userId);
+    const seriesRows = await tx.taskSeries.findMany({
+      where: { userId, deletedAt: null },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (seriesRows.length === 0) return;
+    let nextOrder = await tx.task.count({ where: { userId, status: 'todo', deletedAt: null } });
+    let createdAny = false;
+    for (const series of seriesRows) {
+      const startDate = series.startDate.toISOString().slice(0, 10);
+      const untilDate = series.untilDate.toISOString().slice(0, 10);
+      const generatedThrough = series.generatedThrough?.toISOString().slice(0, 10) ?? null;
+      const dates = occurrenceDates(startDate, untilDate, series.repeatRule as RepeatRule, generationHorizon(startDate), generatedThrough);
+      for (const dueDate of dates) {
+        const task = await createSeriesTask(tx, userId, series, dueDate, nextOrder, null, !generatedThrough && dueDate === startDate);
+        nextOrder += 1;
+        createdAny = true;
+        await recordChange(tx, userId, { taskId: task.id, type: 'create', snapshot: taskSnapshot(task) });
+      }
+      if (dates.length > 0) {
+        await tx.taskSeries.update({
+          where: { id: series.id },
+          data: { generatedThrough: dateOnlyValue(dates[dates.length - 1]) },
+        });
+      }
+    }
+    if (createdAny) await normalizeAndRecordTodoOrder(tx, userId, null);
+  });
 }
 
 async function upsertDevice(tx: Prisma.TransactionClient, userId: string, deviceId: string | null, body: Record<string, unknown>): Promise<void> {
@@ -212,6 +379,37 @@ async function recordOperation(
   return response;
 }
 
+async function normalizeAndRecordTodoOrder(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  deviceId: string | null,
+): Promise<{ order: Array<{ id: string; sortOrder: number }>; taskOrderVersion: number }> {
+  const tasks = await tx.task.findMany({
+    where: { userId, status: 'todo', deletedAt: null },
+    orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+    select: { id: true, sortOrder: true },
+  });
+  const order = tasks.map((task, sortOrder) => ({ id: task.id, sortOrder }));
+  const changed = order.filter((item, index) => tasks[index].sortOrder !== item.sortOrder);
+  if (changed.length > 0) {
+    const rows = Prisma.join(changed.map(item => Prisma.sql`(${item.id}, ${item.sortOrder})`));
+    await tx.$executeRaw(Prisma.sql`
+      UPDATE "Task" AS task
+      SET "sortOrder" = ordering."sortOrder",
+          "updatedAt" = NOW()
+      FROM (VALUES ${rows}) AS ordering("id", "sortOrder")
+      WHERE task."id" = ordering."id" AND task."userId" = ${userId}
+    `);
+  }
+  const state = await tx.userSyncState.update({
+    where: { userId },
+    data: { taskOrderVersion: { increment: 1 } },
+  });
+  const snapshot = { order, taskOrderVersion: state.taskOrderVersion };
+  await recordChange(tx, userId, { deviceId, type: 'reorder', snapshot });
+  return snapshot;
+}
+
 function parseTaskPayload(payload: unknown, partial: boolean): Record<string, string | number | null> | null {
   if (!isObject(payload)) return null;
   const data: Record<string, string | number | null> = {};
@@ -310,18 +508,32 @@ function parseTaskPayload(payload: unknown, partial: boolean): Record<string, st
   return data;
 }
 
-async function bootstrap(userId: string) {
+async function bootstrap(userId: string, deviceId: string | null) {
+  await prisma.userSyncState.upsert({ where: { userId }, create: { userId }, update: {} });
+  await materializeSeries(userId);
   return prisma.$transaction(async (tx) => {
-    const state = await tx.userSyncState.upsert({
-      where: { userId },
-      create: { userId },
-      update: {},
-    });
     const [tasks, deletedTasks, stats] = await Promise.all([
       tx.task.findMany({ where: { userId, deletedAt: null }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }] }),
       tx.task.findMany({ where: { userId, deletedAt: { not: null } }, orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }] }),
       tx.userStats.findUnique({ where: { userId } }),
     ]);
+    const state = await tx.userSyncState.findUniqueOrThrow({ where: { userId } });
+    if (deviceId) {
+      await tx.device.upsert({
+        where: { id: `${userId}:${deviceId}` },
+        create: {
+          id: `${userId}:${deviceId}`,
+          userId,
+          lastAcknowledgedCursor: state.nextSeq - 1,
+          requiresBootstrap: false,
+        },
+        update: {
+          lastSeenAt: new Date(),
+          lastAcknowledgedCursor: state.nextSeq - 1,
+          requiresBootstrap: false,
+        },
+      });
+    }
     return {
       tasks: tasks.map(taskSnapshot),
       deletedTasks: deletedTasks.map(taskSnapshot),
@@ -329,12 +541,15 @@ async function bootstrap(userId: string) {
       currentCursor: state.nextSeq - 1,
       taskOrderVersion: state.taskOrderVersion,
       serverTime: new Date().toISOString(),
+      protocolVersion: SYNC_PROTOCOL_VERSION,
+      snapshotId: randomUUID(),
     };
-  });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
 }
 
 router.get('/bootstrap', asyncHandler(async (req, res) => {
-  res.json(await bootstrap(req.userId!));
+  const deviceId = normalizeNullableString(req.query.deviceId, 120) ?? null;
+  res.json(await bootstrap(req.userId!, deviceId));
 }));
 
 router.get('/', asyncHandler(async (req, res) => {
@@ -349,28 +564,49 @@ router.get('/', asyncHandler(async (req, res) => {
     res.status(400).json({ code: 'VALIDATION_ERROR', error: 'limit must be a positive integer' });
     return;
   }
-  const [syncState, earliest] = await Promise.all([
-    prisma.userSyncState.upsert({ where: { userId: req.userId! }, create: { userId: req.userId! }, update: {} }),
-    prisma.taskChange.findFirst({ where: { userId: req.userId! }, orderBy: { seq: 'asc' }, select: { seq: true } }),
-  ]);
-  const earliestRecoverableCursor = earliest ? earliest.seq - 1 : syncState.nextSeq - 1;
-  if (cursor > 0 && cursor < earliestRecoverableCursor) {
+  await prisma.userSyncState.upsert({ where: { userId: req.userId! }, create: { userId: req.userId! }, update: {} });
+  const deviceId = normalizeNullableString(req.query.deviceId, 120) ?? null;
+  const page = await prisma.$transaction(async (tx) => {
+    const [syncState, earliest, device] = await Promise.all([
+      tx.userSyncState.findUniqueOrThrow({ where: { userId: req.userId! } }),
+      tx.taskChange.findFirst({ where: { userId: req.userId! }, orderBy: { seq: 'asc' }, select: { seq: true } }),
+      deviceId
+        ? tx.device.findUnique({ where: { id: `${req.userId!}:${deviceId}` } })
+        : Promise.resolve(null),
+    ]);
+    const earliestRecoverableCursor = earliest ? earliest.seq - 1 : syncState.nextSeq - 1;
+    if (cursor > 0 && (device?.requiresBootstrap || cursor < earliestRecoverableCursor)) return { expired: true as const };
+    const changes = await tx.taskChange.findMany({
+      where: { userId: req.userId!, seq: { gt: cursor } },
+      orderBy: { seq: 'asc' },
+      take: limit + 1,
+    });
+    const visible = changes.slice(0, limit);
+    const nextCursor = visible.length > 0 ? visible[visible.length - 1].seq : cursor;
+    if (deviceId) {
+      await tx.device.upsert({
+        where: { id: `${req.userId!}:${deviceId}` },
+        create: { id: `${req.userId!}:${deviceId}`, userId: req.userId!, lastAcknowledgedCursor: nextCursor },
+        update: {
+          lastSeenAt: new Date(),
+          lastAcknowledgedCursor: { set: Math.max(device?.lastAcknowledgedCursor ?? 0, nextCursor) },
+        },
+      });
+    }
+    return {
+      expired: false as const,
+      changes: visible,
+      nextCursor,
+      hasMore: changes.length > limit,
+      serverTime: new Date().toISOString(),
+      protocolVersion: SYNC_PROTOCOL_VERSION,
+    };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+  if (page.expired) {
     res.status(409).json({ code: 'CURSOR_EXPIRED', error: 'Sync history expired; bootstrap is required' });
     return;
   }
-  const changes = await prisma.taskChange.findMany({
-    where: { userId: req.userId!, seq: { gt: cursor } },
-    orderBy: { seq: 'asc' },
-    take: limit + 1,
-  });
-  const visible = changes.slice(0, limit);
-  const nextCursor = visible.length > 0 ? visible[visible.length - 1].seq : cursor;
-  res.json({
-    changes: visible,
-    nextCursor,
-    hasMore: changes.length > limit,
-    serverTime: new Date().toISOString(),
-  });
+  res.json(page);
 }));
 
 router.post('/push', asyncHandler(async (req, res) => {
@@ -420,6 +656,309 @@ router.post('/push', asyncHandler(async (req, res) => {
 
     try {
       const result = await prisma.$transaction(async (tx) => {
+        if (type === 'create-series') {
+          const payload = isObject(operation.payload) ? operation.payload : null;
+          const data = parseTaskPayload(operation.payload, false);
+          const seriesId = data ? normalizeString(data.seriesId, 120) : null;
+          const startDate = data && typeof data.dueDate === 'string' ? data.dueDate : null;
+          const untilDate = data && typeof data.repeatUntilDate === 'string' ? data.repeatUntilDate : null;
+          const repeatRule = data && typeof data.repeatRule === 'string' && data.repeatRule !== 'none'
+            ? data.repeatRule as RepeatRule
+            : null;
+          const timezone = payload && typeof payload.timezone === 'string' && isValidTimeZone(payload.timezone)
+            ? payload.timezone
+            : 'UTC';
+          if (!data || !seriesId || !startDate || !untilDate || !repeatRule
+            || data.occurrenceDate !== startDate || untilDate < startDate) {
+            return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'Invalid task series payload' } };
+          }
+          await lockTaskOrderState(tx, req.userId!);
+          const series = await tx.taskSeries.create({
+            data: {
+              id: seriesId,
+              userId: req.userId!,
+              title: data.title as string,
+              priority: data.priority as string,
+              estimateMinutes: data.estimateMinutes as number | null,
+              tag: data.tag as string | null | undefined,
+              repeatRule,
+              startDate: dateOnlyValue(startDate)!,
+              untilDate: dateOnlyValue(untilDate)!,
+              timezone,
+              reminderAt: dateTimeValue(data.reminderAt) ?? null,
+            },
+          });
+          const activeCount = await tx.task.count({ where: { userId: req.userId!, status: 'todo', deletedAt: null } });
+          const dates = occurrenceDates(startDate, untilDate, repeatRule, generationHorizon(startDate));
+          const createdTasks = [];
+          let firstChange: unknown;
+          for (const [index, dueDate] of dates.entries()) {
+            const task = await createSeriesTask(tx, req.userId!, series, dueDate, activeCount + index, deviceId, index === 0);
+            createdTasks.push(task);
+            const change = await recordChange(tx, req.userId!, {
+              taskId: task.id,
+              operationId: index === 0 ? operationId : null,
+              deviceId,
+              type: 'create',
+              snapshot: taskSnapshot(task),
+            });
+            if (index === 0) firstChange = change;
+          }
+          const savedSeries = await tx.taskSeries.update({
+            where: { id: series.id },
+            data: { generatedThrough: dateOnlyValue(dates[dates.length - 1]) },
+          });
+          const order = await normalizeAndRecordTodoOrder(tx, req.userId!, deviceId);
+          const taskSnapshots = createdTasks.map(taskSnapshot);
+          const response = {
+            operationId,
+            change: firstChange,
+            task: taskSnapshots[0],
+            tasks: taskSnapshots,
+            clientTaskId: operation.clientTaskId,
+            series: seriesSnapshot(savedSeries),
+            order,
+          };
+          return { accepted: await recordOperation(tx, req.userId!, operationId, null, type, response) };
+        }
+
+        if (type === 'update-series' || type === 'delete-series') {
+          const payload = isObject(operation.payload) ? operation.payload : {};
+          const seriesId = normalizeString(payload.seriesId ?? operation.taskId, 120);
+          const baseVersion = Number.isInteger(operation.baseVersion) ? operation.baseVersion as number : null;
+          const scope = payload.scope === 'all' || payload.scope === 'future' ? payload.scope : null;
+          const fromDate = scope === 'all' ? null : normalizeString(payload.fromDate, 10);
+          if (!seriesId || baseVersion === null || !scope || (scope === 'future' && (!fromDate || !isValidDateOnly(fromDate)))) {
+            return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'Invalid task series operation' } };
+          }
+          await lockTaskOrderState(tx, req.userId!);
+          const existingSeries = await tx.taskSeries.findFirst({ where: { id: seriesId, userId: req.userId! } });
+          if (!existingSeries || existingSeries.deletedAt) {
+            return { rejected: { operationId, code: 'SERIES_NOT_FOUND', error: 'Task series not found' } };
+          }
+          if (existingSeries.version !== baseVersion) {
+            const serverTasks = await tx.task.findMany({
+              where: { userId: req.userId!, seriesId },
+              orderBy: [{ occurrenceDate: 'asc' }, { id: 'asc' }],
+            });
+            return {
+              conflict: {
+                operationId,
+                code: 'SERIES_CONFLICT',
+                serverSeries: seriesSnapshot(existingSeries),
+                serverTasks: serverTasks.map(taskSnapshot),
+                serverVersion: existingSeries.version,
+                clientOperation: operation,
+              },
+            };
+          }
+          const occurrenceFilter = fromDate ? { gte: fromDate } : undefined;
+          const affected = await tx.task.findMany({
+            where: { userId: req.userId!, seriesId, occurrenceDate: occurrenceFilter },
+            orderBy: [{ occurrenceDate: 'asc' }, { id: 'asc' }],
+          });
+          if (scope === 'future' && affected.length === 0) {
+            return { rejected: { operationId, code: 'SERIES_OCCURRENCE_NOT_FOUND', error: 'Series occurrence not found' } };
+          }
+          const changedTasks = [];
+          let seriesMembershipChanged = false;
+          if (type === 'update-series') {
+            const title = payload.title === undefined ? undefined : normalizeString(payload.title, 200);
+            const priority = payload.priority === undefined ? undefined
+              : typeof payload.priority === 'string' && PRIORITIES.has(payload.priority) ? payload.priority : null;
+            const estimateMinutes = payload.estimateMinutes === undefined ? undefined
+              : payload.estimateMinutes === null ? null : parseInteger(payload.estimateMinutes, 1, 1440);
+            const tag = normalizeNullableString(payload.tag, 80);
+            const repeatRule = payload.repeatRule === undefined
+              ? existingSeries.repeatRule as RepeatRule
+              : typeof payload.repeatRule === 'string' && payload.repeatRule !== 'none' && REPEAT_RULES.has(payload.repeatRule)
+                ? payload.repeatRule as RepeatRule
+                : null;
+            const submittedStartDate = payload.dueDate === undefined ? undefined : normalizeString(payload.dueDate, 10);
+            const submittedUntilDate = payload.repeatUntilDate === undefined ? undefined : normalizeString(payload.repeatUntilDate, 10);
+            const existingStartDate = existingSeries.startDate.toISOString().slice(0, 10);
+            const existingUntilDate = existingSeries.untilDate.toISOString().slice(0, 10);
+            const nextStartDate = submittedStartDate ?? (scope === 'future' ? fromDate! : existingStartDate);
+            const nextUntilDate = submittedUntilDate ?? existingUntilDate;
+            const previousOccurrence = scope === 'future'
+              ? await tx.task.findFirst({
+                where: { userId: req.userId!, seriesId, occurrenceDate: { lt: fromDate! } },
+                orderBy: { occurrenceDate: 'desc' },
+                select: { occurrenceDate: true },
+              })
+              : null;
+            const scheduleChanged = payload.repeatRule !== undefined
+              || payload.dueDate !== undefined
+              || payload.repeatUntilDate !== undefined;
+            if (title === null || priority === null || (payload.estimateMinutes !== undefined && estimateMinutes === undefined)
+              || (payload.tag !== undefined && tag === undefined) || repeatRule === null
+              || !isValidDateOnly(nextStartDate) || !isValidDateOnly(nextUntilDate)
+              || nextUntilDate < nextStartDate
+              || (scope === 'future' && previousOccurrence?.occurrenceDate
+                && nextStartDate <= previousOccurrence.occurrenceDate)) {
+              return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'Invalid series update payload' } };
+            }
+            const nextSeriesVersion = baseVersion + 1;
+            const updatedSeries = await tx.taskSeries.updateMany({
+              where: { id: seriesId, userId: req.userId!, version: baseVersion },
+              data: {
+                title,
+                priority: priority ?? undefined,
+                estimateMinutes,
+                tag: payload.tag === undefined ? undefined : tag,
+                repeatRule,
+                startDate: scheduleChanged ? dateOnlyValue(nextStartDate)! : undefined,
+                untilDate: scheduleChanged ? dateOnlyValue(nextUntilDate)! : undefined,
+                generatedThrough: scheduleChanged ? null : undefined,
+                version: { increment: 1 },
+              },
+            });
+            if (updatedSeries.count !== 1) {
+              const latest = await tx.taskSeries.findUniqueOrThrow({ where: { id: seriesId } });
+              const serverTasks = await tx.task.findMany({
+                where: { userId: req.userId!, seriesId },
+                orderBy: [{ occurrenceDate: 'asc' }, { id: 'asc' }],
+              });
+              return { conflict: { operationId, code: 'SERIES_CONFLICT', serverSeries: seriesSnapshot(latest), serverTasks: serverTasks.map(taskSnapshot), serverVersion: latest.version, clientOperation: operation } };
+            }
+            const savedSeries = await tx.taskSeries.findUniqueOrThrow({ where: { id: seriesId } });
+            const targetDates = scheduleChanged
+              ? occurrenceDates(nextStartDate, nextUntilDate, repeatRule, generationHorizon(nextStartDate))
+              : [];
+            const targetDateSet = new Set(targetDates);
+            let operationChangeRecorded = false;
+            for (const task of affected) {
+              const occurrenceDate = task.occurrenceDate ?? task.dueDate;
+              // Completed/skipped work is immutable history. A manually deleted
+              // occurrence is also left alone; only a prior schedule exclusion
+              // may be brought back when the new schedule includes its identity.
+              if (task.status !== 'todo' || (task.deletedAt && !task.scheduleExcludedAt)) continue;
+              const restoreToSchedule = scheduleChanged
+                && !!task.deletedAt
+                && !!task.scheduleExcludedAt
+                && !!occurrenceDate
+                && targetDateSet.has(occurrenceDate);
+              if (task.deletedAt && !restoreToSchedule) continue;
+              const removeFromSchedule = scheduleChanged
+                && task.status === 'todo'
+                && !task.deletedAt
+                && (!occurrenceDate || !targetDateSet.has(occurrenceDate));
+              const deletedAt = removeFromSchedule ? new Date() : restoreToSchedule ? null : undefined;
+              if (removeFromSchedule || restoreToSchedule) seriesMembershipChanged = true;
+              const saved = await tx.task.update({
+                where: { id: task.id },
+                data: {
+                  title,
+                  priority: priority ?? undefined,
+                  estimateMinutes,
+                  tag: payload.tag === undefined ? undefined : tag,
+                  repeatRule,
+                  repeatUntilDate: nextUntilDate,
+                  repeatUntilDateTyped: dateOnlyValue(nextUntilDate),
+                  seriesVersion: nextSeriesVersion,
+                  deletedAt: deletedAt instanceof Date ? deletedAt.toISOString() : deletedAt,
+                  deletedAtTyped: deletedAt,
+                  scheduleExcludedAt: removeFromSchedule ? deletedAt : restoreToSchedule ? null : undefined,
+                  version: { increment: 1 },
+                  lastChangedByDeviceId: deviceId,
+                },
+              });
+              if (removeFromSchedule || restoreToSchedule) await applyTaskStatsDelta(tx, req.userId!, task, saved);
+              changedTasks.push(saved);
+              await recordChange(tx, req.userId!, {
+                taskId: saved.id,
+                operationId: operationChangeRecorded ? null : operationId,
+                deviceId,
+                type: removeFromSchedule ? 'soft-delete' : restoreToSchedule ? 'restore' : 'update',
+                snapshot: taskSnapshot(saved),
+                tombstone: removeFromSchedule ? { taskId: saved.id, deletedAt: saved.deletedAt, version: saved.version } : undefined,
+              });
+              operationChangeRecorded = true;
+            }
+            if (scheduleChanged) {
+              const allSeriesTasks = await tx.task.findMany({
+                where: { userId: req.userId!, seriesId },
+                select: { occurrenceDate: true },
+              });
+              const existingDates = new Set(allSeriesTasks.map(task => task.occurrenceDate).filter((date): date is string => !!date));
+              let nextOrder = await tx.task.count({ where: { userId: req.userId!, status: 'todo', deletedAt: null } });
+              for (const dueDate of targetDates) {
+                if (existingDates.has(dueDate)) continue;
+                const created = await createSeriesTask(tx, req.userId!, savedSeries, dueDate, nextOrder, deviceId, false);
+                seriesMembershipChanged = true;
+                nextOrder += 1;
+                changedTasks.push(created);
+                await recordChange(tx, req.userId!, {
+                  taskId: created.id,
+                  operationId: operationChangeRecorded ? null : operationId,
+                  deviceId,
+                  type: 'create',
+                  snapshot: taskSnapshot(created),
+                });
+                operationChangeRecorded = true;
+              }
+              await tx.taskSeries.update({
+                where: { id: seriesId },
+                data: { generatedThrough: dateOnlyValue(targetDates[targetDates.length - 1] ?? nextStartDate) },
+              });
+            }
+            // A series version is global, even when only future occurrences are
+            // materially changed. Keep every occurrence on the authoritative
+            // version so a later edit opened from historical data cannot submit
+            // an apparently-current but actually stale baseVersion.
+            await tx.task.updateMany({
+              where: { userId: req.userId!, seriesId },
+              data: { seriesVersion: nextSeriesVersion },
+            });
+          } else {
+            const deletedAt = new Date();
+            for (const [index, task] of affected.entries()) {
+              if (task.deletedAt) continue;
+              if (scope === 'future' && task.status !== 'todo') continue;
+              seriesMembershipChanged = task.status === 'todo' || seriesMembershipChanged;
+              const saved = await tx.task.update({
+                where: { id: task.id },
+                data: {
+                  deletedAt: deletedAt.toISOString(),
+                  deletedAtTyped: deletedAt,
+                  scheduleExcludedAt: null,
+                  seriesVersion: baseVersion + 1,
+                  version: { increment: 1 },
+                  lastChangedByDeviceId: deviceId,
+                },
+              });
+              await applyTaskStatsDelta(tx, req.userId!, task, saved);
+              changedTasks.push(saved);
+              await recordChange(tx, req.userId!, {
+                taskId: saved.id,
+                operationId: index === 0 ? operationId : null,
+                deviceId,
+                type: 'soft-delete',
+                snapshot: taskSnapshot(saved),
+                tombstone: { taskId: saved.id, deletedAt: saved.deletedAt, version: saved.version },
+              });
+            }
+            const deletesWholeSeries = scope === 'all'
+              || (fromDate !== null && fromDate <= existingSeries.startDate.toISOString().slice(0, 10));
+            await tx.taskSeries.update({
+              where: { id: seriesId },
+              data: deletesWholeSeries
+                ? { deletedAt, version: { increment: 1 } }
+                : { untilDate: dateOnlyValue(addCalendarDays(fromDate!, -1))!, version: { increment: 1 } },
+            });
+            await tx.task.updateMany({
+              where: { userId: req.userId!, seriesId },
+              data: { seriesVersion: baseVersion + 1 },
+            });
+          }
+          const savedSeries = await tx.taskSeries.findUniqueOrThrow({ where: { id: seriesId } });
+          const order = seriesMembershipChanged
+            ? await normalizeAndRecordTodoOrder(tx, req.userId!, deviceId)
+            : undefined;
+          const response = { operationId, series: seriesSnapshot(savedSeries), tasks: changedTasks.map(taskSnapshot), order };
+          return { accepted: await recordOperation(tx, req.userId!, operationId, null, type, response) };
+        }
+
         if (type === 'create') {
           const data = parseTaskPayload(operation.payload, false);
           if (!data) return { rejected: { operationId, code: 'VALIDATION_ERROR', error: 'Invalid task payload' } };
@@ -434,19 +973,28 @@ router.post('/push', asyncHandler(async (req, res) => {
               status: data.status as string,
               tag: data.tag as string | null | undefined,
               dueDate: data.dueDate as string | null | undefined,
+              dueDateTyped: dateOnlyValue(data.dueDate),
               reminderAt: data.reminderAt as string | null | undefined,
+              reminderAtTyped: dateTimeValue(data.reminderAt),
               repeatRule: data.repeatRule as string | null | undefined,
               repeatUntilDate: data.repeatUntilDate as string | null | undefined,
+              repeatUntilDateTyped: dateOnlyValue(data.repeatUntilDate),
               seriesId: data.seriesId as string | null | undefined,
               occurrenceDate: data.occurrenceDate as string | null | undefined,
+              occurrenceDateTyped: dateOnlyValue(data.occurrenceDate),
               completedAt: data.status === 'done' ? new Date().toISOString() : null,
+              completedAtTyped: data.status === 'done' ? new Date() : null,
               sortOrder: data.sortOrder as number,
               lastChangedByDeviceId: deviceId,
             },
           });
+          await applyTaskStatsDelta(tx, req.userId!, null, created);
           const snapshot = taskSnapshot(created);
           const change = await recordChange(tx, req.userId!, { taskId: created.id, operationId, deviceId, type: 'create', snapshot });
-          const response = { operationId, change, task: snapshot, clientTaskId: operation.clientTaskId };
+          const order = created.status === 'todo' && !created.deletedAt
+            ? await normalizeAndRecordTodoOrder(tx, req.userId!, deviceId)
+            : undefined;
+          const response = { operationId, change, task: snapshot, clientTaskId: operation.clientTaskId, order };
           return { accepted: await recordOperation(tx, req.userId!, operationId, created.id, type, response) };
         }
 
@@ -539,13 +1087,16 @@ router.post('/push', asyncHandler(async (req, res) => {
           else if (data.status !== undefined && data.status !== 'done' && existing.completedAt) data.completedAt = null;
           const changed = await tx.task.updateMany({
             where: { id: taskId, userId: req.userId!, version: baseVersion },
-            data: { ...data, version: { increment: 1 }, lastChangedByDeviceId: deviceId },
+            data: { ...typedTaskFields(data), version: { increment: 1 }, lastChangedByDeviceId: deviceId },
           });
           if (changed.count !== 1) return taskCasFailure(tx, req.userId!, taskId, operationId, operation);
           const saved = await tx.task.findUniqueOrThrow({ where: { id: taskId } });
+          await applyTaskStatsDelta(tx, req.userId!, existing, saved);
           const snapshot = taskSnapshot(saved);
           const change = await recordChange(tx, req.userId!, { taskId, operationId, deviceId, type: 'update', snapshot });
-          const response = { operationId, change, task: snapshot };
+          const membershipChanged = (existing.status === 'todo' && !existing.deletedAt) !== (saved.status === 'todo' && !saved.deletedAt);
+          const order = membershipChanged ? await normalizeAndRecordTodoOrder(tx, req.userId!, deviceId) : undefined;
+          const response = { operationId, change, task: snapshot, order };
           return { accepted: await recordOperation(tx, req.userId!, operationId, taskId, type, response) };
         }
 
@@ -553,14 +1104,18 @@ router.post('/push', asyncHandler(async (req, res) => {
           const deletedAt = type === 'soft-delete' ? existing.deletedAt || new Date().toISOString() : null;
           const changed = await tx.task.updateMany({
             where: { id: taskId, userId: req.userId!, version: baseVersion },
-            data: { deletedAt, version: { increment: 1 }, lastChangedByDeviceId: deviceId },
+            data: { deletedAt, deletedAtTyped: dateTimeValue(deletedAt), version: { increment: 1 }, lastChangedByDeviceId: deviceId },
           });
           if (changed.count !== 1) return taskCasFailure(tx, req.userId!, taskId, operationId, operation);
           const saved = await tx.task.findUniqueOrThrow({ where: { id: taskId } });
+          await applyTaskStatsDelta(tx, req.userId!, existing, saved);
           const snapshot = taskSnapshot(saved);
           const tombstone = type === 'soft-delete' ? { taskId, deletedAt, version: saved.version } : undefined;
           const change = await recordChange(tx, req.userId!, { taskId, operationId, deviceId, type, snapshot, tombstone });
-          const response = { operationId, change, task: snapshot };
+          const membershipChanged = existing.status === 'todo'
+            && ((type === 'soft-delete' && !existing.deletedAt) || (type === 'restore' && !!existing.deletedAt));
+          const order = membershipChanged ? await normalizeAndRecordTodoOrder(tx, req.userId!, deviceId) : undefined;
+          const response = { operationId, change, task: snapshot, order };
           return { accepted: await recordOperation(tx, req.userId!, operationId, taskId, type, response) };
         }
 
@@ -572,6 +1127,7 @@ router.post('/push', asyncHandler(async (req, res) => {
             where: { id: taskId, userId: req.userId!, version: baseVersion, deletedAt: { not: null } },
           });
           if (deleted.count !== 1) return taskCasFailure(tx, req.userId!, taskId, operationId, operation);
+          await applyTaskStatsDelta(tx, req.userId!, existing, null);
           const tombstone = { taskId, deletedAt: existing.deletedAt, permanentlyDeletedAt: new Date().toISOString(), version: existing.version + 1 };
           const change = await recordChange(tx, req.userId!, { taskId, operationId, deviceId, type, tombstone });
           const response = { operationId, change, tombstone };
@@ -606,6 +1162,11 @@ router.post('/push', asyncHandler(async (req, res) => {
 
   const userStats = statsMayHaveChanged ? await recomputeUserStats(prisma, req.userId!) : undefined;
   const state = await prisma.userSyncState.upsert({ where: { userId: req.userId! }, create: { userId: req.userId! }, update: {} });
+  recordSyncMetric(accepted.length, conflicts.length, rejected.length);
+  if (process.env.NODE_ENV !== 'production' && req.get('X-TaskFlow-Test-Drop-After-Commit') === '1') {
+    req.socket.destroy();
+    return;
+  }
   res.json({ accepted, conflicts, rejected, nextCursorHint: state.nextSeq - 1, userStats });
 }));
 

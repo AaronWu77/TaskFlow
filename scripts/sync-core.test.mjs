@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { classifySyncError, syncRetryDelay, takeSyncBatch } from '../src/app/sync-core.mjs';
+import { classifySyncError, syncFailureStatus, syncRetryDelay, takeSyncBatch } from '../src/app/sync-core.mjs';
 
 test('sync retry delay backs off, adds bounded jitter, and caps at thirty seconds', () => {
   assert.equal(syncRetryDelay(1, () => 0.5), 750);
@@ -60,4 +60,13 @@ test('sync errors distinguish conflicts, missing records, invalid writes, and re
   assert.equal(classifySyncError({ status: 422 }), 'invalid');
   assert.equal(classifySyncError({ status: 503 }), 'retryable');
   assert.equal(classifySyncError(new TypeError('network failed')), 'retryable');
+});
+
+test('sync presentation distinguishes offline, timeout, protocol, rate limit, service, and transport failures', () => {
+  assert.equal(syncFailureStatus(new Error('offline'), false), 'offline');
+  assert.equal(syncFailureStatus(Object.assign(new Error('timeout'), { name: 'AbortError' }), true), 'timeout');
+  assert.equal(syncFailureStatus({ status: 426 }, true), 'incompatible');
+  assert.equal(syncFailureStatus({ status: 429 }, true), 'rateLimited');
+  assert.equal(syncFailureStatus({ status: 503 }, true), 'serviceUnavailable');
+  assert.equal(syncFailureStatus(new TypeError('fetch failed'), true), 'network');
 });

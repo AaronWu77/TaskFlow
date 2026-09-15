@@ -4,19 +4,23 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma-client';
+import { authMiddleware, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const VERIFICATION_TTL_MS = 10 * 60 * 1000;
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const REFRESH_ROTATION_GRACE_MS = 5_000;
+
+class RefreshRotationRaceError extends Error {}
 
 /** Wraps an async route handler so unhandled rejections propagate to Express error middleware */
 function asyncHandler(fn: (req: Request, res: Response, next: NextFunction) => Promise<void>): RequestHandler {
   return (req, res, next) => fn(req, res, next).catch(next);
 }
 
-function signAccess(userId: string) {
-  return jwt.sign({ userId }, process.env.JWT_ACCESS_SECRET!, {
+function signAccess(userId: string, authVersion: number, sessionId: string) {
+  return jwt.sign({ userId, authVersion, sessionId }, process.env.JWT_ACCESS_SECRET!, {
     expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
   } as jwt.SignOptions);
 }
@@ -104,20 +108,32 @@ function includeRefreshTokenInBody(req: Request): boolean {
   return req.get('X-TaskFlow-Platform') === 'native' && !!origin && allowedNativeOrigins.includes(origin);
 }
 
-async function issueSession(user: { id: string; email: string; emailVerifiedAt: Date | null; displayName?: string | null; timezone?: string | null; locale?: string | null }, req: Request, res: Response, status = 200) {
-  const accessToken = signAccess(user.id);
-  const refreshToken = await createRefreshSession(user.id);
-  res.cookie(REFRESH_COOKIE, refreshToken, COOKIE_OPTS);
+async function issueSession(user: { id: string; email: string; emailVerifiedAt: Date | null; authVersion: number; displayName?: string | null; timezone?: string | null; locale?: string | null }, req: Request, res: Response, status = 200) {
+  const refreshSession = await createRefreshSession(user.id, req);
+  const accessToken = signAccess(user.id, user.authVersion, refreshSession.id);
+  res.cookie(REFRESH_COOKIE, refreshSession.token, COOKIE_OPTS);
   res.status(status).json({
     accessToken,
-    ...(includeRefreshTokenInBody(req) ? { refreshToken } : {}),
+    ...(includeRefreshTokenInBody(req) ? { refreshToken: refreshSession.token } : {}),
     user: userPayload(user),
   });
 }
 
-async function sendVerificationCode(email: string, code: string): Promise<void> {
+type AuthCodePurpose = 'verification' | 'password-reset' | 'account-restore';
+
+async function sendAuthCode(email: string, code: string, purpose: AuthCodePurpose): Promise<void> {
   const resendApiKey = process.env.RESEND_API_KEY;
   const emailFrom = process.env.EMAIL_FROM || 'TaskFlow <verify@taskflow.top>';
+  const subject = purpose === 'verification'
+    ? 'Your TaskFlow verification code'
+    : purpose === 'password-reset'
+      ? 'Reset your TaskFlow password'
+      : 'Restore your TaskFlow account';
+  const instruction = purpose === 'verification'
+    ? 'finish signing in'
+    : purpose === 'password-reset'
+      ? 'reset your password'
+      : 'restore your account';
   if (resendApiKey) {
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -128,16 +144,16 @@ async function sendVerificationCode(email: string, code: string): Promise<void> 
       body: JSON.stringify({
         from: emailFrom,
         to: [email],
-        subject: 'Your TaskFlow verification code',
+        subject,
         html: `
           <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.5; color: #111827;">
-            <h1 style="font-size: 20px; margin: 0 0 12px;">Verify your TaskFlow account</h1>
-            <p style="margin: 0 0 16px;">Enter this code in TaskFlow to finish signing in:</p>
+            <h1 style="font-size: 20px; margin: 0 0 12px;">${subject}</h1>
+            <p style="margin: 0 0 16px;">Enter this code in TaskFlow to ${instruction}:</p>
             <p style="font-size: 28px; font-weight: 700; letter-spacing: 0.2em; margin: 0 0 16px;">${code}</p>
             <p style="margin: 0; color: #6b7280;">This code expires in 10 minutes. If you did not request it, you can ignore this email.</p>
           </div>
         `,
-        text: `Your TaskFlow verification code is ${code}. It expires in 10 minutes.`,
+        text: `Your TaskFlow code to ${instruction} is ${code}. It expires in 10 minutes.`,
       }),
     });
     if (!response.ok) {
@@ -159,8 +175,8 @@ async function sendVerificationCode(email: string, code: string): Promise<void> 
       },
       body: JSON.stringify({
         to: email,
-        subject: 'Your TaskFlow verification code',
-        text: `Your TaskFlow verification code is ${code}. It expires in 10 minutes.`,
+        subject,
+        text: `Your TaskFlow code to ${instruction} is ${code}. It expires in 10 minutes.`,
       }),
     });
     if (!response.ok) throw new Error('Email verification webhook failed');
@@ -171,13 +187,45 @@ async function sendVerificationCode(email: string, code: string): Promise<void> 
   if (!allowConsoleDelivery) {
     throw new Error('Email delivery is not configured');
   }
-  console.log(`TaskFlow email verification code for ${email}: ${code}`);
+  console.log(`TaskFlow ${purpose} code for ${email}: ${code}`);
 }
 
 async function startEmailVerification(email: string): Promise<{ devCode?: string }> {
   const code = await createVerificationCode(email);
-  await sendVerificationCode(email, code);
+  await sendAuthCode(email, code, 'verification');
   return process.env.NODE_ENV === 'production' ? {} : { devCode: code };
+}
+
+function passwordCodeHash(email: string, code: string): string {
+  return crypto.createHash('sha256').update(`password:${email}:${code}:${process.env.JWT_REFRESH_SECRET}`).digest('hex');
+}
+
+async function createPasswordCode(email: string, purpose: Exclude<AuthCodePurpose, 'verification'>): Promise<string> {
+  const code = String(crypto.randomInt(100000, 1000000));
+  await prisma.passwordReset.upsert({
+    where: { email },
+    create: { email, codeHash: passwordCodeHash(email, code), expiresAt: new Date(Date.now() + VERIFICATION_TTL_MS) },
+    update: { codeHash: passwordCodeHash(email, code), expiresAt: new Date(Date.now() + VERIFICATION_TTL_MS), attempts: 0 },
+  });
+  await sendAuthCode(email, code, purpose);
+  return code;
+}
+
+async function consumePasswordCode(email: string, code: string): Promise<boolean> {
+  const now = new Date();
+  const matched = await prisma.passwordReset.updateMany({
+    where: { email, codeHash: passwordCodeHash(email, code.trim()), expiresAt: { gt: now }, attempts: { lt: 5 } },
+    data: { attempts: { increment: 1 } },
+  });
+  if (matched.count === 1) {
+    await prisma.passwordReset.deleteMany({ where: { email } });
+    return true;
+  }
+  await prisma.passwordReset.updateMany({
+    where: { email, expiresAt: { gt: now }, attempts: { lt: 5 } },
+    data: { attempts: { increment: 1 } },
+  });
+  return false;
 }
 
 function refreshTokenHash(token: string): string {
@@ -197,21 +245,33 @@ function refreshExpiry(): Date {
   return new Date(Date.now() + refreshTtlMs());
 }
 
-function buildRefreshSession(userId: string): { token: string; tokenHash: string; expiresAt: Date } {
-  const refreshToken = signRefresh(userId);
+function sessionMetadata(req: Request): { deviceName: string | null; platform: string | null } {
+  const requestedName = req.get('X-TaskFlow-Device-Name')?.trim().slice(0, 80);
+  const platform = req.get('X-TaskFlow-Platform')?.trim().slice(0, 40) || null;
   return {
-    token: refreshToken,
-    tokenHash: refreshTokenHash(refreshToken),
-    expiresAt: refreshExpiry(),
+    deviceName: requestedName || (platform === 'native' ? 'TaskFlow iOS' : 'TaskFlow Web'),
+    platform,
   };
 }
 
-async function createRefreshSession(userId: string): Promise<string> {
-  const session = buildRefreshSession(userId);
+function buildRefreshSession(userId: string, req: Request, familyId: string = crypto.randomUUID()): { id: string; token: string; tokenHash: string; expiresAt: Date; familyId: string; deviceName: string | null; platform: string | null } {
+  const refreshToken = signRefresh(userId);
+  return {
+    id: crypto.randomUUID(),
+    token: refreshToken,
+    tokenHash: refreshTokenHash(refreshToken),
+    expiresAt: refreshExpiry(),
+    familyId,
+    ...sessionMetadata(req),
+  };
+}
+
+async function createRefreshSession(userId: string, req: Request): Promise<ReturnType<typeof buildRefreshSession>> {
+  const session = buildRefreshSession(userId, req);
   const now = new Date();
   const revokedRetention = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-  await prisma.$transaction([
-    prisma.refreshSession.deleteMany({
+  await prisma.$transaction(async tx => {
+    await tx.refreshSession.deleteMany({
       where: {
         userId,
         OR: [
@@ -219,16 +279,33 @@ async function createRefreshSession(userId: string): Promise<string> {
           { revokedAt: { lt: revokedRetention } },
         ],
       },
-    }),
-    prisma.refreshSession.create({
+    });
+    await tx.refreshSession.create({
       data: {
+        id: session.id,
         userId,
         tokenHash: session.tokenHash,
         expiresAt: session.expiresAt,
+        familyId: session.familyId,
+        deviceName: session.deviceName,
+        platform: session.platform,
+        lastSeenAt: now,
       },
-    }),
-  ]);
-  return session.token;
+    });
+    const active = await tx.refreshSession.findMany({
+      where: { userId, revokedAt: null, expiresAt: { gt: now } },
+      orderBy: { createdAt: 'desc' },
+      skip: 10,
+      select: { id: true },
+    });
+    if (active.length > 0) {
+      await tx.refreshSession.updateMany({
+        where: { id: { in: active.map(item => item.id) } },
+        data: { revokedAt: now },
+      });
+    }
+  });
+  return session;
 }
 
 function getRefreshToken(req: Request): string | null {
@@ -320,7 +397,11 @@ router.post('/login', asyncHandler(async (req, res) => {
     return;
   }
   if (user.deletedAt) {
-    res.status(401).json({ code: 'INVALID_CREDENTIALS', error: 'Invalid email or password' });
+    res.status(403).json({
+      code: 'ACCOUNT_PENDING_DELETION',
+      error: 'Account is pending deletion',
+      deleteScheduledFor: user.deleteScheduledFor?.toISOString() ?? null,
+    });
     return;
   }
   if (!user.emailVerifiedAt) {
@@ -341,6 +422,120 @@ router.post('/login', asyncHandler(async (req, res) => {
   }
   const loggedInUser = await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
   await issueSession(loggedInUser, req, res);
+}));
+
+// POST /auth/reauthenticate — issue a ten-minute grant for sensitive actions.
+router.post('/reauthenticate', authMiddleware, asyncHandler(async (req, res) => {
+  const userId = (req as AuthRequest).userId!;
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user || user.deletedAt || !password || !(await bcrypt.compare(password, user.password))) {
+    res.status(401).json({ code: 'INVALID_CREDENTIALS', error: 'Password is incorrect' });
+    return;
+  }
+  const grant = jwt.sign({
+    userId,
+    purpose: 'sensitive',
+    passwordChangedAt: user.passwordChangedAt.getTime(),
+  }, process.env.JWT_ACCESS_SECRET!, { expiresIn: '10m' });
+  res.json({ grant, expiresInSeconds: 600 });
+}));
+
+router.post('/password-reset/request', asyncHandler(async (req, res) => {
+  const email = normalizeEmail(typeof req.body?.email === 'string' ? req.body.email : '');
+  if (!(await checkRateLimit(clientKey(req, 'password-reset-request', email), 5))) {
+    res.status(429).json({ code: 'RATE_LIMITED', error: 'Too many password reset requests' });
+    return;
+  }
+  if (isValidEmail(email)) {
+    const user = await prisma.user.findUnique({ where: { email }, select: { deletedAt: true } });
+    if (user && !user.deletedAt) {
+      try {
+        const code = await createPasswordCode(email, 'password-reset');
+        res.status(202).json({ ok: true, ...(process.env.NODE_ENV !== 'production' ? { devCode: code } : {}) });
+        return;
+      } catch (error) {
+        console.error('TaskFlow password reset delivery failed:', error);
+      }
+    }
+  }
+  res.status(202).json({ ok: true });
+}));
+
+router.post('/password-reset/confirm', asyncHandler(async (req, res) => {
+  const email = normalizeEmail(typeof req.body?.email === 'string' ? req.body.email : '');
+  const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
+  const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+  if (!(await checkRateLimit(clientKey(req, 'password-reset-confirm', email), 10))) {
+    res.status(429).json({ code: 'RATE_LIMITED', error: 'Too many password reset attempts' });
+    return;
+  }
+  if (!isValidEmail(email) || !/^\d{6}$/.test(code)
+    || newPassword.length < 8 || newPassword.length > 128 || !/[A-Za-z]/.test(newPassword) || !/\d/.test(newPassword)) {
+    res.status(400).json({ code: 'INVALID_PASSWORD_RESET', error: 'Invalid password reset request' });
+    return;
+  }
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (!user || user.deletedAt || !(await consumePasswordCode(email, code))) {
+    res.status(400).json({ code: 'INVALID_PASSWORD_RESET', error: 'Invalid or expired reset code' });
+    return;
+  }
+  const now = new Date();
+  const password = await bcrypt.hash(newPassword, 12);
+  await prisma.$transaction([
+    prisma.user.update({ where: { id: user.id }, data: { password, passwordChangedAt: now, authVersion: { increment: 1 } } }),
+    prisma.refreshSession.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: now } }),
+  ]);
+  res.json({ ok: true });
+}));
+
+router.post('/restore-account/request', asyncHandler(async (req, res) => {
+  const email = normalizeEmail(typeof req.body?.email === 'string' ? req.body.email : '');
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  if (!(await checkRateLimit(clientKey(req, 'restore-account-request', email), 5))) {
+    res.status(429).json({ code: 'RATE_LIMITED', error: 'Too many account restore requests' });
+    return;
+  }
+  const user = isValidEmail(email) ? await prisma.user.findUnique({ where: { email } }) : null;
+  if (user?.deletedAt && user.deleteScheduledFor && user.deleteScheduledFor > new Date()
+    && password && await bcrypt.compare(password, user.password)) {
+    try {
+      const code = await createPasswordCode(email, 'account-restore');
+      res.status(202).json({ ok: true, ...(process.env.NODE_ENV !== 'production' ? { devCode: code } : {}) });
+      return;
+    } catch (error) {
+      console.error('TaskFlow account restore delivery failed:', error);
+    }
+  }
+  res.status(202).json({ ok: true });
+}));
+
+router.post('/restore-account/confirm', asyncHandler(async (req, res) => {
+  const email = normalizeEmail(typeof req.body?.email === 'string' ? req.body.email : '');
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
+  const user = isValidEmail(email) ? await prisma.user.findUnique({ where: { email } }) : null;
+  if (!user?.deletedAt || !user.deleteScheduledFor || user.deleteScheduledFor <= new Date()
+    || !password || !/^\d{6}$/.test(code) || !(await bcrypt.compare(password, user.password))
+    || !(await consumePasswordCode(email, code))) {
+    res.status(400).json({ code: 'INVALID_ACCOUNT_RESTORE', error: 'Invalid or expired account restore request' });
+    return;
+  }
+  const restored = await prisma.$transaction(async tx => {
+    const restoredUser = await tx.user.update({
+      where: { id: user.id },
+      data: { deletedAt: null, deleteScheduledFor: null, lastLoginAt: new Date() },
+    });
+    await tx.accountDeletionAudit.create({
+      data: {
+        userId: user.id,
+        emailHash: crypto.createHash('sha256').update(user.email).digest('hex'),
+        action: 'restored',
+      },
+    });
+    return restoredUser;
+  });
+  await issueSession(restored, req, res);
 }));
 
 // POST /auth/resend-verification
@@ -421,30 +616,47 @@ router.post('/refresh', asyncHandler(async (req, res) => {
       where: { tokenHash: refreshTokenHash(token) },
       include: { user: true },
     });
+    if (session?.revokedAt && session.rotatedAt && session.reuseGraceUntil && session.reuseGraceUntil > new Date()) {
+      res.status(409).json({ code: 'REFRESH_ROTATION_IN_PROGRESS', error: 'Refresh token was rotated by a concurrent request' });
+      return;
+    }
+    if (session?.revokedAt && session.rotatedAt) {
+      await prisma.refreshSession.updateMany({
+        where: { userId: session.userId, familyId: session.familyId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      res.status(401).json({ code: 'REFRESH_REUSE_DETECTED', error: 'Refresh token reuse detected' });
+      return;
+    }
     if (!session || session.userId !== payload.userId || session.revokedAt || session.expiresAt <= new Date() || session.user.deletedAt) {
       res.status(401).json({ error: 'Invalid or expired refresh token' });
       return;
     }
 
-    const accessToken = signAccess(payload.userId);
-    const nextSession = buildRefreshSession(payload.userId);
+    const nextSession = buildRefreshSession(payload.userId, req, session.familyId);
     const now = new Date();
     await prisma.$transaction(async (tx) => {
       const revoked = await tx.refreshSession.updateMany({
         where: { id: session.id, revokedAt: null },
-        data: { revokedAt: now, rotatedAt: now },
+        data: { revokedAt: now, rotatedAt: now, reuseGraceUntil: new Date(now.getTime() + REFRESH_ROTATION_GRACE_MS) },
       });
       if (revoked.count !== 1) {
-        throw new Error('Refresh token already rotated');
+        throw new RefreshRotationRaceError('Refresh token already rotated');
       }
       await tx.refreshSession.create({
         data: {
+          id: nextSession.id,
           userId: payload.userId,
           tokenHash: nextSession.tokenHash,
           expiresAt: nextSession.expiresAt,
+          familyId: nextSession.familyId,
+          deviceName: nextSession.deviceName,
+          platform: nextSession.platform,
+          lastSeenAt: now,
         },
       });
     });
+    const accessToken = signAccess(payload.userId, session.user.authVersion, nextSession.id);
     const refreshToken = nextSession.token;
     res.cookie(REFRESH_COOKIE, refreshToken, COOKIE_OPTS);
     res.json({
@@ -452,7 +664,11 @@ router.post('/refresh', asyncHandler(async (req, res) => {
       ...(includeRefreshTokenInBody(req) ? { refreshToken } : {}),
       user: userPayload(session.user),
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof RefreshRotationRaceError) {
+      res.status(409).json({ code: 'REFRESH_ROTATION_IN_PROGRESS', error: 'Refresh token was rotated by a concurrent request' });
+      return;
+    }
     res.status(401).json({ error: 'Invalid or expired refresh token' });
   }
 }));

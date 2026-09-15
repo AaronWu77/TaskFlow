@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CheckCircle2, Mail, Lock, Eye, EyeOff, Loader2, ShieldCheck } from 'lucide-react';
-import { ApiError, apiLogin, apiRegister, apiResendVerification, apiVerifyEmail, type AuthUser } from './api';
+import { ApiError, apiConfirmAccountRestore, apiConfirmPasswordReset, apiLogin, apiRegister, apiRequestAccountRestore, apiRequestPasswordReset, apiResendVerification, apiVerifyEmail, type AuthUser } from './api';
 import { useTranslation } from 'react-i18next';
 
 interface AuthPageProps {
@@ -11,7 +11,7 @@ interface AuthPageProps {
 
 export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
   const { t } = useTranslation();
-  const [mode, setMode] = useState<'login' | 'register' | 'verify'>('login');
+  const [mode, setMode] = useState<'login' | 'register' | 'verify' | 'reset-request' | 'reset-confirm' | 'restore-confirm'>('login');
   const [email, setEmail] = useState(savedEmail || '');
   const [pendingEmail, setPendingEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -21,6 +21,7 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
   const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const passwordChecks = [
     { key: 'length', passed: password.length >= 8 },
@@ -36,7 +37,8 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
       if (err.code === 'INVALID_EMAIL') return t('auth.errors.invalidEmail');
       if (err.code === 'WEAK_PASSWORD') return t('auth.errors.weakPassword');
       if (err.code === 'INVALID_CREDENTIALS') return t('auth.errors.invalidCredentials');
-      if (err.code === 'EMAIL_NOT_VERIFIED' || err.code === 'INVALID_VERIFICATION_CODE') return t('auth.errors.invalidCode');
+      if (err.code === 'EMAIL_NOT_VERIFIED' || err.code === 'INVALID_VERIFICATION_CODE'
+        || err.code === 'INVALID_PASSWORD_RESET' || err.code === 'INVALID_ACCOUNT_RESTORE') return t('auth.errors.invalidCode');
       if (err.code === 'EMAIL_DELIVERY_FAILED') return t('auth.errors.emailDelivery');
       if (err.code === 'RATE_LIMITED' || err.status === 429) return t('auth.errors.rateLimited');
       if (err.code === 'NOT_FOUND' || err.code === 'API_VERSION_UNSUPPORTED' || err.status === 404 || err.status === 426) return t('auth.errors.apiIncompatible');
@@ -59,10 +61,39 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
     e.preventDefault();
     (document.activeElement as HTMLElement | null)?.blur();
     setError('');
+    setMessage('');
     setLoading(true);
     try {
       if (mode === 'verify') {
         const result = await apiVerifyEmail(pendingEmail || email.trim().toLowerCase(), verificationCode);
+        onAuth(result.user);
+        return;
+      }
+      if (mode === 'reset-request') {
+        const targetEmail = email.trim().toLowerCase();
+        const result = await apiRequestPasswordReset(targetEmail);
+        setPendingEmail(targetEmail);
+        setDevCode(result.devCode || '');
+        setVerificationCode(result.devCode || '');
+        setPassword('');
+        setMode('reset-confirm');
+        setMessage(t('auth.resetCodeSent'));
+        return;
+      }
+      if (mode === 'reset-confirm') {
+        if (passwordChecks.some(check => !check.passed)) {
+          setError(t('auth.errors.weakPassword'));
+          return;
+        }
+        await apiConfirmPasswordReset(pendingEmail || email.trim().toLowerCase(), verificationCode, password);
+        setMode('login');
+        setVerificationCode('');
+        setPassword('');
+        setMessage(t('auth.passwordResetSuccess'));
+        return;
+      }
+      if (mode === 'restore-confirm') {
+        const result = await apiConfirmAccountRestore(pendingEmail || email.trim().toLowerCase(), password, verificationCode);
         onAuth(result.user);
         return;
       }
@@ -81,6 +112,21 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
       }
       onAuth(result.user);
     } catch (err) {
+      if (mode === 'login' && err instanceof ApiError && err.code === 'ACCOUNT_PENDING_DELETION') {
+        try {
+          const targetEmail = email.trim().toLowerCase();
+          const result = await apiRequestAccountRestore(targetEmail, password);
+          setPendingEmail(targetEmail);
+          setDevCode(result.devCode || '');
+          setVerificationCode(result.devCode || '');
+          setMode('restore-confirm');
+          setMessage(t('auth.restoreCodeSent'));
+          return;
+        } catch (restoreError) {
+          setError(authErrorMessage(restoreError));
+          return;
+        }
+      }
       setError(authErrorMessage(err));
     } finally {
       setLoading(false);
@@ -129,14 +175,17 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
           </div>
           <h1 className="text-2xl font-bold tracking-tight">TaskFlow</h1>
           <p className="text-muted-foreground text-sm mt-1">
-            {mode === 'verify' ? t('auth.verifyTitle') : mode === 'login' ? t('auth.welcomeBack') : t('auth.createAccount')}
+            {mode === 'verify' ? t('auth.verifyTitle')
+              : mode === 'reset-request' || mode === 'reset-confirm' ? t('auth.resetPassword')
+                : mode === 'restore-confirm' ? t('auth.restoreAccount')
+                  : mode === 'login' ? t('auth.welcomeBack') : t('auth.createAccount')}
           </p>
         </div>
 
         {/* Card */}
         <div className="bg-card border border-border rounded-3xl p-6 shadow-sm">
           {/* Mode toggle */}
-          {mode !== 'verify' && <div className="flex bg-muted rounded-xl p-1 mb-6">
+          {(mode === 'login' || mode === 'register') && <div className="flex bg-muted rounded-xl p-1 mb-6">
             {(['login', 'register'] as const).map((m) => (
               <button
                 key={m}
@@ -154,14 +203,18 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
           </div>}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            {mode === 'verify' ? (
+            {(mode === 'verify' || mode === 'reset-confirm' || mode === 'restore-confirm') ? (
               <>
                 <div className="rounded-2xl bg-primary/10 p-4 text-sm text-muted-foreground">
                   <div className="mb-2 flex items-center gap-2 font-semibold text-foreground">
                     <ShieldCheck className="h-4 w-4 text-primary" />
-                    {t('auth.verifyHeading')}
+                    {mode === 'verify' ? t('auth.verifyHeading') : mode === 'reset-confirm' ? t('auth.resetHeading') : t('auth.restoreHeading')}
                   </div>
-                  <p>{t('auth.verifyDescription', { email: pendingEmail || email })}</p>
+                  <p>{mode === 'verify'
+                    ? t('auth.verifyDescription', { email: pendingEmail || email })
+                    : mode === 'reset-confirm'
+                      ? t('auth.resetDescription', { email: pendingEmail || email })
+                      : t('auth.restoreDescription', { email: pendingEmail || email })}</p>
                 </div>
 
                 <div className="space-y-2">
@@ -184,6 +237,28 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
                     </p>
                   )}
                 </div>
+                {(mode === 'reset-confirm' || mode === 'restore-confirm') && (
+                  <div className="space-y-2">
+                    <label htmlFor="auth-recovery-password" className="text-sm font-medium">
+                      {mode === 'reset-confirm' ? t('auth.newPassword') : t('auth.password')}
+                    </label>
+                    <input
+                      id="auth-recovery-password"
+                      type={showPassword ? 'text' : 'password'}
+                      autoComplete={mode === 'reset-confirm' ? 'new-password' : 'current-password'}
+                      required
+                      minLength={8}
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      className={inputClass}
+                    />
+                    {mode === 'reset-confirm' && passwordChecks.map(check => (
+                      <span key={check.key} className={`block text-xs ${check.passed ? 'text-emerald-600' : 'text-muted-foreground'}`}>
+                        {check.passed ? t('auth.passwordRules.passed') : t('auth.passwordRules.pending')} {t(`auth.passwordRules.${check.key}`)}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </>
             ) : (
               <>
@@ -206,7 +281,7 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
             </div>
 
             {/* Password */}
-            <div className="space-y-2">
+            {mode !== 'reset-request' && <div className="space-y-2">
               <label htmlFor="auth-password" className="text-sm font-medium">
                 {t('auth.password')} {mode === 'register' && <span className="text-muted-foreground font-normal">{t('auth.passwordHint')}</span>}
               </label>
@@ -241,7 +316,7 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
                   ))}
                 </div>
               )}
-            </div>
+            </div>}
               </>
             )}
 
@@ -259,6 +334,8 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
               )}
             </AnimatePresence>
 
+            {message && <p className="rounded-lg bg-primary/10 px-3 py-2 text-sm text-primary">{message}</p>}
+
             {/* Submit */}
             <button
               type="submit"
@@ -266,7 +343,11 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
               className="w-full py-3.5 bg-primary text-primary-foreground rounded-xl font-semibold text-base hover:bg-primary/90 transition-colors active:scale-95 disabled:opacity-60 disabled:scale-100 flex items-center justify-center gap-2 mt-2"
             >
               {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-              {mode === 'verify' ? t('auth.verifyAndContinue') : mode === 'login' ? t('auth.signIn') : t('auth.createAccount')}
+              {mode === 'verify' ? t('auth.verifyAndContinue')
+                : mode === 'reset-request' ? t('auth.sendResetCode')
+                  : mode === 'reset-confirm' ? t('auth.confirmReset')
+                    : mode === 'restore-confirm' ? t('auth.confirmRestore')
+                      : mode === 'login' ? t('auth.signIn') : t('auth.createAccount')}
             </button>
             {mode === 'verify' && (
               <div className="flex items-center justify-between gap-3 text-sm">
@@ -286,6 +367,16 @@ export function AuthPage({ onAuth, savedEmail }: AuthPageProps) {
                   {t('auth.backToSignIn')}
                 </button>
               </div>
+            )}
+            {mode === 'login' && (
+              <button type="button" onClick={() => { setMode('reset-request'); setError(''); setMessage(''); }} className="w-full text-sm font-semibold text-primary">
+                {t('auth.forgotPassword')}
+              </button>
+            )}
+            {(mode === 'reset-request' || mode === 'reset-confirm' || mode === 'restore-confirm') && (
+              <button type="button" onClick={() => { setMode('login'); setVerificationCode(''); setDevCode(''); setError(''); setMessage(''); }} className="w-full text-sm font-semibold text-muted-foreground">
+                {t('auth.backToSignIn')}
+              </button>
             )}
           </form>
         </div>

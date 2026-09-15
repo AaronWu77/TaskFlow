@@ -3,7 +3,7 @@
 
 generator client {
   provider      = "prisma-client-js"
-  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "linux-musl-arm64-openssl-3.0.x"]
 }
 
 datasource db {
@@ -20,16 +20,21 @@ model User {
   timezone String?
   locale String?
   deletedAt DateTime?
+  deleteScheduledFor DateTime?
+  passwordChangedAt DateTime @default(now())
+  authVersion Int @default(1)
   lastLoginAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   tasks     Task[]
   stats     UserStats?
+  dailyStats UserDailyStats[]
   syncState UserSyncState?
   devices   Device[]
   taskChanges TaskChange[]
   refreshSessions RefreshSession[]
   taskOperations TaskOperation[]
+  taskSeries TaskSeries[]
 }
 
 model Task {
@@ -42,13 +47,21 @@ model Task {
   tag             String?
   progress        Int      @default(0)
   dueDate         String?  // YYYY-MM-DD
+  dueDateTyped    DateTime? @db.Date
   reminderAt      String?  // ISO datetime
+  reminderAtTyped DateTime? @db.Timestamptz(3)
   repeatRule      String?  // none | daily | weekly | monthly
   repeatUntilDate String?  // YYYY-MM-DD
+  repeatUntilDateTyped DateTime? @db.Date
   seriesId        String?
+  seriesVersion   Int?
   occurrenceDate  String?  // YYYY-MM-DD; stable identity within a recurrence series
+  occurrenceDateTyped DateTime? @db.Date
   completedAt     String?  // ISO datetime set by server when completed
+  completedAtTyped DateTime? @db.Timestamptz(3)
   deletedAt       String?  // ISO datetime for soft delete / undo
+  deletedAtTyped  DateTime? @db.Timestamptz(3)
+  scheduleExcludedAt DateTime? @db.Timestamptz(3)
   sortOrder       Int      @default(0)
   version         Int      @default(1)
   lastChangedByDeviceId String?
@@ -58,12 +71,39 @@ model Task {
 
   @@index([userId, status])
   @@index([userId, dueDate])
+  @@index([userId, dueDateTyped])
   @@index([userId, completedAt])
+  @@index([userId, completedAtTyped])
   @@index([userId, deletedAt])
+  @@index([userId, deletedAtTyped])
   @@index([userId, sortOrder])
   @@index([userId, version])
   @@index([userId, seriesId])
+  @@index([userId, seriesId, scheduleExcludedAt])
   @@unique([userId, seriesId, occurrenceDate])
+}
+
+model TaskSeries {
+  id              String   @id @default(cuid())
+  userId          String
+  title           String
+  priority        String
+  estimateMinutes Int?
+  tag             String?
+  repeatRule      String
+  startDate       DateTime @db.Date
+  untilDate       DateTime @db.Date
+  timezone        String
+  reminderAt      DateTime? @db.Timestamptz(3)
+  generatedThrough DateTime? @db.Date
+  version         Int      @default(1)
+  deletedAt       DateTime? @db.Timestamptz(3)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, deletedAt])
+  @@index([userId, generatedThrough])
 }
 
 model Device {
@@ -72,11 +112,14 @@ model Device {
   name       String?
   platform   String?
   lastSeenAt DateTime @default(now())
+  lastAcknowledgedCursor Int @default(0)
+  requiresBootstrap Boolean @default(false)
   createdAt  DateTime @default(now())
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([lastSeenAt])
+  @@index([userId, lastAcknowledgedCursor])
 }
 
 model UserSyncState {
@@ -135,6 +178,19 @@ model UserStats {
   @@index([userId])
 }
 
+model UserDailyStats {
+  id        String   @id @default(cuid())
+  userId    String
+  date      String
+  count     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId, date])
+}
+
 model RefreshSession {
   id        String    @id @default(cuid())
   userId    String
@@ -143,10 +199,40 @@ model RefreshSession {
   revokedAt DateTime?
   createdAt DateTime  @default(now())
   rotatedAt DateTime?
+  reuseGraceUntil DateTime?
+  familyId  String
+  deviceName String?
+  platform String?
+  lastSeenAt DateTime @default(now())
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([expiresAt])
+  @@index([userId, familyId])
+  @@index([userId, lastSeenAt])
+  @@index([reuseGraceUntil])
+}
+
+model PasswordReset {
+  email     String   @id
+  codeHash  String
+  expiresAt DateTime
+  attempts  Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@index([expiresAt])
+}
+
+model AccountDeletionAudit {
+  id          String   @id @default(cuid())
+  userId      String
+  emailHash   String
+  action      String
+  scheduledFor DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
 }
 
 model EmailVerification {

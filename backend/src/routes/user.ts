@@ -1,8 +1,11 @@
 import { Router, Response, NextFunction, RequestHandler } from 'express';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import { recomputeUserStats } from '../services/stats';
+import { rebuildUserStats, recomputeUserStats } from '../services/stats';
 import { prisma } from '../prisma-client';
 import { isValidTimeZone } from '../date-utils';
+import { sensitiveAuthMiddleware } from '../middleware/sensitive-auth';
+import bcrypt from 'bcryptjs';
+import crypto from 'node:crypto';
 
 const router = Router();
 
@@ -38,7 +41,7 @@ router.patch('/preferences', asyncHandler(async (req, res) => {
     },
     select: { id: true, email: true, emailVerifiedAt: true, displayName: true, timezone: true, locale: true },
   });
-  if (timezone !== undefined) await recomputeUserStats(prisma, req.userId!);
+  if (timezone !== undefined) await rebuildUserStats(prisma, req.userId!);
   res.json(user);
 }));
 
@@ -64,38 +67,89 @@ router.get('/export', asyncHandler(async (req, res) => {
     return;
   }
 
-  const [tasks, stats] = await Promise.all([
+  const [tasks, taskSeries, stats, dailyStats, devices, sessions, syncState] = await Promise.all([
     prisma.task.findMany({
       where: { userId: req.userId! },
       orderBy: { createdAt: 'asc' },
     }),
+    prisma.taskSeries.findMany({
+      where: { userId: req.userId! },
+      orderBy: { createdAt: 'asc' },
+    }),
     prisma.userStats.findUnique({ where: { userId: req.userId! } }),
+    prisma.userDailyStats.findMany({
+      where: { userId: req.userId! },
+      orderBy: { date: 'asc' },
+      select: { date: true, count: true },
+    }),
+    prisma.device.findMany({
+      where: { userId: req.userId! },
+      orderBy: { lastSeenAt: 'desc' },
+      select: { id: true, name: true, platform: true, createdAt: true, lastSeenAt: true },
+    }),
+    prisma.refreshSession.findMany({
+      where: { userId: req.userId! },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, familyId: true, deviceName: true, platform: true, createdAt: true, lastSeenAt: true, expiresAt: true, revokedAt: true },
+    }),
+    prisma.userSyncState.findUnique({
+      where: { userId: req.userId! },
+      select: { nextSeq: true, taskOrderVersion: true },
+    }),
   ]);
 
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="taskflow-export-${new Date().toISOString().slice(0, 10)}.json"`);
-  res.json({
-    exportedAt: new Date().toISOString(),
+  const exportedAt = new Date().toISOString();
+  const exportData = {
+    exportSchemaVersion: 2,
+    appVersion: process.env.APP_VERSION || 'unknown',
+    exportedAt,
+    timezone: user.timezone || 'UTC',
     user,
     stats,
+    dailyStats,
     tasks,
+    taskSeries,
+    devices,
+    sessions,
+    sync: syncState ? { currentCursor: syncState.nextSeq - 1, taskOrderVersion: syncState.taskOrderVersion } : null,
+  };
+  const checksum = crypto.createHash('sha256').update(JSON.stringify(exportData)).digest('hex');
+  res.json({
+    ...exportData,
+    checksum: { algorithm: 'sha256', value: checksum, covers: 'all top-level fields except checksum and jsonSchema' },
+    jsonSchema: 'https://taskflow.top/schemas/export-v2.json',
   });
 }));
 
-// DELETE /user/account — delete current account and all related data
-router.delete('/account', asyncHandler(async (req, res) => {
+// DELETE /user/account — schedule deletion after a recovery grace period.
+router.delete('/account', sensitiveAuthMiddleware, asyncHandler(async (req, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.userId! } });
   if (!user || user.deletedAt) {
     res.status(404).json({ error: 'User not found' });
     return;
   }
 
+  const now = new Date();
+  const deleteScheduledFor = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
   await prisma.$transaction(async (tx) => {
     await tx.refreshSession.updateMany({
       where: { userId: req.userId!, revokedAt: null },
-      data: { revokedAt: new Date() },
+      data: { revokedAt: now },
     });
-    await tx.user.delete({ where: { id: req.userId! } });
+    await tx.user.update({
+      where: { id: req.userId! },
+      data: { deletedAt: now, deleteScheduledFor, authVersion: { increment: 1 } },
+    });
+    await tx.accountDeletionAudit.create({
+      data: {
+        userId: user.id,
+        emailHash: crypto.createHash('sha256').update(user.email).digest('hex'),
+        action: 'scheduled',
+        scheduledFor: deleteScheduledFor,
+      },
+    });
   });
 
   res.clearCookie('taskflow_refresh', {
@@ -103,7 +157,58 @@ router.delete('/account', asyncHandler(async (req, res) => {
     secure: process.env.COOKIE_SECURE === 'true',
     sameSite: 'lax',
   });
-  res.status(204).send();
+  res.json({ deletedAt: now.toISOString(), deleteScheduledFor: deleteScheduledFor.toISOString() });
+}));
+
+router.patch('/password', sensitiveAuthMiddleware, asyncHandler(async (req, res) => {
+  const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+  if (newPassword.length < 8 || newPassword.length > 128 || !/[A-Za-z]/.test(newPassword) || !/\d/.test(newPassword)) {
+    res.status(400).json({ code: 'WEAK_PASSWORD', error: 'Password must be 8-128 characters and include a letter and a number' });
+    return;
+  }
+  const now = new Date();
+  const password = await bcrypt.hash(newPassword, 12);
+  await prisma.$transaction([
+    prisma.user.update({ where: { id: req.userId! }, data: { password, passwordChangedAt: now, authVersion: { increment: 1 } } }),
+    prisma.refreshSession.updateMany({ where: { userId: req.userId!, revokedAt: null }, data: { revokedAt: now } }),
+  ]);
+  res.json({ ok: true });
+}));
+
+router.get('/sessions', asyncHandler(async (req, res) => {
+  const now = new Date();
+  const sessions = await prisma.refreshSession.findMany({
+    where: { userId: req.userId!, revokedAt: null, expiresAt: { gt: now } },
+    orderBy: { lastSeenAt: 'desc' },
+    select: { id: true, familyId: true, deviceName: true, platform: true, createdAt: true, lastSeenAt: true, expiresAt: true },
+  });
+  res.json({ sessions });
+}));
+
+router.delete('/sessions/:id', asyncHandler(async (req, res) => {
+  const sessionId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const revoked = await prisma.refreshSession.updateMany({
+    where: { id: sessionId, userId: req.userId!, revokedAt: null },
+    data: { revokedAt: new Date() },
+  });
+  if (revoked.count === 0) {
+    res.status(404).json({ code: 'SESSION_NOT_FOUND', error: 'Session not found' });
+    return;
+  }
+  res.json({ ok: true });
+}));
+
+router.delete('/sessions', sensitiveAuthMiddleware, asyncHandler(async (req, res) => {
+  const now = new Date();
+  const result = await prisma.$transaction(async tx => {
+    const revoked = await tx.refreshSession.updateMany({
+      where: { userId: req.userId!, revokedAt: null },
+      data: { revokedAt: now },
+    });
+    await tx.user.update({ where: { id: req.userId! }, data: { authVersion: { increment: 1 } } });
+    return revoked;
+  });
+  res.json({ ok: true, revokedCount: result.count });
 }));
 
 // GET /user/stats — get current user's streak and completion stats

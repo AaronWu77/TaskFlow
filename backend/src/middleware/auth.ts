@@ -14,12 +14,33 @@ export async function authMiddleware(req: AuthRequest, res: Response, next: Next
   }
   const token = header.slice(7);
   try {
-    const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET!) as { userId: string };
-    const user = await prisma.user.findUnique({
-      where: { id: payload.userId },
-      select: { id: true, deletedAt: true },
-    });
-    if (!user || user.deletedAt) {
+    const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET!) as {
+      userId: string;
+      authVersion?: number;
+      sessionId?: string;
+    };
+    const [user, session] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: payload.userId },
+        select: { id: true, deletedAt: true, authVersion: true },
+      }),
+      payload.sessionId
+        ? prisma.refreshSession.findFirst({
+          where: {
+            id: payload.sessionId,
+            userId: payload.userId,
+            revokedAt: null,
+            expiresAt: { gt: new Date() },
+          },
+          select: { id: true },
+        })
+        : Promise.resolve(null),
+    ]);
+    const versionMatches = user
+      && (payload.authVersion === user.authVersion
+        || (payload.authVersion === undefined && user.authVersion === 1));
+    const sessionMatches = payload.sessionId ? !!session : payload.authVersion === undefined;
+    if (!user || user.deletedAt || !versionMatches || !sessionMatches) {
       res.status(401).json({ error: 'Invalid or expired access token' });
       return;
     }

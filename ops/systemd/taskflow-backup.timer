@@ -1,0 +1,11 @@
+[Unit]
+Description=Run TaskFlow PostgreSQL backup daily
+
+[Timer]
+OnCalendar=*-*-* 02:20:00 Asia/Shanghai
+RandomizedDelaySec=15m
+Persistent=true
+Unit=taskflow-backup.service
+
+[Install]
+WantedBy=timers.target

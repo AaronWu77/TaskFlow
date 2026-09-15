@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: taskflow_integration
+      POSTGRES_USER: taskflow
+      POSTGRES_PASSWORD: taskflow_integration_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskflow -d taskflow_integration"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:39002:5432"
+
+  api:
+    profiles: ["containerized"]
+    build:
+      context: ..
+    environment:
+      DATABASE_URL: postgresql://taskflow:taskflow_integration_password@postgres:5432/taskflow_integration
+      JWT_ACCESS_SECRET: integration-access-secret-at-least-32-characters
+      JWT_REFRESH_SECRET: integration-refresh-secret-at-least-32-characters
+      JWT_ACCESS_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_IN: 7d
+      PORT: "3000"
+      NODE_ENV: development
+      COOKIE_SECURE: "false"
+      CORS_ORIGIN: http://127.0.0.1:39001
+      EMAIL_VERIFICATION_CONSOLE: "true"
+    command: sh -c "npx prisma migrate deploy --schema=prisma/schema.prisma && node dist/index.js"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:39001:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

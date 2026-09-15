@@ -1,11 +1,20 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: ${DOCKER_LOG_MAX_SIZE:-10m}
+    max-file: ${DOCKER_LOG_MAX_FILES:-5}
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-1g}
+    cpus: ${POSTGRES_CPU_LIMIT:-1.5}
+    logging: *default-logging
     environment:
       POSTGRES_DB: taskflow
       POSTGRES_USER: taskflow
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taskflow_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -13,16 +22,22 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 20s
+    stop_grace_period: 30s
 
   api:
+    image: ${TASKFLOW_API_IMAGE:-taskflow-api:local}
     build:
       context: ./backend
     restart: unless-stopped
+    mem_limit: ${API_MEMORY_LIMIT:-512m}
+    cpus: ${API_CPU_LIMIT:-1.0}
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://taskflow:${POSTGRES_PASSWORD:-taskflow_password}@postgres:5432/taskflow
+      DATABASE_URL: postgresql://taskflow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/taskflow
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?JWT_ACCESS_SECRET must be set}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET must be set}
       JWT_ACCESS_EXPIRES_IN: 15m
@@ -37,23 +52,44 @@ services:
       EMAIL_FROM: ${EMAIL_FROM:-TaskFlow <verify@taskflow.top>}
       EMAIL_VERIFICATION_WEBHOOK_URL: ${EMAIL_VERIFICATION_WEBHOOK_URL:-}
       EMAIL_VERIFICATION_WEBHOOK_TOKEN: ${EMAIL_VERIFICATION_WEBHOOK_TOKEN:-}
+      OPS_METRICS_TOKEN: ${OPS_METRICS_TOKEN:-}
+      APP_VERSION: ${APP_VERSION:-unknown}
     command: >
       sh -c "npx prisma migrate deploy --schema=prisma/schema.prisma && node dist/index.js"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 15s
 
   nginx:
+    image: ${TASKFLOW_WEB_IMAGE:-taskflow-web:local}
     build:
       context: .
       dockerfile: Dockerfile.web
       args:
         VITE_API_URL: /api/v1
     restart: unless-stopped
+    mem_limit: ${NGINX_MEMORY_LIMIT:-128m}
+    cpus: ${NGINX_CPU_LIMIT:-0.5}
+    logging: *default-logging
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./ssl:/etc/nginx/ssl:ro
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    stop_grace_period: 10s
 
 volumes:
   postgres_data:

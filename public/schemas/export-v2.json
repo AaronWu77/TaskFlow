@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://taskflow.top/schemas/export-v2.json",
+  "title": "TaskFlow account export v2",
+  "type": "object",
+  "required": ["exportSchemaVersion", "appVersion", "exportedAt", "timezone", "user", "tasks", "taskSeries", "dailyStats", "devices", "sessions", "checksum"],
+  "properties": {
+    "exportSchemaVersion": { "const": 2 },
+    "appVersion": { "type": "string" },
+    "exportedAt": { "type": "string", "format": "date-time" },
+    "timezone": { "type": "string" },
+    "user": { "type": "object" },
+    "stats": { "type": ["object", "null"] },
+    "tasks": { "type": "array", "items": { "type": "object" } },
+    "taskSeries": { "type": "array", "items": { "type": "object" } },
+    "dailyStats": { "type": "array", "items": { "type": "object", "required": ["date", "count"] } },
+    "devices": { "type": "array", "items": { "type": "object" } },
+    "sessions": { "type": "array", "items": { "type": "object" } },
+    "sync": { "type": ["object", "null"] },
+    "checksum": {
+      "type": "object",
+      "required": ["algorithm", "value", "covers"],
+      "properties": {
+        "algorithm": { "const": "sha256" },
+        "value": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "covers": { "const": "all top-level fields except checksum and jsonSchema" }
+      },
+      "additionalProperties": false
+    },
+    "jsonSchema": { "const": "https://taskflow.top/schemas/export-v2.json" }
+  },
+  "additionalProperties": false
+}

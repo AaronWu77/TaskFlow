@@ -9,6 +9,7 @@ import userRouter from './routes/user';
 import syncRouter from './routes/sync';
 import { prisma } from './prisma-client';
 import { runMaintenance } from './services/maintenance';
+import { metricsSnapshot, recordHttpMetric } from './services/metrics';
 
 const REQUIRED_SECRETS = ['JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET'] as const;
 for (const name of REQUIRED_SECRETS) {
@@ -28,6 +29,8 @@ app.use((req, res, next) => {
   res.locals.requestId = requestId;
   res.setHeader('X-Request-Id', requestId);
   res.on('finish', () => {
+    const durationMs = performance.now() - startedAt;
+    recordHttpMetric(res.statusCode, durationMs);
     console.log(JSON.stringify({
       level: 'info',
       event: 'http_request',
@@ -35,7 +38,7 @@ app.use((req, res, next) => {
       method: req.method,
       path: req.path,
       status: res.statusCode,
-      durationMs: Math.round((performance.now() - startedAt) * 10) / 10,
+      durationMs: Math.round(durationMs * 10) / 10,
     }));
   });
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -54,13 +57,33 @@ app.use(cors({
 app.use(express.json({ limit: '256kb' }));
 app.use(cookieParser());
 
-app.get('/health', async (_req, res) => {
+app.get(['/live', '/v1/live'], (_req, res) => {
+  res.json({ status: 'ok' });
+});
+
+async function readinessHandler(_req: express.Request, res: express.Response): Promise<void> {
   try {
     await prisma.$queryRaw`SELECT 1`;
     res.json({ status: 'ok' });
   } catch {
     res.status(503).json({ status: 'unavailable' });
   }
+}
+
+app.get(['/ready', '/v1/ready'], readinessHandler);
+app.get(['/health', '/v1/health'], readinessHandler);
+
+app.get(['/ops/metrics', '/v1/ops/metrics'], (req, res) => {
+  const expectedToken = process.env.OPS_METRICS_TOKEN;
+  if (!expectedToken) {
+    res.status(404).json({ code: 'NOT_FOUND' });
+    return;
+  }
+  if (req.get('Authorization') !== `Bearer ${expectedToken}`) {
+    res.status(401).json({ code: 'UNAUTHORIZED' });
+    return;
+  }
+  res.json(metricsSnapshot());
 });
 
 app.use('/auth', authRouter);

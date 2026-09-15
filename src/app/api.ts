@@ -2,15 +2,15 @@
 import { Capacitor } from '@capacitor/core';
 import { secureGet, secureRemove, secureSet } from './secure-storage';
 import { refreshHttpFailureKind, transportFailureKind } from './api-result-core.mjs';
+import { createAuthSessionManager, type AuthSessionContext } from './auth-session-core.mjs';
 
 const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || 'https://taskflow.top/api/v1';
 
 // Access token stored in memory only (not localStorage) — reduces XSS risk.
 // On page refresh, the token is gone; a silent refresh via stored refreshToken re-issues it.
-let accessToken: string | null = null;
-let authGeneration = 0;
+const authSessions = createAuthSessionManager();
 let logoutRequested = false;
-let refreshInFlight: Promise<RefreshResult> | null = null;
+let refreshInFlight: { generation: number; promise: Promise<RefreshResult> } | null = null;
 let refreshTokenMutationChain: Promise<void> = Promise.resolve();
 
 const REFRESH_TOKEN_KEY = 'taskflow_refresh_token';
@@ -20,6 +20,7 @@ export type RefreshResult =
 export type LogoutResult = { kind: 'revoked' | 'unauthorized' | 'offline' | 'transport' | 'timeout' | 'server-error'; status?: number; requestId?: string };
 const IS_NATIVE_PLATFORM = Capacitor.isNativePlatform();
 const REQUEST_TIMEOUT_MS = 15000;
+const SUPPORTED_SYNC_PROTOCOL_VERSION = 2;
 
 export class ApiError extends Error {
   status: number;
@@ -46,8 +47,30 @@ export function setAuthFailureHandler(fn: (() => void | Promise<void>) | null) {
 let onRefreshFailure: ((result: RefreshResult) => void) | null = null;
 export function setRefreshFailureHandler(fn: typeof onRefreshFailure) { onRefreshFailure = fn; }
 
-function setAccessToken(token: string | null) {
-  accessToken = token;
+function replaceAuthContext(userId: string | null, accessToken: string | null): AuthSessionContext | null {
+  if (!userId) {
+    authSessions.clear();
+    return null;
+  }
+  return authSessions.activate(userId, accessToken);
+}
+
+function updateAccessToken(context: AuthSessionContext, accessToken: string): boolean {
+  return authSessions.updateToken(context, accessToken);
+}
+
+function authSessionChanged(context: AuthSessionContext | null): boolean {
+  return !authSessions.isCurrent(context);
+}
+
+function assertAuthSession(context: AuthSessionContext | null): void {
+  if (authSessionChanged(context)) {
+    throw new ApiError('Authentication session changed while the request was running', 401, 'AUTH_SESSION_CHANGED');
+  }
+}
+
+export function prepareAuthSession(userId: string): void {
+  authSessions.prepare(userId);
 }
 
 async function getStoredRefreshToken(): Promise<string | null> {
@@ -80,20 +103,32 @@ function platformHeaders(): Record<string, string> {
   return IS_NATIVE_PLATFORM ? { 'X-TaskFlow-Platform': 'native' } : {};
 }
 
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = REQUEST_TIMEOUT_MS): Promise<Response> {
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = REQUEST_TIMEOUT_MS,
+  context: AuthSessionContext | null = null,
+): Promise<Response> {
   const controller = new AbortController();
+  const stopTracking = authSessions.track(context, controller);
+  const abortFromCaller = () => controller.abort();
+  if (init.signal?.aborted) controller.abort();
+  else init.signal?.addEventListener('abort', abortFromCaller, { once: true });
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(input, { ...init, signal: controller.signal });
   } finally {
     window.clearTimeout(timeout);
+    init.signal?.removeEventListener('abort', abortFromCaller);
+    stopTracking();
   }
 }
 
 /** Attempt a silent token refresh using the httpOnly refresh cookie plus a stored fallback token.
  *  The fallback keeps dev web and Capacitor sessions alive when cookies are not persisted. */
 async function performRefresh(): Promise<RefreshResult> {
-  const generation = authGeneration;
+  const context = authSessions.current();
+  const generation = authSessions.generation;
   try {
     if (!IS_NATIVE_PLATFORM) await setStoredRefreshToken(null);
     const storedRefreshToken = await getStoredRefreshToken();
@@ -104,7 +139,7 @@ async function performRefresh(): Promise<RefreshResult> {
       method: 'POST',
       credentials: 'include',
       headers,
-    });
+    }, REQUEST_TIMEOUT_MS, context);
     if (!res.ok) {
       const data = await res.json().catch(() => ({})) as { code?: string };
       const context = {
@@ -122,11 +157,19 @@ async function performRefresh(): Promise<RefreshResult> {
         requestId: res.headers.get('x-request-id') ?? undefined,
       };
     }
-    if (generation !== authGeneration) {
+    if (generation !== authSessions.generation || authSessionChanged(context)) {
       return { kind: 'unauthorized', code: 'AUTH_SESSION_CHANGED' };
     }
-    setAccessToken(data.accessToken);
+    if (context && data.user.id !== context.userId) {
+      return { kind: 'unauthorized', code: 'AUTH_USER_MISMATCH' };
+    }
+    if (context) {
+      if (!updateAccessToken(context, data.accessToken)) return { kind: 'unauthorized', code: 'AUTH_SESSION_CHANGED' };
+    } else {
+      replaceAuthContext(data.user.id, data.accessToken);
+    }
     if (data.refreshToken) await setStoredRefreshToken(data.refreshToken);
+    if (authSessions.current()?.userId !== data.user.id) return { kind: 'unauthorized', code: 'AUTH_SESSION_CHANGED' };
     return { kind: 'ok', user: data.user };
   } catch (error) {
     return { kind: transportFailureKind(error, navigator.onLine) };
@@ -134,15 +177,17 @@ async function performRefresh(): Promise<RefreshResult> {
 }
 
 export async function apiRefreshDetailed(): Promise<RefreshResult> {
-  if (logoutRequested && !refreshInFlight) {
+  if (logoutRequested) {
     return { kind: 'unauthorized', code: 'AUTH_LOGOUT_IN_PROGRESS' };
   }
-  if (!refreshInFlight) {
-    refreshInFlight = performRefresh().finally(() => {
-      refreshInFlight = null;
+  const generation = authSessions.generation;
+  if (!refreshInFlight || refreshInFlight.generation !== generation) {
+    const promise = performRefresh().finally(() => {
+      if (refreshInFlight?.promise === promise) refreshInFlight = null;
     });
+    refreshInFlight = { generation, promise };
   }
-  return refreshInFlight;
+  return refreshInFlight.promise;
 }
 
 export async function apiRefresh(): Promise<boolean> {
@@ -150,26 +195,29 @@ export async function apiRefresh(): Promise<boolean> {
 }
 
 export async function clearLocalAuthTokens(): Promise<void> {
-  authGeneration += 1;
-  setAccessToken(null);
+  replaceAuthContext(null, null);
   await setStoredRefreshToken(null);
 }
 
 export async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
+  const requestContext = authSessions.current();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string> | undefined),
   };
-  if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+  if (requestContext?.accessToken) headers.Authorization = `Bearer ${requestContext.accessToken}`;
 
-  let res = await fetchWithTimeout(`${BASE_URL}${path}`, { ...options, headers, credentials: 'include' });
+  let res = await fetchWithTimeout(`${BASE_URL}${path}`, { ...options, headers, credentials: 'include' }, REQUEST_TIMEOUT_MS, requestContext);
+  assertAuthSession(requestContext);
 
   // Auto-refresh on 401 and retry once
   if (res.status === 401) {
     const refreshResult = await apiRefreshDetailed();
-    if (refreshResult.kind === 'ok' && accessToken) {
-      headers['Authorization'] = `Bearer ${accessToken}`;
-      res = await fetchWithTimeout(`${BASE_URL}${path}`, { ...options, headers, credentials: 'include' });
+    assertAuthSession(requestContext);
+    if (refreshResult.kind === 'ok' && authSessions.current()?.accessToken) {
+      headers.Authorization = `Bearer ${authSessions.current()!.accessToken}`;
+      res = await fetchWithTimeout(`${BASE_URL}${path}`, { ...options, headers, credentials: 'include' }, REQUEST_TIMEOUT_MS, requestContext);
+      assertAuthSession(requestContext);
     } else if (refreshResult.kind === 'unauthorized') {
       await onAuthFailure?.();
     } else {
@@ -208,7 +256,7 @@ function isVerificationRequired(data: unknown): data is AuthVerificationRequired
   return !!data && typeof data === 'object' && (data as { requiresEmailVerification?: unknown }).requiresEmailVerification === true;
 }
 
-async function parseAuthResponse(res: Response, fallback: string): Promise<AuthResult> {
+async function parseAuthResponse(res: Response, fallback: string, requestGeneration: number): Promise<AuthResult> {
   const data = await res.json().catch(() => ({ error: fallback })) as {
     error?: string;
     code?: string;
@@ -226,33 +274,41 @@ async function parseAuthResponse(res: Response, fallback: string): Promise<AuthR
     return { requiresEmailVerification: true, user: data.user, devCode: data.devCode };
   }
   if (!data.accessToken || !data.user) throw new Error(fallback);
-  authGeneration += 1;
-  setAccessToken(data.accessToken);
+  if (requestGeneration !== authSessions.generation) {
+    throw new ApiError('Authentication session changed while signing in', 401, 'AUTH_SESSION_CHANGED');
+  }
+  const activated = replaceAuthContext(data.user.id, data.accessToken);
   await setStoredRefreshToken(data.refreshToken ?? null);
+  if (!activated || authSessionChanged(activated)) {
+    throw new ApiError('Authentication session changed while signing in', 401, 'AUTH_SESSION_CHANGED');
+  }
   return { user: data.user, accessToken: data.accessToken };
 }
 
 export async function apiLogin(email: string, password: string): Promise<AuthResult> {
+  const requestGeneration = authSessions.generation;
   const res = await fetchWithTimeout(`${BASE_URL}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...platformHeaders() },
     credentials: 'include',
     body: JSON.stringify({ email, password }),
   });
-  return parseAuthResponse(res, 'Login failed');
+  return parseAuthResponse(res, 'Login failed', requestGeneration);
 }
 
 export async function apiRegister(email: string, password: string): Promise<AuthResult> {
+  const requestGeneration = authSessions.generation;
   const res = await fetchWithTimeout(`${BASE_URL}/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...platformHeaders() },
     credentials: 'include',
     body: JSON.stringify({ email, password }),
   });
-  return parseAuthResponse(res, 'Registration failed');
+  return parseAuthResponse(res, 'Registration failed', requestGeneration);
 }
 
 export async function apiVerifyEmail(email: string, code: string): Promise<AuthSuccess> {
+  const requestGeneration = authSessions.generation;
   const res = await fetchWithTimeout(`${BASE_URL}/auth/verify-email`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...platformHeaders() },
@@ -264,9 +320,14 @@ export async function apiVerifyEmail(email: string, code: string): Promise<AuthS
     throw new ApiError(err.error || 'Email verification failed', res.status, err.code, err);
   }
   const data = await res.json() as { user: AuthUser; accessToken: string; refreshToken?: string };
-  authGeneration += 1;
-  setAccessToken(data.accessToken);
+  if (!data.accessToken || !data.user || requestGeneration !== authSessions.generation) {
+    throw new ApiError('Authentication session changed while verifying email', 401, 'AUTH_SESSION_CHANGED');
+  }
+  const activated = replaceAuthContext(data.user.id, data.accessToken);
   await setStoredRefreshToken(data.refreshToken ?? null);
+  if (!activated || authSessionChanged(activated)) {
+    throw new ApiError('Authentication session changed while verifying email', 401, 'AUTH_SESSION_CHANGED');
+  }
   return data;
 }
 
@@ -284,12 +345,60 @@ export async function apiResendVerification(email: string): Promise<{ ok: true; 
   return res.json() as Promise<{ ok: true; devCode?: string; alreadyVerified?: boolean }>;
 }
 
+export async function apiRequestPasswordReset(email: string): Promise<{ ok: true; devCode?: string }> {
+  const res = await fetchWithTimeout(`${BASE_URL}/auth/password-reset/request`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...platformHeaders() },
+    credentials: 'include',
+    body: JSON.stringify({ email }),
+  });
+  const data = await res.json().catch(() => ({})) as { ok?: true; devCode?: string; error?: string; code?: string };
+  if (!res.ok) throw new ApiError(data.error || 'Password reset request failed', res.status, data.code, data);
+  return { ok: true, ...(data.devCode ? { devCode: data.devCode } : {}) };
+}
+
+export async function apiConfirmPasswordReset(email: string, code: string, newPassword: string): Promise<void> {
+  const res = await fetchWithTimeout(`${BASE_URL}/auth/password-reset/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...platformHeaders() },
+    credentials: 'include',
+    body: JSON.stringify({ email, code, newPassword }),
+  });
+  const data = await res.json().catch(() => ({})) as { error?: string; code?: string };
+  if (!res.ok) throw new ApiError(data.error || 'Password reset failed', res.status, data.code, data);
+}
+
+export async function apiRequestAccountRestore(email: string, password: string): Promise<{ ok: true; devCode?: string }> {
+  const res = await fetchWithTimeout(`${BASE_URL}/auth/restore-account/request`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...platformHeaders() },
+    credentials: 'include',
+    body: JSON.stringify({ email, password }),
+  });
+  const data = await res.json().catch(() => ({})) as { ok?: true; devCode?: string; error?: string; code?: string };
+  if (!res.ok) throw new ApiError(data.error || 'Account restore request failed', res.status, data.code, data);
+  return { ok: true, ...(data.devCode ? { devCode: data.devCode } : {}) };
+}
+
+export async function apiConfirmAccountRestore(email: string, password: string, code: string): Promise<AuthSuccess> {
+  const requestGeneration = authSessions.generation;
+  const res = await fetchWithTimeout(`${BASE_URL}/auth/restore-account/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...platformHeaders() },
+    credentials: 'include',
+    body: JSON.stringify({ email, password, code }),
+  });
+  const result = await parseAuthResponse(res, 'Account restore failed', requestGeneration);
+  if ('requiresEmailVerification' in result) throw new Error('Account restore returned an invalid response');
+  return result;
+}
+
 export async function apiLogout(): Promise<LogoutResult> {
   logoutRequested = true;
   try {
-    if (refreshInFlight) await refreshInFlight.catch(() => undefined);
-    authGeneration += 1;
-    const refreshToken = await getStoredRefreshToken();
+    const refreshTokenPromise = getStoredRefreshToken();
+    replaceAuthContext(null, null);
+    const refreshToken = await refreshTokenPromise;
     const res = await fetchWithTimeout(`${BASE_URL}/auth/logout`, {
       method: 'POST',
       credentials: 'include',
@@ -302,7 +411,6 @@ export async function apiLogout(): Promise<LogoutResult> {
   } catch (error) {
     return { kind: transportFailureKind(error, navigator.onLine) };
   } finally {
-    setAccessToken(null);
     await setStoredRefreshToken(null);
     logoutRequested = false;
   }
@@ -324,6 +432,7 @@ export interface TaskDTO {
   repeatRule: string | null;
   repeatUntilDate: string | null;
   seriesId: string | null;
+  seriesVersion: number | null;
   occurrenceDate: string | null;
   completedAt: string | null;
   deletedAt: string | null;
@@ -354,6 +463,16 @@ export interface UserStatsDTO {
   todayCount: number;
 }
 
+export interface TaskSeriesDTO {
+  id: string;
+  userId: string;
+  repeatRule: string;
+  startDate: string;
+  untilDate: string;
+  version: number;
+  deletedAt: string | null;
+}
+
 export interface SyncBootstrapDTO {
   tasks: TaskDTO[];
   deletedTasks: TaskDTO[];
@@ -361,6 +480,8 @@ export interface SyncBootstrapDTO {
   currentCursor: number;
   taskOrderVersion: number;
   serverTime: string;
+  protocolVersion: number;
+  snapshotId: string;
 }
 
 export interface PendingSyncOperationDTO {
@@ -374,29 +495,51 @@ export interface PendingSyncOperationDTO {
 }
 
 export interface SyncPushResponseDTO {
-  accepted: Array<{ operationId: string; task?: TaskDTO; change?: SyncChangeDTO; clientTaskId?: string; order?: { order: Array<{ id: string; sortOrder: number }>; taskOrderVersion: number }; tombstone?: unknown; replayed?: boolean }>;
-  conflicts: Array<{ operationId: string; code: string; serverTask?: TaskDTO; serverVersion?: number; clientOperation?: PendingSyncOperationDTO; serverOrderVersion?: number; serverOrder?: Array<{ id: string; sortOrder: number }> }>;
+  accepted: Array<{ operationId: string; task?: TaskDTO; tasks?: TaskDTO[]; series?: TaskSeriesDTO; change?: SyncChangeDTO; clientTaskId?: string; order?: { order: Array<{ id: string; sortOrder: number }>; taskOrderVersion: number }; tombstone?: unknown; replayed?: boolean }>;
+  conflicts: Array<{ operationId: string; code: string; serverTask?: TaskDTO; serverTasks?: TaskDTO[]; serverSeries?: TaskSeriesDTO; serverVersion?: number; clientOperation?: PendingSyncOperationDTO; serverOrderVersion?: number; serverOrder?: Array<{ id: string; sortOrder: number }> }>;
   rejected: Array<{ operationId?: string; code: string; error: string }>;
   nextCursorHint: number;
   userStats?: UserStatsDTO | null;
 }
 
-export async function apiSyncBootstrap(): Promise<SyncBootstrapDTO> {
-  const res = await apiFetch('/sync/bootstrap');
+function assertPayloadUser(userId: string, payloadType: string): void {
+  if (!authSessions.current() || authSessions.current()!.userId !== userId) {
+    throw new ApiError(`${payloadType} belongs to a different authentication session`, 502, 'AUTH_USER_MISMATCH');
+  }
+}
+
+function assertSupportedSyncProtocol(version: unknown): void {
+  // Missing version is accepted only for the currently deployed legacy backend.
+  // An explicit newer/older incompatible version must never be reported as offline.
+  if (version !== undefined && version !== SUPPORTED_SYNC_PROTOCOL_VERSION) {
+    throw new ApiError('The sync protocol is not supported by this client', 426, 'SYNC_PROTOCOL_REQUIRED', { version });
+  }
+}
+
+export async function apiSyncBootstrap(deviceId?: string): Promise<SyncBootstrapDTO> {
+  const query = deviceId ? `?deviceId=${encodeURIComponent(deviceId)}` : '';
+  const res = await apiFetch(`/sync/bootstrap${query}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Failed to bootstrap sync' })) as { error?: string; code?: string };
     throw new ApiError(err.error || 'Failed to bootstrap sync', res.status, err.code, err);
   }
-  return res.json() as Promise<SyncBootstrapDTO>;
+  const data = await res.json() as SyncBootstrapDTO;
+  assertSupportedSyncProtocol(data.protocolVersion);
+  for (const task of [...data.tasks, ...data.deletedTasks]) assertPayloadUser(task.userId, 'Bootstrap task');
+  return data;
 }
 
-export async function apiPullChanges(cursor: number, limit = 500): Promise<{ changes: SyncChangeDTO[]; nextCursor: number; hasMore: boolean; serverTime: string }> {
-  const res = await apiFetch(`/sync?cursor=${encodeURIComponent(String(cursor))}&limit=${encodeURIComponent(String(limit))}`);
+export async function apiPullChanges(cursor: number, limit = 500, deviceId?: string): Promise<{ changes: SyncChangeDTO[]; nextCursor: number; hasMore: boolean; serverTime: string; protocolVersion: number }> {
+  const device = deviceId ? `&deviceId=${encodeURIComponent(deviceId)}` : '';
+  const res = await apiFetch(`/sync?cursor=${encodeURIComponent(String(cursor))}&limit=${encodeURIComponent(String(limit))}${device}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Failed to pull sync changes' })) as { error?: string; code?: string };
     throw new ApiError(err.error || 'Failed to pull sync changes', res.status, err.code, err);
   }
-  return res.json() as Promise<{ changes: SyncChangeDTO[]; nextCursor: number; hasMore: boolean; serverTime: string }>;
+  const data = await res.json() as { changes: SyncChangeDTO[]; nextCursor: number; hasMore: boolean; serverTime: string; protocolVersion: number };
+  assertSupportedSyncProtocol(data.protocolVersion);
+  for (const change of data.changes) assertPayloadUser(change.userId, 'Sync change');
+  return data;
 }
 
 export async function apiPushOperations(deviceId: string, operations: PendingSyncOperationDTO[]): Promise<SyncPushResponseDTO> {
@@ -413,7 +556,19 @@ export async function apiPushOperations(deviceId: string, operations: PendingSyn
     const err = await res.json().catch(() => ({ error: 'Failed to push sync operations' })) as { error?: string; code?: string };
     throw new ApiError(err.error || 'Failed to push sync operations', res.status, err.code, err);
   }
-  return res.json() as Promise<SyncPushResponseDTO>;
+  const data = await res.json() as SyncPushResponseDTO;
+  for (const accepted of data.accepted) {
+    if (accepted.task) assertPayloadUser(accepted.task.userId, 'Accepted task');
+    for (const task of accepted.tasks ?? []) assertPayloadUser(task.userId, 'Accepted series task');
+    if (accepted.series) assertPayloadUser(accepted.series.userId, 'Accepted task series');
+    if (accepted.change) assertPayloadUser(accepted.change.userId, 'Accepted change');
+  }
+  for (const conflict of data.conflicts) {
+    if (conflict.serverTask) assertPayloadUser(conflict.serverTask.userId, 'Conflicting task');
+    for (const task of conflict.serverTasks ?? []) assertPayloadUser(task.userId, 'Conflicting series task');
+    if (conflict.serverSeries) assertPayloadUser(conflict.serverSeries.userId, 'Conflicting task series');
+  }
+  return data;
 }
 
 // ── User Stats ──
@@ -437,8 +592,21 @@ export async function apiUpdateUserStats(): Promise<UserStatsDTO> {
   return res.json() as Promise<UserStatsDTO>;
 }
 
-export async function apiDeleteAccount(): Promise<void> {
-  const res = await apiFetch('/user/account', { method: 'DELETE' });
+export async function apiReauthenticate(password: string): Promise<string> {
+  const res = await apiFetch('/auth/reauthenticate', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  });
+  const data = await res.json().catch(() => ({})) as { grant?: string; error?: string; code?: string };
+  if (!res.ok || !data.grant) throw new ApiError(data.error || 'Reauthentication failed', res.status, data.code, data);
+  return data.grant;
+}
+
+export async function apiDeleteAccount(reauthGrant: string): Promise<void> {
+  const res = await apiFetch('/user/account', {
+    method: 'DELETE',
+    headers: { 'X-TaskFlow-Reauth': reauthGrant },
+  });
   if (!res.ok && res.status !== 404) {
     throw new Error('Failed to delete account');
   }
@@ -461,4 +629,46 @@ export async function apiUpdateUserPreferences(preferences: { timezone?: string;
     throw new ApiError(error.error || 'Failed to update preferences', res.status, error.code, error);
   }
   return res.json() as Promise<AuthUser>;
+}
+
+export interface AccountSessionDTO {
+  id: string;
+  familyId: string;
+  deviceName: string | null;
+  platform: string | null;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+}
+
+export async function apiGetSessions(): Promise<AccountSessionDTO[]> {
+  const res = await apiFetch('/user/sessions');
+  const data = await res.json().catch(() => ({})) as { sessions?: AccountSessionDTO[]; error?: string };
+  if (!res.ok || !Array.isArray(data.sessions)) throw new ApiError(data.error || 'Failed to load sessions', res.status);
+  return data.sessions;
+}
+
+export async function apiRevokeSession(sessionId: string): Promise<void> {
+  const res = await apiFetch(`/user/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+  if (!res.ok) throw new ApiError('Failed to revoke session', res.status);
+}
+
+export async function apiRevokeAllSessions(reauthGrant: string): Promise<void> {
+  const res = await apiFetch('/user/sessions', {
+    method: 'DELETE',
+    headers: { 'X-TaskFlow-Reauth': reauthGrant },
+  });
+  if (!res.ok) throw new ApiError('Failed to revoke sessions', res.status);
+  await clearLocalAuthTokens();
+}
+
+export async function apiChangePassword(newPassword: string, reauthGrant: string): Promise<void> {
+  const res = await apiFetch('/user/password', {
+    method: 'PATCH',
+    headers: { 'X-TaskFlow-Reauth': reauthGrant },
+    body: JSON.stringify({ newPassword }),
+  });
+  const data = await res.json().catch(() => ({})) as { error?: string; code?: string };
+  if (!res.ok) throw new ApiError(data.error || 'Failed to change password', res.status, data.code, data);
+  await clearLocalAuthTokens();
 }
