@@ -29,6 +29,8 @@ services:
     image: ${TASKFLOW_API_IMAGE:-taskflow-api:local}
     build:
       context: ./backend
+      args:
+        NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org/}
     restart: unless-stopped
     mem_limit: ${API_MEMORY_LIMIT:-512m}
     cpus: ${API_CPU_LIMIT:-1.0}
@@ -71,6 +73,7 @@ services:
       dockerfile: Dockerfile.web
       args:
         VITE_API_URL: /api/v1
+        NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org/}
     restart: unless-stopped
     mem_limit: ${NGINX_MEMORY_LIMIT:-128m}
     cpus: ${NGINX_CPU_LIMIT:-0.5}
