@@ -34,8 +34,36 @@ jobs:
         run: npm run build
       - name: Build backend
         run: npm --prefix backend run build
-      - name: Run unit and regression tests
-        run: node --test scripts/*.test.mjs
+      - name: Test account security
+        run: node --test scripts/account-security.test.mjs
+      - name: Test API result handling
+        run: node --test scripts/api-result-core.test.mjs
+      - name: Test auth session handling
+        run: node --test scripts/auth-session-core.test.mjs
+      - name: Test database constraints
+        run: node --test scripts/database-constraints.test.mjs
+      - name: Test date utilities
+        run: node --test scripts/date-utils.test.mjs
+      - name: Test local task repository
+        run: node --test scripts/local-task-repository.test.mjs
+      - name: Test metrics
+        run: node --test scripts/metrics.test.mjs
+      - name: Test operations scripts
+        run: node --test scripts/ops-scripts.test.mjs
+      - name: Test performance baseline
+        run: node --test scripts/performance-baseline.test.mjs
+      - name: Test phase 15 regression suite
+        run: node --test scripts/phase15-regression.test.mjs
+      - name: Test reorder feedback
+        run: node --test scripts/reorder-feedback.test.mjs
+      - name: Test sync core
+        run: node --test scripts/sync-core.test.mjs
+      - name: Test sync state core
+        run: node --test scripts/sync-state-core.test.mjs
+      - name: Test task core
+        run: node --test scripts/task-core.test.mjs
+      - name: Test task draft core
+        run: node --test scripts/task-draft-core.test.mjs
       - run: npm run test:integration
       - run: npm run test:ops-integration
       - run: npm run test:e2e
